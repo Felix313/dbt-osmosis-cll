@@ -24,6 +24,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+from dbt_osmosis.config import get_config
+
 if t.TYPE_CHECKING:
     from dbt.contracts.graph.nodes import ResultNode
     from dbt_osmosis.core.dbt_protocols import YamlRefactorContextProtocol
@@ -57,7 +59,9 @@ _RESULT_FIELDS = ("model", "column", "is_computed", "progenitor_model", "progeni
 # ---------------------------------------------------------------------------
 
 def _disk_cache_path(project_dir: str) -> Path:
-    return Path(project_dir) / "target" / "cll_cache.json"
+    cfg_path = get_config().cll_cache_path
+    p = Path(cfg_path)
+    return p if p.is_absolute() else Path(project_dir) / p
 
 
 def _load_disk_cache(project_dir: str) -> dict[str, t.Any]:
@@ -414,9 +418,13 @@ def get_column_origin(
     Returns ``(SCHEMA, MODEL_NAME, COLUMN_NAME)`` all uppercased, or ``None``
     when the chain cannot be resolved.
     """
-    if _depth > 30:
+    max_depth = get_config().cll_max_origin_depth
+    if _depth > max_depth:
         logger.warning(
-            "get_column_origin: max depth exceeded for %s.%s — possible cycle",
+            "CLL origin depth %d exceeded for %s.%s — treating as computed "
+            "(no description will be inherited). Raise cll-max-origin-depth in "
+            "[tool.dbt-osmosis-cll] if this column has legitimate deep lineage.",
+            max_depth,
             node.name,
             column_name,
         )
@@ -445,9 +453,13 @@ def _compute_column_origin(
     _depth: int = 0,
 ) -> tuple[str, str, str] | None:
     """Internal recursive implementation for :func:`get_column_origin`."""
-    if _depth > 30:
+    max_depth = get_config().cll_max_origin_depth
+    if _depth > max_depth:
         logger.warning(
-            "get_column_origin: max depth exceeded for %s.%s — possible cycle",
+            "CLL origin depth %d exceeded for %s.%s — treating as computed "
+            "(no description will be inherited). Raise cll-max-origin-depth in "
+            "[tool.dbt-osmosis-cll] if this column has legitimate deep lineage.",
+            max_depth,
             node.name,
             column_name,
         )
@@ -536,77 +548,53 @@ def get_origin_source_description(
     return None
 
 
-_ORIGIN_PREFIX = "Umbenannt von:"        # pure rename — col name differs, no transformation
-_COMPUTED_PREFIX = "Abgeleitet aus:"     # single-source computed transform (cast, function, etc.)
-_CALCULATED_PREFIX = "Berechnet in:"    # multi-source: no single traceable progenitor column
-_CBM_DERIVED_TAG = "CBM_DERIVED_IN:"    # legacy tag kept for backward-compat stripping
-
-# Separator + namespace prefix that visually separates provenance metadata from the description
-_ANNOTATION_SEPARATOR = "__________"
-_ANNOTATION_NAMESPACE = "CBM-ODP"
+_CBM_DERIVED_TAG = "CBM_DERIVED_IN:"    # legacy tag kept for backward-compat stripping only
 
 
 def _wrap_annotation(tag: str) -> str:
-    """Wrap a raw tag string with the standard separator and namespace prefix.
-
-    Result:
-        __________
-        CBM-ODP -> <tag>
-    """
-    return f"{_ANNOTATION_SEPARATOR}\n{_ANNOTATION_NAMESPACE} -> {tag}"
+    """Wrap a raw tag string with the configured separator and namespace prefix."""
+    cfg = get_config()
+    return f"{cfg.annotation_separator}\n{cfg.annotation_namespace} -> {tag}"
 
 
 def format_origin_tag(origin_col: str, origin_table: str, source_description: str | None) -> str:
-    """Return the full annotation block for a **renamed** column.
-
-    Format::
-
-        __________
-        CBM-ODP -> Umbenannt von: TABLE -> COL [— desc]
-    """
-    base = f"{_ORIGIN_PREFIX} {origin_table} -> {origin_col}"
+    """Return the full annotation block for a **renamed** column."""
+    base = f"{get_config().annotation_renamed} {origin_table} -> {origin_col}"
     if source_description:
         base = f"{base} — {source_description}"
     return _wrap_annotation(base)
 
 
 def format_computed_origin_tag(origin_col: str, origin_table: str, source_description: str | None) -> str:
-    """Return the full annotation block for a **computed/transformed** column.
-
-    Format::
-
-        __________
-        CBM-ODP -> Abgeleitet aus: TABLE -> COL [— desc]
-    """
-    base = f"{_COMPUTED_PREFIX} {origin_table} -> {origin_col}"
+    """Return the full annotation block for a **computed/transformed** column."""
+    base = f"{get_config().annotation_derived} {origin_table} -> {origin_col}"
     if source_description:
         base = f"{base} — {source_description}"
     return _wrap_annotation(base)
 
 
 def format_derived_tag(schema: str, model: str) -> str:
-    """Return the annotation block for a **multi-source derived** column.
-
-    Format::
-
-        __________
-        CBM-ODP -> Berechnet in: SCHEMA.MODEL
-    """
-    return _wrap_annotation(f"{_CALCULATED_PREFIX} {schema}.{model}")
+    """Return the annotation block for a **multi-source derived** column."""
+    return _wrap_annotation(f"{get_config().annotation_computed} {schema}.{model}")
 
 
 def strip_origin_tag(description: str) -> str:
-    """Remove any CBM-ODP annotation block from a description string.
+    """Remove any annotation block from a description string.
 
-    Strips from ``__________`` separator onwards so a fresh annotation can be
-    appended on the next run. Also handles legacy bare prefixes for backward compat.
+    Strips from the configured separator onwards so a fresh annotation can be
+    appended on the next run.  Also handles legacy bare prefixes for backward compat.
     """
-    # New format: strip from separator line
-    sep_idx = description.find(_ANNOTATION_SEPARATOR)
+    cfg = get_config()
+    sep_idx = description.find(cfg.annotation_separator)
     if sep_idx != -1:
         return description[:sep_idx].rstrip()
-    # Legacy bare prefixes (pre-separator format)
-    for marker in (_ORIGIN_PREFIX, _COMPUTED_PREFIX, _CALCULATED_PREFIX, _CBM_ORIGIN_TAG, _CBM_DERIVED_TAG):
+    # Legacy bare prefixes (pre-separator format) — always strip regardless of config
+    for marker in (
+        cfg.annotation_renamed, cfg.annotation_derived, cfg.annotation_computed,
+        _CBM_ORIGIN_TAG, _CBM_DERIVED_TAG,
+        # Hard-coded originals for backward compat if user changed the config strings
+        "Umbenannt von:", "Abgeleitet aus:", "Berechnet in:",
+    ):
         idx = description.find(marker)
         if idx != -1:
             description = description[:idx].rstrip()

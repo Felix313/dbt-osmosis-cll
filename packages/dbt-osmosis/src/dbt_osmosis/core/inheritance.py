@@ -172,7 +172,9 @@ def _build_node_ancestor_tree(
     # Prevent unbounded recursion
     if depth > max_depth:
         logger.warning(
-            ":rotating_light: Max depth %d exceeded for node %s, possible circular dependency",
+            "Ancestor tree depth %d exceeded for node %s — truncating here. "
+            "Descriptions from deeper ancestors will not propagate to this model. "
+            "This is unexpected in normal dbt projects; check for unusual graph depth.",
             max_depth,
             node.unique_id,
         )
