@@ -13,3 +13,14 @@ members = ["packages/dbt-osmosis", "packages/dbt-col-lineage"]
 [tool.uv]
 # Keep consistent with the osmosis package constraint
 override-dependencies = ["protobuf>=5.0,<6.0"]
+
+[tool.uv.sources]
+dbt-osmosis = { workspace = true }
+dbt-col-lineage = { workspace = true }
+
+# Install both workspace members when running `uv sync` from the root
+[dependency-groups]
+dev = [
+    "dbt-osmosis",
+    "dbt-col-lineage",
+]
