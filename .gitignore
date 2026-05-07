@@ -14,8 +14,8 @@ build/
 venv/
 env/
 
-# uv
-uv.lock
+# uv — lockfile is committed
+# uv.lock
 
 # dbt
 target/
