@@ -1,0 +1,63 @@
+name: "jaffle_shop_duckdb"
+
+config-version: 2
+version: "0.1"
+
+profile: "jaffle_shop"
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+analysis-paths: ["analysis"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_modules"
+  - "logs"
+
+require-dbt-version: [">=1.0.0", "<2.0.0"]
+
+# =============================================================================
+# dbt-osmosis Configuration
+# =============================================================================
+#
+# dbt-osmosis settings can be configured in multiple locations with the
+# following precedence (highest to lowest):
+#
+#   1. Column-level meta (in model YAML files)
+#   2. Node-level config.meta (dbt 1.10+)
+#   3. Node-level meta (in model YAML files)
+#   4. Node-level config.extra (in model YAML files)
+#   5. dbt-osmosis.yml (project-level defaults) - See ./dbt-osmosis.yml
+#   6. Project vars (below in this file)
+#   7. Fallback values (dbt-osmosis defaults)
+#
+# This demo project uses both dbt-osmosis.yml for comprehensive documentation
+# and vars below for core YAML formatting settings.
+#
+# For complete configuration reference, see: ./dbt-osmosis.yml
+# =============================================================================
+
+models:
+  jaffle_shop_duckdb:
+    +dbt-osmosis: "{node.database}/{node.schema}/{node.name}.yml"
+    materialized: table
+    staging:
+      materialized: view
+
+seeds:
+  jaffle_shop_duckdb:
+    +dbt-osmosis: "{node.database}/{node.schema}/{node.name}.yml"
+
+flags: {}
+
+# Project-level dbt-osmosis configuration (can be overridden in dbt-osmosis.yml)
+vars:
+  dbt-osmosis:
+    yaml_settings:
+      map_indent: 2
+      sequence_indent: 4
+      brace_single_entry_mapping_in_flow_sequence: true
+      explicit_start: true

@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dbt-col-lineage"
+version = "0.8.0"
+description = "Impact analysis for dbt projects using column-level data lineage"
+authors = [
+    {name = "Fszta"}
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "pydantic>=2.10.6,<3.0.0",
+    "sqlglot>=26.8.0,<27.0.0",
+    "dbt-core>=1.6.0",
+    "dbt-sqlite>=1.6.0",
+    "dbt-duckdb>=1.9.2,<2.0.0",
+    "duckdb>=1.2.1,<2.0.0",
+    "graphviz>=0.20.3,<0.21.0",
+    "fastapi>=0.115.12,<0.116.0",
+    "uvicorn>=0.34.0,<0.35.0",
+]
+
+[project.scripts]
+dbt-col-lineage = "dbt_column_lineage.cli.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4,<9.0.0",
+    "mypy>=1.15.0,<2.0.0",
+    "black>=24.10.0",
+    "ruff>=0.8.4",
+    "mkdocs-material>=9.5.0,<10.0.0",
+    "mkdocs-click>=0.8.1,<0.9.0",
+    "requests>=2.32.0,<3.0.0",
+    "types-requests>=2.32.0,<3.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+# Flat layout — dbt_column_lineage/ lives at the package root
+packages = ["dbt_column_lineage"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.9"
+files = ["dbt_column_lineage", "tests"]
+show_error_codes = true
+pretty = true
+explicit_package_bases = true
+namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = [
+    "sqlglot.*",
+    "dbt.*",
+    "duckdb.*",
+    "pytest.*",
+    "requests.*",
+    "pydantic.*",
+    "fastapi.*",
+    "uvicorn.*",
+    "click.*"
+]
+ignore_missing_imports = true

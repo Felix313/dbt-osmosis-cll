@@ -1,0 +1,15 @@
+# Workspace root — not installed as a package itself.
+# Run `uv sync` here to install both packages in editable mode.
+[project]
+name = "dbt-osmosis-cll-workspace"
+version = "0.0.0"
+description = "Monorepo: dbt-osmosis + dbt-col-lineage (internal forks)"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.uv.workspace]
+members = ["packages/dbt-osmosis", "packages/dbt-col-lineage"]
+
+[tool.uv]
+# Keep consistent with the osmosis package constraint
+override-dependencies = ["protobuf>=5.0,<6.0"]

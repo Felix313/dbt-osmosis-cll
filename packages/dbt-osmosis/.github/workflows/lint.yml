@@ -1,0 +1,37 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.1.1
+        with:
+          fetch-depth: 2
+      - name: Set up Python
+        uses: actions/setup-python@v5.1.0
+        with:
+          python-version: "3.10"
+      - name: Upgrade pip
+        run: |
+          pip install --constraint=.github/workflows/constraints.txt pip
+          pip --version
+      - name: Install uv
+        run: |
+          pip install --constraint=.github/workflows/constraints.txt uv
+          uv --version
+      - name: Install pre-commit
+        run: |
+          uv pip install --system pre-commit
+          pre-commit --version
+      - name: Install pre-commit hooks
+        run: |
+          pre-commit install
+      - name: Run pre-commit hooks
+        run: |
+          pre-commit run --all-files

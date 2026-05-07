@@ -1,0 +1,354 @@
+"""Clean public API for column lineage resolution.
+
+This is the stable contract consumed by dbt-osmosis and other integrators.
+Do not break the signatures of ``ColumnLineageResult`` or ``get_column_lineage``.
+"""
+from __future__ import annotations
+
+import logging
+import subprocess
+import sys
+from dataclasses import dataclass
+from typing import List, Literal, Optional
+
+from dbt_column_lineage.artifacts.exceptions import CompiledSqlMissingError
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ColumnLineageResult:
+    """Fully-resolved lineage for a single model column."""
+
+    model: str
+    """Short model name (e.g. ``stg_orders``)."""
+
+    column: str
+    """Column name (lowercase)."""
+
+    progenitor_model: Optional[str]
+    """Direct upstream model that provides this column's value, or None for source columns."""
+
+    progenitor_column: Optional[str]
+    """Column name in *progenitor_model*, or None."""
+
+    is_rename: bool
+    """True when this column is a pure alias of a single upstream column with no transformation."""
+
+    source_column: Optional[str]
+    """Original column name before the rename, or None when *is_rename* is False."""
+
+    is_computed: bool = False
+    """True when the column value is derived from an expression (arithmetic, function call,
+    CASE statement, etc.) rather than being a direct or renamed column reference.
+
+    Useful for lineage visualisation to distinguish:
+    - ``is_rename=True``  → pass-through with alias (rename)
+    - ``is_computed=True``  → derived/computed value (no traceable single source)
+    - both False → direct pass-through (same name, same value)
+    """
+
+    is_first_in_chain: bool = False
+    """True when this column has no traceable upstream dbt model and is not computed.
+
+    This marks columns that sit at the origin of the lineage graph — typically staging
+    models that pull directly from raw source tables.  Useful for visualisation to
+    distinguish "we traced it all the way back" from "lineage stops here".
+
+    A column is first-in-chain when ``progenitor_model is None`` and ``is_computed`` is
+    False (pure unknowns from parse failures also land here, so treat as a soft signal).
+    """
+
+
+def get_column_lineage(
+    manifest_path: str,
+    catalog_path: Optional[str] = None,
+    live_db: bool = False,
+    project_dir: Optional[str] = None,
+    profiles_dir: Optional[str] = None,
+    target: Optional[str] = None,
+    models: Optional[List[str]] = None,
+    dialect: Optional[str] = None,
+    compiled_sql_source: Literal["manifest", "target_dir", "auto_compile"] = "manifest",
+    include_ephemeral: bool = False,
+    _catalog_reader_override: Optional[object] = None,
+) -> List[ColumnLineageResult]:
+    """Resolve column-level lineage for dbt models.
+
+    Exactly one of *catalog_path* or *live_db=True* must be supplied to
+    provide column schema information.  Both cannot be set simultaneously.
+
+    Args:
+        manifest_path: Path to ``manifest.json``.
+        catalog_path: Path to ``catalog.json`` (mutually exclusive with *live_db*).
+        live_db: When True, query the live database for column schemas via the
+            dbt adapter (requires *profiles_dir* and a dbt project at *project_dir*).
+        project_dir: dbt project root directory.  Required when *live_db=True* or
+            *compiled_sql_source="auto_compile"*.
+        profiles_dir: Directory containing ``profiles.yml``.  Defaults to the
+            current directory when *live_db=True*.
+        target: dbt target profile name.  Uses profile default when omitted.
+        models: Optional list of model **names** (not node IDs) to restrict
+            results to.  When None, all models in the manifest are included.
+        dialect: SQL dialect override (e.g. ``"snowflake"``).  When None, the
+            adapter type from the manifest is used automatically.
+        compiled_sql_source: Controls how compiled SQL is obtained when the
+            manifest does not contain inline ``compiled_code``.
+
+            ``"manifest"`` *(default)* — only use inline compiled SQL embedded
+            by ``dbt compile`` or ``dbt run``.  Raises
+            :exc:`~dbt_column_lineage.artifacts.exceptions.CompiledSqlMissingError`
+            if the manifest was produced by ``dbt parse`` and contains no
+            compiled SQL.
+
+            ``"target_dir"`` — fall back to ``.sql`` files in
+            ``target/compiled/`` when inline compiled SQL is absent.
+
+            .. warning::
+                These files may be **stale** if models have changed since the
+                last ``dbt compile`` run.  Column lineage may be inaccurate.
+
+            ``"auto_compile"`` — run ``dbt compile`` automatically before
+            resolving lineage.  Requires *project_dir*.  The freshly compiled
+            manifest is then used, guaranteeing accuracy.
+
+    Returns:
+        List of :class:`ColumnLineageResult` — one entry per (model, column) pair
+        with resolved lineage.  Columns whose lineage cannot be parsed are omitted
+        silently (the parser logs a warning for each).
+
+    Raises:
+        ValueError: When both *catalog_path* and *live_db* are supplied, or
+            neither is supplied; or when *compiled_sql_source="auto_compile"*
+            but *project_dir* is not provided.
+        CompiledSqlMissingError: When *compiled_sql_source="manifest"* and the
+            manifest contains no inline compiled SQL.
+        RuntimeError: When the dbt adapter cannot be bootstrapped (live_db mode)
+            or when ``dbt compile`` fails (auto_compile mode).
+        FileNotFoundError: When *manifest_path* or *catalog_path* do not exist.
+    """
+    if _catalog_reader_override is None:
+        if catalog_path and live_db:
+            raise ValueError("Provide either catalog_path or live_db=True, not both.")
+        if not catalog_path and not live_db:
+            raise ValueError("Either catalog_path or live_db=True is required.")
+
+    if compiled_sql_source == "auto_compile":
+        if not project_dir:
+            raise ValueError(
+                "project_dir is required when compiled_sql_source='auto_compile'."
+            )
+        _run_dbt_compile(project_dir=project_dir, profiles_dir=profiles_dir, target=target)
+
+    # Pre-flight: check that the manifest has inline compiled SQL (unless caller
+    # opted into a fallback strategy).
+    if compiled_sql_source == "manifest":
+        _assert_compiled_sql_present(manifest_path)
+
+    use_target_dir = compiled_sql_source in ("target_dir", "auto_compile")
+    if use_target_dir and compiled_sql_source == "target_dir":
+        logger.warning(
+            "compiled_sql_source='target_dir': falling back to target/compiled/ files. "
+            "These files may be stale if models have changed since the last 'dbt compile' run. "
+            "Column lineage may be inaccurate."
+        )
+
+    catalog_reader = _catalog_reader_override or _build_catalog_reader(
+        manifest_path=manifest_path,
+        catalog_path=catalog_path,
+        live_db=live_db,
+        project_dir=project_dir,
+        profiles_dir=profiles_dir,
+        target=target,
+    )
+
+    from dbt_column_lineage.artifacts.registry import ModelRegistry
+
+    registry = ModelRegistry(
+        catalog_path=None,       # type: ignore[arg-type]  # overridden below
+        manifest_path=manifest_path,
+        adapter_override=dialect,
+        _catalog_reader_override=catalog_reader,
+        use_target_dir_fallback=use_target_dir,
+        stop_at_ephemeral=include_ephemeral,
+    )
+    registry.load()
+
+    # Build a set of terminal node names (sources + seeds) — columns whose progenitor
+    # is one of these are at the origin of the lineage graph (first-in-chain).
+    all_nodes = registry.get_models()
+    terminal_node_names: set = {
+        name for name, node in all_nodes.items()
+        if node.resource_type in ("source", "seed")
+    }
+
+    model_filter = {m.lower() for m in models} if models else None
+    results: List[ColumnLineageResult] = []
+
+    for model_name, model_obj in sorted(all_nodes.items()):
+        if model_filter and model_name not in model_filter:
+            continue
+        if model_obj.resource_type not in ("model",):
+            continue
+
+        for col_name, col_obj in sorted(model_obj.columns.items()):
+            if not col_obj.lineage:
+                results.append(
+                    ColumnLineageResult(
+                        model=model_name,
+                        column=col_name,
+                        progenitor_model=None,
+                        progenitor_column=None,
+                        is_rename=False,
+                        source_column=None,
+                        is_computed=False,
+                        is_first_in_chain=True,
+                    )
+                )
+                continue
+
+            # Take the first lineage entry (highest precedence after parsing)
+            lin = col_obj.lineage[0]
+            progenitor_model, progenitor_column = _resolve_progenitor(lin)
+            is_computed = lin.transformation_type == "derived"
+            # first-in-chain: no upstream dbt model (progenitor absent or is a raw source/seed)
+            is_first = (progenitor_model is None or progenitor_model in terminal_node_names) and not is_computed
+
+            results.append(
+                ColumnLineageResult(
+                    model=model_name,
+                    column=col_name,
+                    progenitor_model=progenitor_model,
+                    progenitor_column=progenitor_column,
+                    is_rename=lin.is_rename,
+                    source_column=lin.source_column,
+                    is_computed=is_computed,
+                    is_first_in_chain=is_first,
+                )
+            )
+
+    # Emit ephemeral model rows when include_ephemeral=True.
+    # Each __dbt__cte__<model_name> is stripped of its prefix to surface as
+    # a visible intermediate node in the lineage graph.
+    if include_ephemeral:
+        for cte_name, cte_cols in sorted(registry.get_ephemeral_lineage().items()):
+            # Strip dbt's injection prefix: __dbt__cte__model_name → model_name
+            ephemeral_model_name = cte_name.lstrip("_").replace("dbt__cte__", "", 1)
+            if model_filter and ephemeral_model_name not in model_filter:
+                continue
+            for col_name, lin in sorted(cte_cols.items()):
+                progenitor_model, progenitor_column = _resolve_progenitor(lin)
+                is_computed = lin.transformation_type == "derived"
+                is_first = (
+                    progenitor_model is None or progenitor_model in terminal_node_names
+                ) and not is_computed
+                results.append(
+                    ColumnLineageResult(
+                        model=ephemeral_model_name,
+                        column=col_name,
+                        progenitor_model=progenitor_model,
+                        progenitor_column=progenitor_column,
+                        is_rename=lin.is_rename,
+                        source_column=lin.source_column,
+                        is_computed=is_computed,
+                        is_first_in_chain=is_first,
+                    )
+                )
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_catalog_reader(
+    manifest_path: str,
+    catalog_path: Optional[str],
+    live_db: bool,
+    project_dir: Optional[str],
+    profiles_dir: Optional[str],
+    target: Optional[str],
+):
+    if live_db:
+        from dbt_column_lineage.artifacts.live_db import LiveDbCatalogReader
+
+        return LiveDbCatalogReader(
+            manifest_path=manifest_path,
+            project_dir=project_dir or ".",
+            profiles_dir=profiles_dir or ".",
+            target=target,
+        )
+
+    from dbt_column_lineage.artifacts.catalog import CatalogReader
+
+    return CatalogReader(catalog_path=catalog_path)  # type: ignore[arg-type]
+
+
+def _assert_compiled_sql_present(manifest_path: str) -> None:
+    """Raise CompiledSqlMissingError if the manifest has no inline compiled SQL.
+
+    Inspects the manifest before loading the registry so the error fires early
+    with a clear, actionable message instead of silently producing empty lineage.
+    """
+    from dbt_column_lineage.artifacts.manifest import ManifestReader
+
+    reader = ManifestReader(manifest_path)
+    reader.load()
+    if not reader.has_inline_compiled_sql():
+        raise CompiledSqlMissingError(
+            "The manifest at '{}' was generated by 'dbt parse' and contains no "
+            "compiled SQL. Column lineage cannot be resolved without compiled SQL.\n\n"
+            "Fix options:\n"
+            "  1. Run 'dbt compile' in your project, then retry with the default "
+            "compiled_sql_source='manifest'.\n"
+            "  2. Pass compiled_sql_source='auto_compile' and project_dir=<path> "
+            "to let dbt-column-lineage run 'dbt compile' automatically.\n"
+            "  3. Pass compiled_sql_source='target_dir' to use previously compiled "
+            "files under target/compiled/ (may be stale).".format(manifest_path)
+        )
+
+
+def _run_dbt_compile(
+    project_dir: str,
+    profiles_dir: Optional[str],
+    target: Optional[str],
+) -> None:
+    """Run ``dbt compile`` as a subprocess and raise RuntimeError on failure."""
+    cmd = [sys.executable, "-m", "dbt", "compile", "--project-dir", project_dir]
+    if profiles_dir:
+        cmd += ["--profiles-dir", profiles_dir]
+    if target:
+        cmd += ["--target", target]
+
+    logger.info("Running: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"'dbt compile' failed (exit {result.returncode}).\n"
+            f"stdout: {result.stdout[-2000:]}\n"
+            f"stderr: {result.stderr[-2000:]}"
+        )
+    logger.info("'dbt compile' completed successfully.")
+
+
+def _resolve_progenitor(lin) -> tuple[Optional[str], Optional[str]]:
+    """Extract (model, column) from the first source_column entry of a ColumnLineage.
+
+    Strips the ``__dbt__cte__`` prefix dbt injects for ephemeral models so that
+    progenitor_model refers to the human-readable model name.
+    """
+    if not lin.source_columns:
+        return None, None
+
+    src = next(iter(sorted(lin.source_columns)))
+    if "." not in src:
+        return None, src.lower()
+
+    parts = src.rsplit(".", 1)
+    model_part = parts[0].lower()
+    # Strip dbt's ephemeral CTE injection prefix
+    if model_part.startswith("__dbt__cte__"):
+        model_part = model_part[len("__dbt__cte__"):]
+    return model_part, parts[1].lower()

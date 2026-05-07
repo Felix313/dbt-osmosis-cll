@@ -1,0 +1,238 @@
+/**
+ * Utility functions for graph visualization
+ */
+
+// Icon function for different model types
+function getModelIcon(modelType) {
+    if (!modelType || modelType === 'undefined') {
+        modelType = 'model'; // Default to model if no type specified
+    }
+
+    const icons = {
+        source: "M3 5a9 3 0 1 0 18 0a9 3 0 1 0 -18 0 M3 5v14a9 3 0 0 0 18 0V5 M3 12a9 3 0 0 0 18 0",
+        seed: "M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z M14 2v6h6",
+        model: "M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z M12 22.5v-9 M3.3 7l8.7 5 8.7-5",
+        test: "M9 11a2 2 0 1 1 0-4 2 2 0 0 1 0 4z M13 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z M20 4a2 2 0 1 0 0 4 2 2 0 0 0 0-4z M4 20a2 2 0 1 0 0-4 2 2 0 0 0 0-4z",
+        exposure: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8",
+        snapshot: "M12 3a9 9 0 1 0 9 9 9 9 0 0 0-9-9zm0 16a7 7 0 1 1 7-7 7 7 0 0 1-7 7zm0-9a2 2 0 1 0 2 2 2 2 0 0 0-2-2z",
+        default: "M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z M12 22.5v-9 M3.3 7l8.7 5 8.7-5"
+    };
+
+    return icons[modelType] || icons.model; // Default to model icon if type not recognized
+}
+
+
+// Get color for data type tags - muted, professional palette
+function getTagColor(type) {
+    const typeStr = type.toLowerCase();
+    const defaultColor = '#94a3b8';
+
+    // Numeric types - blue
+    if (typeStr.includes('int') || typeStr.includes('decimal') ||
+        typeStr.includes('numeric') || typeStr.includes('double') ||
+        typeStr.includes('float')) {
+        return '#3b82f6';
+    }
+
+    // String types - emerald
+    if (typeStr.includes('varchar') || typeStr.includes('char') ||
+        typeStr.includes('text') || typeStr.includes('string')) {
+        return '#10b981';
+    }
+
+    // Date/time types - violet
+    if (typeStr.includes('date') || typeStr.includes('time')) {
+        return '#8b5cf6';
+    }
+
+    // Boolean types - rose
+    if (typeStr.includes('bool')) {
+        return '#f43f5e';
+    }
+
+    // Variant/json types - amber
+    if (typeStr.includes('variant') || typeStr.includes('json') || typeStr.includes('object')) {
+        return '#f59e0b';
+    }
+
+    return defaultColor;
+}
+
+function createEdgePath(d, state, config) {
+    if (!d || !d.source || !d.target) return '';
+
+    const sourcePos = state.columnPositions.get(d.source);
+    const targetPos = state.columnPositions.get(d.target);
+
+    if (!sourcePos || !targetPos) return '';
+
+    const sourceNode = state.nodeIndex.get(d.source);
+    const targetNode = state.nodeIndex.get(d.target);
+
+    if (!sourceNode || !targetNode) return '';
+
+    const sourceModelName = sourceNode.model;
+    const targetModelName = targetNode.model;
+    const sourceModel = state.models.find(m => m && m.name === sourceModelName);
+    const targetModel = state.models.find(m => m && m.name === targetModelName);
+
+    if (!sourceModel || !targetModel) return '';
+
+    // Check for valid positions
+    if (typeof sourceModel.x !== 'number' || isNaN(sourceModel.x) ||
+        typeof sourceModel.y !== 'number' || isNaN(sourceModel.y) ||
+        typeof targetModel.x !== 'number' || isNaN(targetModel.x) ||
+        typeof targetModel.y !== 'number' || isNaN(targetModel.y)) {
+        return '';
+    }
+
+    const leftToRight = sourceModel.x < targetModel.x;
+
+    let sourceX, sourceY, targetX, targetY;
+
+    sourceX = sourceModel.x + (leftToRight ? config.box.width - config.box.padding : config.box.padding);
+
+    if (sourceModel.columnsCollapsed) {
+        sourceY = sourceModel.y - sourceModel.height/2 + config.box.titleHeight + 14;
+    } else {
+        sourceY = sourcePos.y;
+    }
+
+    targetX = targetModel.x + (leftToRight ? config.box.padding : config.box.width - config.box.padding);
+
+    if (targetModel.columnsCollapsed) {
+        targetY = targetModel.y - targetModel.height/2 + config.box.titleHeight + 14;
+    } else {
+        targetY = targetPos.y;
+    }
+
+    if (typeof sourceX !== 'number' || isNaN(sourceX) ||
+        typeof sourceY !== 'number' || isNaN(sourceY) ||
+        typeof targetX !== 'number' || isNaN(targetX) ||
+        typeof targetY !== 'number' || isNaN(targetY)) {
+        return '';
+    }
+
+    const dx = Math.abs(targetX - sourceX);
+    const controlX1 = sourceX + (leftToRight ? dx * 0.4 : -dx * 0.4);
+    const controlX2 = targetX + (leftToRight ? -dx * 0.4 : dx * 0.4);
+
+    return `M${sourceX},${sourceY}
+            C${controlX1},${sourceY}
+             ${controlX2},${targetY}
+             ${targetX},${targetY}`;
+}
+
+function createExposureEdgePath(d, state, config) {
+    if (!d || !d.source || !d.target) return '';
+
+    const sourceNode = state.nodeIndex.get(d.source);
+    const targetNode = state.nodeIndex.get(d.target);
+
+    if (!sourceNode || !targetNode) return '';
+
+    let sourceX, sourceY, targetX, targetY;
+
+    if (sourceNode.type === 'column') {
+        const sourceModelName = sourceNode.model;
+        const sourceModel = state.models.find(m => m && m.name === sourceModelName);
+        if (!sourceModel) return '';
+
+        const sourcePos = state.columnPositions.get(d.source);
+        if (!sourcePos || typeof sourcePos.x !== 'number' || isNaN(sourcePos.x) ||
+            typeof sourcePos.y !== 'number' || isNaN(sourcePos.y)) return '';
+
+        sourceX = sourceModel.x + config.box.width - config.box.padding;
+        sourceY = sourceModel.columnsCollapsed
+            ? sourceModel.y - sourceModel.height/2 + config.box.titleHeight + 14
+            : sourcePos.y;
+    } else {
+        return '';
+    }
+
+    if (targetNode.type === 'exposure') {
+        const exposure = state.exposures.find(e => e && e.name === targetNode.model);
+        if (!exposure || typeof exposure.x !== 'number' || isNaN(exposure.x) ||
+            typeof exposure.y !== 'number' || isNaN(exposure.y) ||
+            typeof exposure.height !== 'number' || isNaN(exposure.height)) return '';
+        targetX = exposure.x + config.box.padding;
+        targetY = exposure.y;
+    } else {
+        return '';
+    }
+
+    if (typeof sourceX !== 'number' || isNaN(sourceX) ||
+        typeof sourceY !== 'number' || isNaN(sourceY) ||
+        typeof targetX !== 'number' || isNaN(targetX) ||
+        typeof targetY !== 'number' || isNaN(targetY)) {
+        return '';
+    }
+
+    const dx = Math.abs(targetX - sourceX);
+    const controlX1 = sourceX + dx * 0.4;
+    const controlX2 = targetX - dx * 0.4;
+
+    return `M${sourceX},${sourceY}
+            C${controlX1},${sourceY}
+             ${controlX2},${targetY}
+             ${targetX},${targetY}`;
+}
+
+let tooltip = null;
+
+function createTooltip() {
+    if (tooltip) return tooltip;
+
+    tooltip = d3.select('body')
+        .append('div')
+        .attr('class', 'column-tooltip')
+        .style('position', 'absolute')
+        .style('opacity', 0)
+        .style('pointer-events', 'none')
+        .style('background', '#1e293b')
+        .style('color', 'white')
+        .style('padding', '5px 8px')
+        .style('border-radius', '4px')
+        .style('font-size', '12px')
+        .style('font-family', "'JetBrains Mono', monospace")
+        .style('white-space', 'nowrap')
+        .style('z-index', '10000')
+        .style('box-shadow', '0 2px 8px rgba(0, 0, 0, 0.15)');
+
+    return tooltip;
+}
+
+function showTooltip(event, text) {
+    const tooltip = createTooltip();
+
+    // Get coordinates - handle both MouseEvent and D3 event objects
+    let x, y;
+    if (event.pageX !== undefined && event.pageY !== undefined) {
+        x = event.pageX;
+        y = event.pageY;
+    } else if (event.clientX !== undefined && event.clientY !== undefined) {
+        x = event.clientX + window.scrollX;
+        y = event.clientY + window.scrollY;
+    } else {
+        // Fallback - try to get from sourceEvent
+        const sourceEvent = event.sourceEvent || event;
+        x = (sourceEvent.pageX || sourceEvent.clientX || 0) + (window.scrollX || 0);
+        y = (sourceEvent.pageY || sourceEvent.clientY || 0) + (window.scrollY || 0);
+    }
+
+    tooltip
+        .text(text)
+        .style('left', (x + 10) + 'px')
+        .style('top', (y - 10) + 'px')
+        .transition()
+        .duration(200)
+        .style('opacity', 1);
+}
+
+function hideTooltip() {
+    if (tooltip) {
+        tooltip.transition()
+            .duration(200)
+            .style('opacity', 0);
+    }
+}

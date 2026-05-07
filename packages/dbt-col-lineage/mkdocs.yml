@@ -1,0 +1,73 @@
+site_name: DBT Column Lineage
+site_description: Impact analysis for dbt projects using column-level data lineage
+site_url: https://fszta.github.io/dbt-column-lineage/
+repo_url: https://github.com/Fszta/dbt-column-lineage
+repo_name: Fszta/dbt-column-lineage
+site_author: Fszta
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Fszta/dbt-column-lineage
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/dbt-col-lineage/
+  generator: false
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: deep purple
+  font:
+    text: Roboto
+    code: Roboto Mono
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.expand
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - toc.integrate
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/custom.css
+
+plugins:
+  - search:
+      lang: en
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+  - Features:
+    - Impact Analysis: features/impact-analysis.md
+  - Changelog: changelog.md

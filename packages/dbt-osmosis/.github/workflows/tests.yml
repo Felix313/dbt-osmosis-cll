@@ -1,0 +1,104 @@
+name: Tests
+
+on:
+  - push
+  - pull_request
+
+jobs:
+  tests:
+    name: Run pytest
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        dbt-version: ["1.8.0", "1.9.0", "1.10.0"]
+        exclude:
+          - python-version: "3.13"
+            dbt-version: "1.8.0"
+          - python-version: "3.13"
+            dbt-version: "1.9.0"
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4.1.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.1.0
+        with:
+          python-version: "${{ matrix.python-version }}"
+
+      - name: Upgrade pip
+        run: |
+          pip install --constraint=.github/workflows/constraints.txt pip
+          pip --version
+
+      - name: Install uv
+        run: |
+          pip install --constraint=.github/workflows/constraints.txt uv
+          uv --version
+
+      - name: Install required packages
+        run: | # install dev and openai extras to be able to parse manifest and run all tests
+          uv sync --extra dev --extra openai
+
+      - name: Install dbt runtime
+        run: |
+          uv pip install "dbt-core~=${{ matrix.dbt-version }}" "dbt-duckdb~=${{ matrix.dbt-version }}"
+
+      - name: Run basedpyright
+        run: |
+          uv run basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
+          python -c "import json, pathlib, sys; summary = json.loads(pathlib.Path('/tmp/dbt-osmosis-basedpyright.json').read_text())['summary']; print('basedpyright summary:', summary['errorCount'], 'errors,', summary['warningCount'], 'warnings'); sys.exit(1 if summary['errorCount'] else 0)"
+
+      - name: Parse manifest
+        run: |
+          uv run dbt parse --project-dir demo_duckdb --profiles-dir demo_duckdb -t test
+
+      - name: Run pytest
+        run: |
+          uv run pytest
+
+      - name: Run integration tests
+        working-directory: demo_duckdb
+        run: |
+          bash -x integration_tests.sh
+
+  latest-core-compat:
+    name: Validate latest dbt-core compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4.1.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Upgrade pip
+        run: |
+          pip install --constraint=.github/workflows/constraints.txt pip
+          pip --version
+
+      - name: Install uv
+        run: |
+          pip install --constraint=.github/workflows/constraints.txt uv
+          uv --version
+
+      - name: Validate latest dbt-core compatibility with published DuckDB adapter
+        run: |
+          SMOKE_ENV=$(mktemp -d)/dbt-osmosis-smoke
+          uv venv "$SMOKE_ENV"
+          uv pip install --python "$SMOKE_ENV/bin/python" "dbt-core~=1.11.0" "dbt-duckdb~=1.10.1" basedpyright pytest pytest-cov hypothesis openai .
+          export VIRTUAL_ENV="$SMOKE_ENV"
+          export PATH="$SMOKE_ENV/bin:$PATH"
+          basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
+          python -c "import json, pathlib, sys; summary = json.loads(pathlib.Path('/tmp/dbt-osmosis-basedpyright.json').read_text())['summary']; print('basedpyright summary:', summary['errorCount'], 'errors,', summary['warningCount'], 'warnings'); sys.exit(1 if summary['errorCount'] else 0)"
+          dbt --version
+          dbt parse --project-dir demo_duckdb --profiles-dir demo_duckdb -t test
+          dbt-osmosis --help
+          python -c "import dbt_osmosis; import dbt_osmosis.cli.main"
+          pytest -q
