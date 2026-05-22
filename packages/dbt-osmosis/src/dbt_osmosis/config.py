@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import configparser
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,11 @@ class OsmosisConfig:
 
     annotation_separator: str = "__________"
     """Visual separator line inserted above the annotation block."""
+
+    legacy_strip_markers: list[str] = field(default_factory=list)
+    """Project-specific legacy tag prefixes to strip from descriptions (e.g. old pre-CLL osmosis
+    tags). Configured via ``legacy-strip-markers`` in .osmosis as a comma-separated list.
+    Example: ``legacy-strip-markers = CBM_ORIGIN:, CBM_DERIVED_IN:``"""
 
     # ── Enrichment ───────────────────────────────────────────────────────────
     anchor_meta_key: str = "anchor-description"
@@ -259,7 +264,7 @@ def _load_config(start: Path) -> OsmosisConfig:
         section = parser[_SECTION]
         known = {f.replace("_", "-") for f in OsmosisConfig.__dataclass_fields__}
         # Add the short aliases that map to field names via custom key names in _load_config
-        known |= {"col-renamed-from", "col-derived-from", "col-computed-in"}
+        known |= {"col-renamed-from", "col-derived-from", "col-computed-in", "legacy-strip-markers"}
         unknown = set(section) - known
         if unknown:
             logger.warning(
@@ -284,6 +289,13 @@ def _load_config(start: Path) -> OsmosisConfig:
             except ValueError:
                 logger.warning(".osmosis: %s must be a boolean — using default %s.", key, default)
                 return default
+
+        def _strlist(key: str, default: list[str]) -> list[str]:
+            """Parse a comma-separated list of strings."""
+            raw = section.get(key)
+            if raw is None:
+                return default
+            return [s.strip() for s in raw.split(",") if s.strip()]
 
         def _patterns(key: str) -> list | None:
             """Parse a multi-line list of regex patterns; returns None if key absent."""
@@ -316,6 +328,7 @@ def _load_config(start: Path) -> OsmosisConfig:
             meta_key_renamed_from              = _str("col-renamed-from",     OsmosisConfig.meta_key_renamed_from),
             meta_key_derived_from              = _str("col-derived-from",     OsmosisConfig.meta_key_derived_from),
             meta_key_computed_in               = _str("col-computed-in",      OsmosisConfig.meta_key_computed_in),
+            legacy_strip_markers               = _strlist("legacy-strip-markers", OsmosisConfig.legacy_strip_markers),
         )
         logger.debug("Loaded dbt-osmosis-cll config from %s: %s", osmosis_file, cfg)
         return cfg

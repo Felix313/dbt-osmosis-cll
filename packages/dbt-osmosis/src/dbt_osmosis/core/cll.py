@@ -403,7 +403,7 @@ def get_model_columns_from_cll(
     }
 
 
-_CLL_COMPUTED_SENTINEL = "__cbm_computed__"
+_CLL_COMPUTED_SENTINEL = "__computed__"
 """Sentinel value placed in the parent map for columns with no traceable upstream.
 
 Two cases both receive this sentinel:
@@ -455,7 +455,9 @@ def build_parent_map(results: list[t.Any], node_name: str) -> dict[str, str]:
 # Origin tracing
 # ---------------------------------------------------------------------------
 
-_CBM_ORIGIN_TAG = "CBM_ORIGIN:"
+_LEGACY_STRIP_MARKERS: list[str] = []
+"""Project-specific legacy tag prefixes loaded from config at first call to strip_origin_tag.
+Do not use directly — access via get_config().legacy_strip_markers."""
 
 
 def _ensure_manifest_index(context: YamlRefactorContextProtocol) -> None:
@@ -640,7 +642,6 @@ def get_origin_source_description(
     return None
 
 
-_CBM_DERIVED_TAG = "CBM_DERIVED_IN:"    # legacy tag kept for backward-compat stripping only
 
 
 def _wrap_annotation(tag: str) -> str:
@@ -741,7 +742,8 @@ def strip_origin_tag(description: str) -> str:
         cfg.annotation_aggregate_from, cfg.annotation_aggregate_in,
         cfg.annotation_window_from, cfg.annotation_window_in,
         cfg.annotation_union, cfg.annotation_literal, cfg.annotation_generated,
-        _CBM_ORIGIN_TAG, _CBM_DERIVED_TAG,
+        # Project-specific legacy markers configured in .osmosis (legacy-strip-markers)
+        *cfg.legacy_strip_markers,
     ):
         idx = description.find(marker)
         if idx != -1:
@@ -749,6 +751,10 @@ def strip_origin_tag(description: str) -> str:
     return description
 
 
-def strip_all_cbm_tags(description: str) -> str:
-    """Remove all CBM annotation tags (current and legacy variants)."""
+def strip_annotation_tags(description: str) -> str:
+    """Remove all annotation tags (current format and project legacy markers)."""
     return strip_origin_tag(description)
+
+
+# Backward-compat alias — prefer strip_annotation_tags in new code.
+strip_all_cbm_tags = strip_annotation_tags
