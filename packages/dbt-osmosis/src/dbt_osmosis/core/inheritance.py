@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import typing as t
 from importlib import import_module
 from types import MappingProxyType
@@ -13,7 +12,6 @@ if t.TYPE_CHECKING:
 from dbt_osmosis.core import logger
 
 __all__ = [
-    "_apply_progenitor_overrides",
     "_build_column_knowledge_graph",
     "_build_graph_edge",
     "_build_node_ancestor_tree",
@@ -21,33 +19,11 @@ __all__ = [
     "_collect_column_variants",
     "_column_to_dict",
     "_find_matching_column",
-    "_get_inherited_metadata_from_progenitor",
     "_get_node_yaml",
-    "_get_progenitor_override",
     "_get_unrendered",
     "_merge_graph_node_data",
-    "get_and_clear_name_match_fallback",
+    "_read_ancestor_yaml_description",
 ]
-
-# ---------------------------------------------------------------------------
-# Name-match fallback accumulator
-# ---------------------------------------------------------------------------
-# Populated by _build_column_knowledge_graph whenever a column falls back to
-# name-matching because CLL returned no lineage data for it.  Cleared and
-# returned by get_and_clear_name_match_fallback() which is called by the
-# report_name_match_fallbacks pipeline step at the end of a run.
-_NAME_MATCH_FALLBACK: dict[str, list[str]] = {}
-
-
-def get_and_clear_name_match_fallback() -> dict[str, list[str]]:
-    """Return the accumulated name-match fallback log and clear it.
-
-    Keys are node unique_ids; values are sorted lists of column names that
-    used name-matching because CLL had no lineage data for them.
-    """
-    result = {k: list(v) for k, v in _NAME_MATCH_FALLBACK.items()}
-    _NAME_MATCH_FALLBACK.clear()
-    return result
 
 
 def _column_to_dict(column: t.Any, **kwargs: t.Any) -> dict[str, t.Any]:
@@ -80,75 +56,11 @@ def _initialize_column_knowledge(column: t.Any, node: ResultNode) -> dict[str, t
     """Normalize one local column into the knowledge-graph representation."""
     column_data = _column_to_dict(column, omit_none=True)
 
-    # Clear out self-referential progenitors left behind by prior runs.
-    if column_data.get("meta", {}).get("osmosis_progenitor") == node.unique_id:
-        column_data["meta"].pop("osmosis_progenitor", None)
-        if not column_data["meta"]:
-            column_data.pop("meta", None)
-
-    # Handle the config.meta path used by fusion_compat output.
-    if isinstance(column_data.get("config"), dict):
-        config_meta = column_data["config"].get("meta", {})
-        if config_meta.get("osmosis_progenitor") == node.unique_id:
-            config_meta.pop("osmosis_progenitor", None)
-            if not config_meta:
-                column_data["config"].pop("meta", None)
-            if not column_data["config"]:
-                column_data.pop("config", None)
-
-    # Match the existing graph-builder behavior by dropping empty/whitespace-only strings and empty lists.
+    # Match the existing graph-builder behaviorby dropping empty/whitespace-only strings and empty lists.
     return {
         k: v for k, v in column_data.items()
         if not (isinstance(v, str) and not v.strip()) and v not in ([], ())
     }
-
-
-def _strip_progenitor_override_controls(column_data: dict[str, t.Any]) -> None:
-    """Remove local override-control metadata before inheriting from another node."""
-    meta = column_data.get("meta")
-    if isinstance(meta, dict):
-        meta.pop("column_default_progenitor", None)
-        if not meta:
-            column_data.pop("meta", None)
-
-    config = column_data.get("config")
-    if isinstance(config, dict):
-        config_meta = config.get("meta")
-        if isinstance(config_meta, dict):
-            config_meta.pop("column_default_progenitor", None)
-            if not config_meta:
-                config.pop("meta", None)
-        if not config:
-            column_data.pop("config", None)
-
-
-def _preserve_column_progenitor_override(
-    graph_node: dict[str, t.Any],
-    node_yaml: t.Mapping[str, t.Any] | None,
-    column_name: str,
-) -> None:
-    """Keep the target column's override metadata so sync does not erase it."""
-    from dbt_osmosis.core.introspection import _find_first
-
-    if not node_yaml:
-        return
-
-    column_meta = _find_first(
-        node_yaml.get("columns", []),
-        lambda c: c.get("name") == column_name,
-        {},
-    )
-    override_value = column_meta.get("meta", {}).get("column_default_progenitor")
-    if override_value:
-        graph_node.setdefault("meta", {})["column_default_progenitor"] = override_value
-
-    config_override_value = (
-        column_meta.get("config", {}).get("meta", {}).get("column_default_progenitor")
-    )
-    if config_override_value:
-        graph_node.setdefault("config", {}).setdefault("meta", {})["column_default_progenitor"] = (
-            config_override_value
-        )
 
 
 def _build_node_ancestor_tree(
@@ -306,15 +218,6 @@ def _build_graph_edge(
 
     from dbt_osmosis.core.introspection import _get_setting_for_node
 
-    # Add progenitor to meta if configured
-    if _get_setting_for_node(
-        "add-progenitor-to-meta",
-        node,
-        name,
-        fallback=context.settings.add_progenitor_to_meta,
-    ):
-        graph_edge.setdefault("meta", {})["osmosis_progenitor"] = ancestor.unique_id
-
     # Use unrendered descriptions if configured
     if _get_setting_for_node(
         "use-unrendered-descriptions",
@@ -421,18 +324,11 @@ def _merge_graph_node_data(
     if merged_tags := (set(graph_edge.pop("tags", [])) | set(current_tags)):
         graph_edge["tags"] = list(merged_tags)
 
-    # Merge top-level meta, but preserve osmosis_progenitor from the first (farthest) generation
-    # The osmosis_progenitor should always point to the original source, not intermediate sources
+    # Merge top-level meta
     current_meta = graph_node.get("meta", {})
     edge_meta = graph_edge.pop("meta", {})
-
-    # Preserve existing osmosis_progenitor if it exists in current_meta
-    progenitor = current_meta.get("osmosis_progenitor")
     if merged_meta := {**current_meta, **edge_meta}:
         graph_edge["meta"] = merged_meta
-        # Restore the original progenitor if it existed
-        if progenitor:
-            graph_edge["meta"]["osmosis_progenitor"] = progenitor
 
     # Merge config-level meta and tags (handles data from fusion_compat mode)
     current_config = graph_node.get("config")
@@ -443,10 +339,7 @@ def _merge_graph_node_data(
         # Merge config.meta
         current_config_meta = current_config.get("meta", {})
         edge_config_meta = edge_config.pop("meta", {})
-        config_progenitor = current_config_meta.get("osmosis_progenitor")
         merged_config_meta = {**current_config_meta, **edge_config_meta}
-        if config_progenitor:
-            merged_config_meta["osmosis_progenitor"] = config_progenitor
         if merged_config_meta:
             edge_config["meta"] = merged_config_meta
         # Merge config.tags
@@ -465,170 +358,50 @@ def _merge_graph_node_data(
     graph_node.update(graph_edge)
 
 
-def _get_progenitor_override(
-    column_name: str,
-    node_yaml: t.Mapping[str, t.Any] | None,
+def _read_ancestor_yaml_description(
+    context: "YamlRefactorContextProtocol",
+    ancestor: ResultNode,
+    column_variants: list[str],
 ) -> str | None:
-    """Get the progenitor override for a column.
+    """Read a column's description directly from the YAML buffer for an ancestor node.
 
-    Checks for column-level override first (column_default_progenitor), then
-    model-level default (default_progenitor).
+    The YAML buffer reflects the on-disk state at osmosis startup — including any
+    pre-run enrichments (e.g. AML injection into staging YAMLs) — rather than the
+    in-memory manifest which is mutated by ``inherit_upstream_column_knowledge`` as
+    it processes earlier nodes in topological order.
 
-    Args:
-        column_name: Name of the column
-        node_yaml: The parsed YAML for the node
+    This is the core of CLL-guided description inheritance: CLL pins the correct
+    ancestor (avoiding multi-join ambiguity) and we read that ancestor's description
+    from the stable YAML buffer, not from the potentially-stale manifest node.
 
-    Returns:
-        The unique_id of the override progenitor, or None
-
+    Returns the description string if the column is found in the YAML, else ``None``.
+    When ``None`` is returned the caller falls back to the manifest-based description.
     """
-    from dbt_osmosis.core.introspection import _find_first
+    from dbt_osmosis.core.introspection import _find_first, normalize_column_name
 
-    # Check for column-level override first (highest priority)
-    # Check both top-level and config-nested meta (handles fusion_compat mode)
-    if node_yaml:
-        columns = t.cast("list[dict[str, t.Any]]", node_yaml.get("columns", []))
-        column_meta = _find_first(columns, lambda c: c.get("name") == column_name, {})
-        column_default_progenitor = column_meta.get("meta", {}).get(
-            "column_default_progenitor"
-        ) or column_meta.get("config", {}).get("meta", {}).get("column_default_progenitor")
-        if column_default_progenitor:
-            return column_default_progenitor
+    ancestor_yaml = _get_node_yaml(context, ancestor)
+    if ancestor_yaml is None:
+        return None
 
-    # Check for model-level default
-    if node_yaml:
-        default_progenitor = node_yaml.get("meta", {}).get("default_progenitor")
-        if default_progenitor:
-            return default_progenitor
+    yaml_cols: list[dict[str, t.Any]] = list(ancestor_yaml.get("columns", []))
+    if not yaml_cols:
+        return None
 
-    return None
+    db_type = context.project.runtime_cfg.credentials.type
+    col_variants_set = set(column_variants)
 
-
-def _get_inherited_metadata_from_progenitor(
-    context: YamlRefactorContextProtocol,
-    column_name: str,
-    progenitor_id: str,
-    node_column_variants: dict[str, list[str]],
-    progenitor_knowledge_cache: dict[str, dict[str, dict[str, t.Any]]] | None = None,
-) -> dict[str, t.Any] | None:
-    """Get inherited metadata from a specific progenitor.
-
-    Args:
-        context: The refactor context
-        column_name: Name of the column
-        progenitor_id: The unique_id of the progenitor
-        node_column_variants: Column name variants
-        progenitor_knowledge_cache: Optional cache of previously-built knowledge graphs
-
-    Returns:
-        Dictionary of inherited metadata, or None if progenitor not found
-
-    """
-    progenitor = context.project.manifest.nodes.get(
-        progenitor_id,
-        context.project.manifest.sources.get(progenitor_id),
+    yaml_col = _find_first(
+        yaml_cols,
+        lambda c: normalize_column_name(c.get("name", ""), db_type) in col_variants_set,
+        None,
     )
-    if not isinstance(progenitor, (SourceDefinition, SeedNode, ModelNode)):
+    if yaml_col is None:
         return None
 
-    progenitor_knowledge = None
-    if progenitor_knowledge_cache is not None:
-        progenitor_knowledge = progenitor_knowledge_cache.get(progenitor_id)
-    if progenitor_knowledge is None:
-        progenitor_knowledge = _build_column_knowledge_graph(context, progenitor)
-        if progenitor_knowledge_cache is not None:
-            progenitor_knowledge_cache[progenitor_id] = progenitor_knowledge
-
-    # Find the concrete column name in the progenitor, then reuse that node's
-    # already-merged knowledge graph so overrides inherit the same contract that
-    # downstream lineage would see from that node.
-    incoming = _find_matching_column(progenitor, node_column_variants[column_name])
-    if incoming is None:
+    desc = yaml_col.get("description")
+    if not desc:
         return None
-
-    graph_edge = progenitor_knowledge.get(getattr(incoming, "name", column_name))
-    if graph_edge is None:
-        return None
-
-    graph_edge = deepcopy(graph_edge)
-    _strip_progenitor_override_controls(graph_edge)
-    return graph_edge
-
-
-def _apply_progenitor_overrides(
-    context: YamlRefactorContextProtocol,
-    node: ResultNode,
-    column_knowledge_graph: dict[str, dict[str, t.Any]],
-    progenitor_alternatives: dict[str, list[str]],
-    node_yaml: t.Mapping[str, t.Any] | None,
-    node_column_variants: dict[str, list[str]],
-) -> None:
-    """Apply progenitor overrides based on column_default_progenitor and default_progenitor.
-
-    This is a second pass that allows users to override the automatically selected
-    progenitor with a specific ancestor. This is useful when you want to inherit
-    from a specific upstream source rather than the closest one.
-
-    Args:
-        context: The refactor context
-        node: The dbt node
-        column_knowledge_graph: The column knowledge graph (modified in-place)
-        progenitor_alternatives: Map of column name to list of potential progenitors
-        node_yaml: The parsed YAML for the node
-        node_column_variants: Column name variants
-
-    """
-    progenitor_knowledge_cache: dict[str, dict[str, dict[str, t.Any]]] = {}
-
-    for column_name, graph_node in column_knowledge_graph.items():
-        # Check both top-level and config-nested meta for progenitor
-        current_progenitor = graph_node.get("meta", {}).get("osmosis_progenitor") or graph_node.get(
-            "config", {}
-        ).get("meta", {}).get("osmosis_progenitor")
-        alternatives = progenitor_alternatives.get(column_name, [])
-
-        # Get the override progenitor (column-level takes precedence over model-level)
-        override_progenitor = _get_progenitor_override(column_name, node_yaml)
-
-        if not override_progenitor:
-            continue
-
-        # Only apply the override when it points at a real ancestor. When progenitor
-        # tracking is disabled there may be no current_progenitor, but the override
-        # still needs to select a different inheritance source.
-        if override_progenitor not in alternatives or override_progenitor == current_progenitor:
-            continue
-
-        logger.debug(
-            ":fork_and_knife: Applying progenitor override for column %s: %s -> %s",
-            column_name,
-            current_progenitor,
-            override_progenitor,
-        )
-
-        # Get inherited metadata from the override progenitor
-        inherited = _get_inherited_metadata_from_progenitor(
-            context,
-            column_name,
-            override_progenitor,
-            node_column_variants,
-            progenitor_knowledge_cache,
-        )
-
-        if not inherited:
-            logger.warning(
-                ":warning: Could not find progenitor %s for column %s",
-                override_progenitor,
-                column_name,
-            )
-            continue
-
-        overridden_graph_node = _initialize_column_knowledge(node.columns[column_name], node)
-        _merge_graph_node_data(overridden_graph_node, inherited)
-        _preserve_column_progenitor_override(overridden_graph_node, node_yaml, column_name)
-
-        graph_node.clear()
-        graph_node.update(overridden_graph_node)
+    return str(desc) if not isinstance(desc, str) else desc
 
 
 def _build_column_knowledge_graph(
@@ -645,9 +418,9 @@ def _build_column_knowledge_graph(
     # CLL-first parent resolution: ask CLL which direct parent provides each column.
     # When CLL succeeds the result disambiguates multi-parent joins deterministically.
     # Multi-source computed columns carry _CLL_COMPUTED_SENTINEL — inheritance is skipped
-    # entirely for them; enrich_rename_descriptions will add a "Berechnet in:" annotation.
-    # When CLL fails or has no answer for a column we fall back to name-matching below.
+    # entirely for them; annotate_column_origins will add a "Berechnet in:" annotation.
     from dbt_osmosis.core.cll import _CLL_COMPUTED_SENTINEL, build_parent_map, get_cll_results
+    from dbt_osmosis.core.introspection import _get_setting_for_node
     cll_parent_map = build_parent_map(get_cll_results(context, node), node.name)
 
     # Initialize the column knowledge graph with the local node's column data
@@ -656,21 +429,10 @@ def _build_column_knowledge_graph(
     for name, column in node.columns.items():
         column_knowledge_graph[name] = _initialize_column_knowledge(column, node)
 
-    # Track which columns have been processed in each generation to avoid
-    # multiple ancestors in the same generation from overwriting each other
-    processed_columns_in_generation: dict[str, set[str]] = {}
-
-    # Track potential progenitor alternatives for each column
-    # This allows for column-level and model-level progenitor overrides
-    progenitor_alternatives: dict[str, list[str]] = {}
-
-    # Columns where CLL had no lineage data and name-matching was used as fallback
-    _name_match_cols: set[str] = set()
-
     # Process ancestors from farthest to closest
     for generation in reversed(sorted(tree.keys())):
         ancestors = tree[generation]
-        processed_columns_in_generation[generation] = set()
+        seen_in_gen: set[str] = set()
 
         for ancestor_uid in ancestors:
             ancestor = context.project.manifest.nodes.get(
@@ -680,42 +442,8 @@ def _build_column_knowledge_graph(
             if not isinstance(ancestor, (SourceDefinition, SeedNode, ModelNode)):
                 continue
 
-            # Special handling for the target node itself in generation_0:
-            # The target node should only be processed for columns that don't exist
-            # in any upstream source (i.e., columns that originate in this model).
+            # Skip the target node itself — it has no upstream to inherit from.
             if ancestor_uid == node.unique_id:
-                # Only process columns that haven't been found in any upstream ancestor yet
-                for name in node.columns.keys():
-                    if name in processed_columns_in_generation[generation]:
-                        continue
-                    # Only process if this column hasn't been processed in ANY generation
-                    # (meaning it doesn't exist in any upstream source)
-                    if not any(name in cols for cols in processed_columns_in_generation.values()):
-                        # For columns originating in the target node, set it as the progenitor
-                        # This provides useful information for tracking column lineage
-                        from dbt_osmosis.core.introspection import _get_setting_for_node
-
-                        if _get_setting_for_node(
-                            "add-progenitor-to-meta",
-                            node,
-                            name,
-                            fallback=context.settings.add_progenitor_to_meta,
-                        ):
-                            # Get the current column data to build the edge
-                            incoming = node.columns[name]
-                            graph_edge = _column_to_dict(incoming, omit_none=True)
-                            # Set osmosis_progenitor to the target node itself
-                            graph_edge.setdefault("meta", {})["osmosis_progenitor"] = node.unique_id
-
-                            # Clean up empty values (like empty descriptions)
-                            _clean_graph_edge(context, graph_edge, generation, node, name)
-
-                            # Mark as processed
-                            processed_columns_in_generation[generation].add(name)
-
-                            # Merge with existing graph node
-                            graph_node = column_knowledge_graph.setdefault(name, {})
-                            _merge_graph_node_data(graph_node, graph_edge)
                 continue
 
             # Process each column in the target node
@@ -723,8 +451,8 @@ def _build_column_knowledge_graph(
                 cll_parent = cll_parent_map.get(name.lower())
                 if cll_parent == _CLL_COMPUTED_SENTINEL:
                     # CLL confirmed: multi-source computed column — no single progenitor.
-                    # Skip name-matching inheritance for all ancestors; the "Berechnet in:"
-                    # annotation will be attached by enrich_rename_descriptions instead.
+                    # Skip inheritance for all ancestors; the "Berechnet in:" annotation
+                    # will be attached by annotate_column_origins instead.
                     continue
                 elif cll_parent is not None:
                     # CLL identified the direct parent deterministically.
@@ -732,15 +460,12 @@ def _build_column_knowledge_graph(
                     # multi-parent ambiguity (same column name in two joined models)
                     # is resolved without arbitrary alphabetical ordering.
                     if ancestor.name.lower() != cll_parent:
-                        alternatives = progenitor_alternatives.setdefault(name, [])
-                        if ancestor_uid not in alternatives:
-                            alternatives.append(ancestor_uid)
                         continue
                     # CLL confirmed — process this ancestor regardless of the
                     # generation guard (another ancestor in same generation may have
                     # already set the guard for a different column).
-                elif name in processed_columns_in_generation[generation]:
-                    # Name-matching fallback: first ancestor in this generation wins.
+                elif name in seen_in_gen:
+                    # No CLL data for this column: first ancestor in this generation wins.
                     continue
 
                 # Find matching column in ancestor
@@ -748,19 +473,8 @@ def _build_column_knowledge_graph(
                 if incoming is None:
                     continue
 
-                # Track when name-matching resolved the column (CLL had no data for it)
-                if cll_parent is None:
-                    _name_match_cols.add(name)
-
-                # Track this ancestor as a potential progenitor alternative
-                # (excluding self-reference which happens in generation_0 above)
-                if ancestor_uid != node.unique_id:
-                    alternatives = progenitor_alternatives.setdefault(name, [])
-                    if ancestor_uid not in alternatives:
-                        alternatives.append(ancestor_uid)
-
                 # Mark this column as processed in this generation
-                processed_columns_in_generation[generation].add(name)
+                seen_in_gen.add(name)
 
                 # Build graph edge with inheritance applied
                 graph_edge = _build_graph_edge(
@@ -772,28 +486,34 @@ def _build_column_knowledge_graph(
                     node_column_variants,
                 )
 
+                # CLL-guided YAML-buffer description override:
+                # _build_graph_edge reads the description from the in-memory manifest
+                # column (``incoming.description``), which may be stale — an earlier
+                # inherit_upstream_column_knowledge pass (for a shallower node processed
+                # before this one topologically) could have mutated the manifest.
+                # The YAML buffer, by contrast, is populated from the on-disk files at
+                # osmosis startup and is NOT updated until the final sync phase, so it
+                # always reflects the enriched state written by pre-run scripts (e.g.
+                # AML injection into staging YAMLs).
+                # When use_unrendered_descriptions is True the buffer is already the
+                # source because _build_graph_edge calls _get_unrendered internally.
+                if not _get_setting_for_node(
+                    "use-unrendered-descriptions",
+                    node,
+                    name,
+                    fallback=context.settings.use_unrendered_descriptions,
+                ):
+                    yaml_desc = _read_ancestor_yaml_description(
+                        context, ancestor, node_column_variants[name]
+                    )
+                    if yaml_desc is not None:
+                        graph_edge["description"] = yaml_desc
+
                 # Clean up empty values and placeholders
                 _clean_graph_edge(context, graph_edge, generation, node, name)
 
                 # Merge with existing graph node (which already has local column data)
                 graph_node = column_knowledge_graph.setdefault(name, {})
                 _merge_graph_node_data(graph_node, graph_edge)
-
-    # Apply progenitor overrides based on column_default_progenitor and default_progenitor
-    # This is a second pass that allows users to override the automatically selected
-    # progenitor with a specific ancestor
-    _apply_progenitor_overrides(
-        context,
-        node,
-        column_knowledge_graph,
-        progenitor_alternatives,
-        node_yaml,
-        node_column_variants,
-    )
-
-    # Persist any name-matching fallbacks for this node to the module-level accumulator
-    if _name_match_cols:
-        prev = set(_NAME_MATCH_FALLBACK.get(node.unique_id, []))
-        _NAME_MATCH_FALLBACK[node.unique_id] = sorted(prev | _name_match_cols)
 
     return column_knowledge_graph

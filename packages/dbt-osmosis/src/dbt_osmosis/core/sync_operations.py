@@ -10,9 +10,9 @@ if t.TYPE_CHECKING:
     from dbt_osmosis.core.dbt_protocols import YamlRefactorContextProtocol
 
 from dbt_osmosis.core import logger
+from dbt_osmosis.core.settings import get_managed_meta_keys
 
 __all__ = [
-    "_sync_doc_section",
     "sync_node_to_yaml",
 ]
 
@@ -181,9 +181,20 @@ def _sync_doc_section(
                 config_value = {}
             meta_value = merged.pop("meta", None)
             tags_value = merged.pop("tags", None)
-            if isinstance(meta_value, dict) and meta_value:
-                existing_config_meta = config_value.get("meta", {})
-                config_value["meta"] = {**existing_config_meta, **meta_value}
+
+            # Rebuild config.meta — strip osmosis-internal protection markers from
+            # existing config.meta when they are no longer in the node's meta.  This
+            # prevents stale flags (e.g. "anchor-description" propagated from staging)
+            # from accumulating in dp-layer YAML across successive osmosis runs.
+            existing_config_meta: dict = config_value.get("meta", {}) if isinstance(config_value, dict) else {}
+            preserved_existing = {k: v for k, v in existing_config_meta.items() if k not in get_managed_meta_keys()}
+            effective_meta = dict(meta_value) if isinstance(meta_value, dict) else {}
+            merged_config_meta = {**preserved_existing, **effective_meta}
+            if merged_config_meta:
+                config_value["meta"] = dict(sorted(merged_config_meta.items()))
+            else:
+                config_value.pop("meta", None)
+
             if isinstance(tags_value, list) and tags_value:
                 existing_config_tags = config_value.get("tags", [])
                 seen = set(existing_config_tags)
@@ -203,9 +214,9 @@ def _sync_doc_section(
                 if isinstance(config_meta, dict) and config_meta:
                     existing_meta = merged.get("meta")
                     if isinstance(existing_meta, dict):
-                        merged["meta"] = {**config_meta, **existing_meta}
+                        merged["meta"] = dict(sorted({**config_meta, **existing_meta}.items()))
                     else:
-                        merged["meta"] = config_meta
+                        merged["meta"] = dict(sorted(config_meta.items()))
 
                 config_tags = config_value.get("tags")
                 if isinstance(config_tags, list) and config_tags:

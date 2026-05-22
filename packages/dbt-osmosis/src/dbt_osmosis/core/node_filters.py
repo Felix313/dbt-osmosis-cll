@@ -145,6 +145,8 @@ def _topological_sort(
     return [(uid, uid_to_node[uid]) for uid in sorted_uids]
 
 
+
+
 def _iter_candidate_nodes(
     context: t.Any,  # YamlRefactorContext type will be imported
 ) -> t.Iterator[tuple[str, ResultNode]]:

@@ -39,14 +39,23 @@ class ColumnLineageResult:
     """Original column name before the rename, or None when *is_rename* is False."""
 
     is_computed: bool = False
-    """True when the column value is derived from an expression (arithmetic, function call,
-    CASE statement, etc.) rather than being a direct or renamed column reference.
+    """True when the column is a multi-source or opaque expression (COALESCE(a,b), CASE with
+    multiple source columns, etc.) with no single traceable upstream column."""
 
-    Useful for lineage visualisation to distinguish:
-    - ``is_rename=True``  → pass-through with alias (rename)
-    - ``is_computed=True``  → derived/computed value (no traceable single source)
-    - both False → direct pass-through (same name, same value)
-    """
+    is_aggregate: bool = False
+    """True when the column is produced by an aggregate function (SUM, COUNT, AVG, MAX, MIN…)."""
+
+    is_window: bool = False
+    """True when the column is produced by a window function (ROW_NUMBER, RANK, SUM OVER…)."""
+
+    is_literal: bool = False
+    """True when the column is a hardcoded constant ('SAP', 42, TRUE, NULL)."""
+
+    is_union: bool = False
+    """True when the column originates from a top-level UNION ALL / UNION / INTERSECT / EXCEPT."""
+
+    literal_value: Optional[str] = None
+    """The string representation of the constant when ``is_literal`` is True, else None."""
 
     is_first_in_chain: bool = False
     """True when this column has no traceable upstream dbt model and is not computed.
@@ -72,6 +81,7 @@ def get_column_lineage(
     compiled_sql_source: Literal["manifest", "target_dir", "auto_compile"] = "manifest",
     include_ephemeral: bool = False,
     _catalog_reader_override: Optional[object] = None,
+    placeholder_patterns: Optional[List[str]] = None,
 ) -> List[ColumnLineageResult]:
     """Resolve column-level lineage for dbt models.
 
@@ -171,6 +181,7 @@ def get_column_lineage(
         _catalog_reader_override=catalog_reader,
         use_target_dir_fallback=use_target_dir,
         stop_at_ephemeral=include_ephemeral,
+        placeholder_patterns=placeholder_patterns,
     )
     registry.load()
 
@@ -210,9 +221,21 @@ def get_column_lineage(
             # Take the first lineage entry (highest precedence after parsing)
             lin = col_obj.lineage[0]
             progenitor_model, progenitor_column = _resolve_progenitor(lin)
-            is_computed = lin.transformation_type == "derived"
-            # first-in-chain: no upstream dbt model (progenitor absent or is a raw source/seed)
-            is_first = (progenitor_model is None or progenitor_model in terminal_node_names) and not is_computed
+            ttype = lin.transformation_type
+            is_computed   = ttype == "derived"
+            is_aggregate  = ttype == "aggregate"
+            is_window     = ttype == "window"
+            is_literal    = ttype == "literal"
+            is_union      = ttype == "union"
+            literal_value = lin.sql_expression if is_literal else None
+            # Multiple source columns → no single traceable progenitor
+            if len(lin.source_columns) > 1:
+                progenitor_model, progenitor_column = None, None
+            # first-in-chain: only for pure passthroughs (direct/renamed) that reach a terminal node
+            is_passthrough = ttype in ("direct", "renamed")
+            is_first = (
+                progenitor_model is None or progenitor_model in terminal_node_names
+            ) and is_passthrough
 
             results.append(
                 ColumnLineageResult(
@@ -223,6 +246,11 @@ def get_column_lineage(
                     is_rename=lin.is_rename,
                     source_column=lin.source_column,
                     is_computed=is_computed,
+                    is_aggregate=is_aggregate,
+                    is_window=is_window,
+                    is_literal=is_literal,
+                    is_union=is_union,
+                    literal_value=literal_value,
                     is_first_in_chain=is_first,
                 )
             )
@@ -239,6 +267,8 @@ def get_column_lineage(
             for col_name, lin in sorted(cte_cols.items()):
                 progenitor_model, progenitor_column = _resolve_progenitor(lin)
                 is_computed = lin.transformation_type == "derived"
+                if is_computed and len(lin.source_columns) > 1:
+                    progenitor_model, progenitor_column = None, None
                 is_first = (
                     progenitor_model is None or progenitor_model in terminal_node_names
                 ) and not is_computed

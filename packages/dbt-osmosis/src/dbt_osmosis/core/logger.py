@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import rich
+import rich.console
 from rich.logging import RichHandler
 
 __all__ = [

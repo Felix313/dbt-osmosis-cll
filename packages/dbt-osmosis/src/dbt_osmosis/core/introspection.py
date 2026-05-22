@@ -29,6 +29,7 @@ __all__ = [
     "normalize_column_name",
     "_maybe_use_precise_dtype",
     "get_columns",
+    "prefetch_columns",
     "SettingsResolver",
     "_load_catalog",
     "_generate_catalog",
@@ -1295,6 +1296,104 @@ def get_columns(
         process_column(column)
 
     return normalized_columns
+
+
+def prefetch_columns(context: t.Any, nodes: t.Iterable[t.Any]) -> int:
+    """Batch-prefetch column metadata for multiple nodes in a single DB round trip.
+
+    Calls ``get_catalog_by_relations`` once with all provided relations (grouped by
+    schema), then populates ``_COLUMN_LIST_CACHE`` so subsequent ``get_columns()``
+    calls for those relations are cache hits — zero additional DB round trips.
+
+    Falls back silently if the adapter does not support ``get_catalog_by_relations``
+    or if the call fails; individual ``get_columns()`` calls will handle those cases
+    via their own fallback chain.
+
+    Returns the number of relations whose columns were successfully prefetched.
+    """
+    from collections import defaultdict
+
+    to_fetch: list[tuple[_WarehouseColumnCacheKey, t.Any, str, str]] = []
+    all_relations: set[t.Any] = set()
+    used_schemas: set[tuple[str, str]] = set()
+
+    for node in nodes:
+        try:
+            relation = context.project.adapter.Relation.create_from(
+                context.project.adapter.config, node
+            )
+        except Exception:
+            continue
+
+        renderer = getattr(relation, "render", None)
+        rendered = renderer() if callable(renderer) else str(relation)
+        cache_key = _build_column_cache_key(context, rendered)
+
+        with _COLUMN_LIST_CACHE_LOCK:
+            if cache_key in _COLUMN_LIST_CACHE:
+                continue
+
+        db = (getattr(relation, "database", None) or "").casefold()
+        schema = (getattr(relation, "schema", None) or "").casefold()
+        identifier = (
+            getattr(relation, "identifier", None) or getattr(relation, "name", None) or ""
+        ).casefold()
+        id_key = f"{db}.{schema}.{identifier}"
+
+        to_fetch.append((cache_key, relation, rendered, id_key))
+        all_relations.add(relation)
+        if db and schema:
+            used_schemas.add((db, schema))
+
+    if not to_fetch:
+        return 0
+
+    logger.info(":rocket: Batch-prefetching columns for %d relations...", len(to_fetch))
+
+    try:
+        catalog_table, _ = context.project.adapter.get_catalog_by_relations(
+            frozenset(used_schemas), all_relations
+        )
+    except Exception as ex:
+        logger.debug(
+            ":blue_book: Batch prefetch failed (%s), falling back to per-relation fetch.", ex
+        )
+        return 0
+
+    if not catalog_table or not catalog_table.rows:
+        return 0
+
+    rows_by_id: dict[str, list[dict[str, t.Any]]] = defaultdict(list)
+    for row in catalog_table.rows:
+        row_dict = dict(zip(catalog_table.column_names, row))
+        tbl_db = (row_dict.get("table_database") or row_dict.get("TABLE_DATABASE") or "").casefold()
+        tbl_schema = (row_dict.get("table_schema") or row_dict.get("TABLE_SCHEMA") or "").casefold()
+        tbl_name = (row_dict.get("table_name") or row_dict.get("TABLE_NAME") or "").casefold()
+        rows_by_id[f"{tbl_db}.{tbl_schema}.{tbl_name}"].append(row_dict)
+
+    prefetched = 0
+    for cache_key, _relation, rendered, id_key in to_fetch:
+        rows = rows_by_id.get(id_key, [])
+        cols: list[ColumnMetadata] = []
+        for row_dict in rows:
+            col_name = row_dict.get("column_name") or row_dict.get("COLUMN_NAME", "")
+            col_type = row_dict.get("column_type") or row_dict.get("COLUMN_TYPE", "")
+            col_comment = row_dict.get("column_comment") or row_dict.get("COLUMN_COMMENT") or ""
+            col_index = row_dict.get("column_index") or row_dict.get("COLUMN_INDEX") or 0
+            if col_name:
+                cols.append(
+                    ColumnMetadata(name=col_name, type=col_type, index=col_index, comment=col_comment)
+                )
+        if cols:
+            with _COLUMN_LIST_CACHE_LOCK:
+                _COLUMN_LIST_CACHE[cache_key] = tuple(cols)
+            logger.debug(":books: Prefetched %d columns for => %s", len(cols), rendered)
+            prefetched += 1
+
+    logger.info(
+        ":white_check_mark: Batch-prefetched columns for %d/%d relations.", prefetched, len(to_fetch)
+    )
+    return prefetched
 
 
 def _load_catalog(settings: t.Any) -> CatalogResults | None:

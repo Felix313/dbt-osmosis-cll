@@ -1,6 +1,47 @@
 from typing import Dict, Optional
 from dataclasses import dataclass
 import logging
+import re
+
+from sqlglot import exp, parse_one
+
+
+def _extract_source_select(sql: str, dialect: Optional[str] = None) -> str:
+    """For DML statements (MERGE, INSERT INTO ... SELECT), extract just the source SELECT.
+
+    dbt incremental models compile {{ this }} into the DML target — the model's own
+    table. The parser should never see that self-reference; only the source SELECT
+    (MERGE USING clause / INSERT body) carries actual column lineage.
+    Returns the original SQL unchanged for plain SELECT statements.
+    """
+    try:
+        parsed = parse_one(sql, dialect=dialect)
+    except Exception:
+        return sql
+
+    if isinstance(parsed, exp.Merge):
+        using = parsed.args.get("using")
+        if using is not None:
+            select = using.find(exp.Select)
+            if select is not None:
+                return select.sql(dialect=dialect)
+
+    if isinstance(parsed, exp.Insert):
+        select = parsed.find(exp.Select)
+        if select is not None:
+            return select.sql(dialect=dialect)
+
+    return sql
+
+
+def _replace_placeholder(match: re.Match) -> str:
+    """Return TRUE for custom placeholders; leave dbt-internal tokens untouched.
+
+    dbt always prefixes its internal CTE references with ``__dbt__``, so any
+    match starting with that sequence is passed through unchanged — this exclusion
+    is enforced at the tool level regardless of what pattern the user configured.
+    """
+    return match.group(0) if match.group(0).startswith("__dbt__") else "TRUE"
 
 from dbt_column_lineage.artifacts.catalog import CatalogReader
 from dbt_column_lineage.artifacts.manifest import ManifestReader
@@ -38,6 +79,7 @@ class ModelRegistry:
         _catalog_reader_override: Optional[CatalogReader] = None,
         use_target_dir_fallback: bool = False,
         stop_at_ephemeral: bool = False,
+        placeholder_patterns: Optional[list] = None,
     ):
         if _catalog_reader_override is not None:
             self._catalog_reader = _catalog_reader_override
@@ -51,6 +93,13 @@ class ModelRegistry:
         self._use_target_dir_fallback: bool = use_target_dir_fallback
         self._stop_at_ephemeral: bool = stop_at_ephemeral
         self._ephemeral_lineage: Dict[str, Dict] = {}
+        # Build combined placeholder regex from caller-supplied patterns.
+        # No default — placeholder replacement is repo-specific and opt-in via .osmosis.
+        if placeholder_patterns:
+            combined = "|".join(f"(?:{p})" for p in placeholder_patterns)
+            self._placeholder_re: Optional[re.Pattern] = re.compile(combined)
+        else:
+            self._placeholder_re = None
 
     @property
     def is_loaded(self) -> bool:
@@ -162,6 +211,15 @@ class ModelRegistry:
                 skipped_model_names.append(model_name)
                 continue
 
+            # For DML statements (MERGE / INSERT INTO), extract just the source
+            # SELECT so the parser never sees {{ this }} as a self-reference target.
+            sql = _extract_source_select(sql, dialect=self._adapter_override)
+
+            # Replace unresolved custom-materialization placeholders (e.g.
+            # __PERIOD_FILTER__) with TRUE so the SQL parser sees valid syntax.
+            if self._placeholder_re is not None:
+                sql = self._placeholder_re.sub(_replace_placeholder, sql)
+
             try:
                 parse_result = self._sql_parser.parse_column_lineage(
                     sql, stop_at_ephemeral=self._stop_at_ephemeral
@@ -196,10 +254,19 @@ class ModelRegistry:
             logger.error(f"Failed to process star references: {e}", exc_info=True)
 
     def _apply_column_lineage(self, model: Model, parse_result: SQLParseResult) -> None:
-        """Apply parsed lineage to model columns."""
+        """Apply parsed lineage to model columns.
+
+        Columns discovered by the SQL parser that are not yet in the model's column dict
+        (i.e. the YAML has no documented columns for a new/undocumented model) are created
+        as stub Column entries so that CLL can still return lineage results for them.
+        Without this, new models with empty YAMLs would always return [] from
+        get_column_lineage() because the api.py loop iterates over model.columns.
+        """
+        from dbt_column_lineage.models.schema import Column
         for col_name, lineage in parse_result.column_lineage.items():
-            if col_name in model.columns:
-                model.columns[col_name].lineage = lineage
+            if col_name not in model.columns:
+                model.columns[col_name] = Column(name=col_name, model_name=model.name)
+            model.columns[col_name].lineage = lineage
 
         if parse_result.star_sources:
             model.metadata = model.metadata or {}

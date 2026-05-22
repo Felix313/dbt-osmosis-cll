@@ -29,16 +29,16 @@ from dbt_osmosis.core.restructuring import (
     apply_restructure_plan,
     draft_restructure_delta_plan,
 )
+from dbt_osmosis.core.cll import maybe_bulk_compile
 from dbt_osmosis.core.settings import YamlRefactorContext, YamlRefactorSettings
 from dbt_osmosis.core.sql_lint import SQLLinter, lint_sql_code
 from dbt_osmosis.core.sql_operations import compile_sql_code, execute_sql_code
 from dbt_osmosis.core.test_suggestions import suggest_tests_for_model, suggest_tests_for_project
 from dbt_osmosis.core.transforms import (
-    enrich_rename_descriptions,
+    annotate_column_origins,
     inherit_upstream_column_knowledge,
     inject_missing_columns,
     remove_columns_not_in_database,
-    report_name_match_fallbacks,
     sort_columns_as_configured,
     synchronize_data_types,
     synthesize_missing_documentation_with_openai,
@@ -327,11 +327,6 @@ def _run_formatter_if_configured(context: YamlRefactorContext) -> None:
     help="Skip adding data types to the models.",
 )
 @click.option(
-    "--add-progenitor-to-meta",
-    is_flag=True,
-    help="Progenitor information will be added to the meta information of a column. Useful to understand which model is the progenitor (origin) of a specific model's column.",
-)
-@click.option(
     "--add-inheritance-for-specified-keys",
     multiple=True,
     type=click.STRING,
@@ -417,15 +412,19 @@ def refactor(
             confirm=not auto_apply,
         )
 
+        maybe_bulk_compile(typed_context)
+
+        from dbt_osmosis.core.node_filters import _iter_candidate_nodes
+        _n_nodes = sum(1 for _ in _iter_candidate_nodes(typed_context))
+        logger.info(":gear: Running column propagation pipeline for %d node(s)...", _n_nodes)
+
         transform = (
             inject_missing_columns
             >> remove_columns_not_in_database
             >> inherit_upstream_column_knowledge
-            >> enrich_rename_descriptions
-            >> inherit_upstream_column_knowledge  # second pass: propagates annotations downstream
+            >> annotate_column_origins
             >> sort_columns_as_configured
             >> synchronize_data_types
-            >> report_name_match_fallbacks
         )
         if synthesize:
             transform >>= synthesize_missing_documentation_with_openai
@@ -436,6 +435,10 @@ def refactor(
 
         if check and context.mutated:
             exit(1)
+
+
+
+
 
 
 @yaml.command(context_settings=_CONTEXT)
@@ -542,11 +545,6 @@ def organize(
     help="Skip adding data types to the models.",
 )
 @click.option(
-    "--add-progenitor-to-meta",
-    is_flag=True,
-    help="Progenitor information will be added to the meta information of a column. Useful to understand which model is the progenitor (origin) of a specific model's column.",
-)
-@click.option(
     "--add-inheritance-for-specified-keys",
     multiple=True,
     type=click.STRING,
@@ -618,13 +616,17 @@ def document(
         ),
     ) as context:
         typed_context: t.Any = context
+        maybe_bulk_compile(typed_context)
+
+        from dbt_osmosis.core.node_filters import _iter_candidate_nodes
+        _n_nodes = sum(1 for _ in _iter_candidate_nodes(typed_context))
+        logger.info(":gear: Running column propagation pipeline for %d node(s)...", _n_nodes)
+
         transform = (
             inject_missing_columns
             >> inherit_upstream_column_knowledge
-            >> enrich_rename_descriptions
-            >> inherit_upstream_column_knowledge  # second pass: propagates annotations downstream
+            >> annotate_column_origins
             >> sort_columns_as_configured
-            >> report_name_match_fallbacks
         )
         if synthesize:
             transform >>= synthesize_missing_documentation_with_openai

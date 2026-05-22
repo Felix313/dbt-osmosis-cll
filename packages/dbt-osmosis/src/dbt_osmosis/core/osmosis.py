@@ -38,6 +38,7 @@ from dbt_osmosis.core.introspection import (
     _get_setting_for_node,
     _maybe_use_precise_dtype,
     get_columns,
+    prefetch_columns,
     normalize_column_name,
 )
 
@@ -382,6 +383,7 @@ __all__ = list(
         "generate_staging_for_all_sources",
         "generate_staging_for_source",
         "get_columns",
+        "prefetch_columns",
         "get_current_yaml_path",
         "get_plugin_manager",
         "get_target_yaml_path",

@@ -41,6 +41,7 @@ def merge_description(
     new_desc: str,
     *,
     replaceable_pattern: re.Pattern[str] | None = None,
+    force: bool = False,
 ) -> str | None:
     """
     Return the merged description string, or ``None`` if no change is needed.
@@ -52,7 +53,9 @@ def merge_description(
        reference) → ``new_desc`` (the external source wins over auto-generated text).
     C. ``new_desc`` is already present at the start of the existing description
        → ``None`` (idempotent, already enriched).
-    D. Any other non-empty existing description → ``None`` (preserve manual docs).
+    D. Any other non-empty existing description:
+       - ``force=False`` → ``None`` (preserve manual docs).
+       - ``force=True``  → ``new_desc`` (external source is authoritative / leading).
 
     Args:
         existing: Current description from the YAML (may be ``None`` or empty).
@@ -62,6 +65,9 @@ def merge_description(
             auto-generated and safe to replace.  Configure this to match whatever
             osmosis writes as provenance text in your project (e.g. the prefix
             your propagation annotations use).
+        force: When ``True``, rule D overwrites instead of preserving.  Use when
+            the external metadata layer is the single source of truth (e.g. AML
+            for staging models).
     """
     raw = (existing or "").strip()
 
@@ -73,5 +79,8 @@ def merge_description(
 
     if raw.startswith(new_desc.strip()):
         return None  # C — already injected (idempotent)
+
+    if force:
+        return new_desc  # D (force) — external source is leading
 
     return None  # D — manual / unknown content, preserve it

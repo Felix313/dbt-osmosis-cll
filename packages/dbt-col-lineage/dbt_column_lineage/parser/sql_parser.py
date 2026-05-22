@@ -168,15 +168,27 @@ class StarExpressionHandler:
                             trans_type, sql_expr = self.get_cte_transformation_info(
                                 context, source_table, col_name
                             )
-                        columns[col_name.lower()] = [
-                            ColumnLineage(
-                                source_columns={effective_source},
-                                transformation_type=cast(
-                                    Literal["direct", "renamed", "derived"], trans_type
-                                ),
-                                sql_expression=sql_expr,
-                            )
-                        ]
+                        if not stop_at_boundary and effective_source == "":
+                            # Multi-source sentinel: column was derived from multiple upstream
+                            # columns in this CTE. Emit empty source_columns so api.py marks it
+                            # as is_computed=True with progenitor_column=None (→ "Berechnet in:").
+                            columns[col_name.lower()] = [
+                                ColumnLineage(
+                                    source_columns=set(),
+                                    transformation_type="derived",
+                                    sql_expression=sql_expr,
+                                )
+                            ]
+                        else:
+                            columns[col_name.lower()] = [
+                                ColumnLineage(
+                                    source_columns={effective_source},
+                                    transformation_type=cast(
+                                        Literal["direct", "renamed", "derived"], trans_type
+                                    ),
+                                    sql_expression=sql_expr,
+                                )
+                            ]
 
             # When stopping at an ephemeral boundary: add the ephemeral itself to
             # star_sources so the second pass can resolve passthrough columns via
@@ -193,6 +205,23 @@ class StarExpressionHandler:
                     )
             return True
         return False
+
+
+def _classify_expression(expr: Any) -> tuple[str, Optional[str]]:
+    """Classify a SQL expression into a semantic transformation type.
+
+    Returns (transformation_type, literal_value).
+    literal_value is the string representation of the constant for "literal" type, None otherwise.
+    """
+    inner = expr.this if isinstance(expr, exp.Alias) else expr
+    if isinstance(inner, (exp.Literal, exp.Boolean, exp.Null)):
+        return ("literal", str(inner))
+    # Window check must precede AggFunc — window functions wrap AggFunc nodes
+    if inner.find(exp.Window):
+        return ("window", None)
+    if inner.find(exp.AggFunc):
+        return ("aggregate", None)
+    return ("derived", None)
 
 
 class ExpressionAnalyzer:
@@ -239,13 +268,23 @@ class ExpressionAnalyzer:
         return self.parser._analyze_column_reference(expr, col_name, context, is_aliased)
 
     def _default_handler(self, expr: Any, context: ParserContext) -> List[ColumnLineage]:
-        source_cols = self.parser._extract_source_columns(expr, context)
+        semantic_type, literal_value = _classify_expression(expr)
+        if semantic_type == "window":
+            # Extract source columns from the window function body only — exclude
+            # PARTITION BY / ORDER BY columns so the progenitor reflects the value
+            # being windowed, not the grouping dimensions.
+            inner = expr.this if isinstance(expr, exp.Alias) else expr
+            window_node = inner.find(exp.Window)
+            func_expr = window_node.this if (window_node and window_node.this) else inner
+            source_cols = self.parser._extract_source_columns(func_expr, context)
+        else:
+            source_cols = self.parser._extract_source_columns(expr, context)
         normalized_source_cols = self.parser._normalize_source_columns(source_cols)
         return [
             ColumnLineage(
                 source_columns=normalized_source_cols,
-                transformation_type="derived",
-                sql_expression=str(expr),
+                transformation_type=semantic_type,
+                sql_expression=literal_value if literal_value is not None else str(expr),
             )
         ]
 
@@ -313,7 +352,24 @@ class SQLColumnParser:
         star_sources: Set[str] = set()
 
         final_select = get_final_select(parsed)
-        if not final_select:
+        if not final_select and isinstance(parsed, exp.Union):
+            # Top-level UNION ALL / UNION / INTERSECT / EXCEPT: output columns
+            # derive from multiple branches — annotate all as computed rather
+            # than silently tracing only the first branch.
+            first_branch = parsed.this  # first SELECT branch for column names
+            if isinstance(first_branch, exp.Select):
+                for expr in first_branch.expressions:
+                    col_name = strip_sql_comments(expr.alias_or_name.lower())
+                    if col_name:
+                        columns[col_name] = [
+                            ColumnLineage(source_columns=set(), transformation_type="union")
+                        ]
+            return SQLParseResult(
+                column_lineage=columns,
+                star_sources=star_sources,
+                ephemeral_cte_lineage=ephemeral_cte_lineage,
+            )
+        elif not final_select:
             selects_to_process: List[Any] = list(parsed.find_all(exp.Select))
         else:
             selects_to_process = [final_select]
@@ -589,7 +645,12 @@ class SQLColumnParser:
     ) -> None:
         if lineage.source_columns:
             sorted_sources = sorted(lineage.source_columns)
-            context.cte_sources[cte_name][col_name] = sorted_sources[0]
+            if len(sorted_sources) > 1:
+                # Multiple upstream columns — store sentinel so downstream expansion
+                # emits an empty source_columns set (→ is_computed=True, progenitor=None).
+                context.cte_sources[cte_name][col_name] = ""
+            else:
+                context.cte_sources[cte_name][col_name] = sorted_sources[0]
         else:
             if context.table_context:
                 context.cte_sources[cte_name][col_name] = f"{context.table_context}.*"
@@ -627,7 +688,14 @@ class SQLColumnParser:
                     return cte_sources[table][key]
 
         if table and cte_to_model and table in cte_to_model:
-            return f"{cte_to_model[table]}.{col_name_lower}"
+            resolved_table = cte_to_model[table]
+            # Follow the chain through intermediate CTEs (e.g. base.* → cte_a → real_model)
+            # until we reach a non-CTE name. Guards against cycles via visited set.
+            visited_ctes: set[str] = {table}
+            while resolved_table in cte_to_model and resolved_table not in visited_ctes:
+                visited_ctes.add(resolved_table)
+                resolved_table = cte_to_model[resolved_table]
+            return f"{resolved_table}.{col_name_lower}"
         elif table:
             return f"{table}.{col_name_lower}"
         return column
@@ -690,6 +758,16 @@ class SQLColumnParser:
                 trans_type = cte_trans_type
         elif is_aliased:
             trans_type = "renamed"
+
+        # Multi-source sentinel propagated through explicit column reference
+        if resolved_source == "":
+            return [
+                ColumnLineage(
+                    source_columns=set(),
+                    transformation_type="derived",
+                    sql_expression=sql_expr,
+                )
+            ]
 
         resolved_table, resolved_col = split_qualified_name(resolved_source)
         if resolved_table:

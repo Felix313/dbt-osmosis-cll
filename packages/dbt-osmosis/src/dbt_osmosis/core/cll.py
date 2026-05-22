@@ -30,7 +30,7 @@ if t.TYPE_CHECKING:
     from dbt.contracts.graph.nodes import ResultNode
     from dbt_osmosis.core.dbt_protocols import YamlRefactorContextProtocol
 
-_CACHE_SCHEMA_VERSION = 2
+_CACHE_SCHEMA_VERSION = 3
 
 # (project_dir, model_name) → List[result]  in-memory, process-scoped
 _LINEAGE_CACHE: dict[tuple[str, str], list[t.Any]] = {}
@@ -51,7 +51,11 @@ _DISK_CACHE: dict[str, dict[str, t.Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
 # Fields we read from ColumnLineageResult — serialised/deserialised for disk cache
-_RESULT_FIELDS = ("model", "column", "is_computed", "progenitor_model", "progenitor_column", "is_first_in_chain", "is_rename", "source_column")
+_RESULT_FIELDS = (
+    "model", "column", "is_computed", "progenitor_model", "progenitor_column",
+    "is_first_in_chain", "is_rename", "source_column",
+    "is_aggregate", "is_window", "is_literal", "is_union", "literal_value",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -114,25 +118,35 @@ def _compiled_sql_hash(project_dir: str, node: t.Any) -> str | None:
     return None
 
 
-def _is_compiled_sql_stale(project_dir: str, node: t.Any) -> bool:
-    """Return True if the compiled SQL artifact is older than the source SQL file.
+def _is_compiled_sql_stale(project_dir: str, node: t.Any, target_base: "Path | None" = None) -> bool:
+    """Return True if the compiled SQL artifact is older than the source SQL file,
+    or if the manifest node has no inline compiled_code.
 
     When a developer edits a model, the source .sql mtime advances past the
     compiled artifact's mtime. Running CLL on the stale compiled file would
     produce wrong column lists and store them under the new source hash —
     corrupting the cache for subsequent runs.
+
+    The compiled_code check handles the case where the manifest was regenerated
+    by ``dbt parse`` after a prior ``dbt compile``: compiled files may still be
+    fresh by mtime, but the manifest has no inline SQL for CLL to read.
     """
+    # No inline compiled_code in manifest → always stale regardless of file state.
+    # Seeds and sources have no compiled SQL by design — they're never stale.
     original: str = getattr(node, "original_file_path", "") or ""
     if not original.endswith(".sql"):
         return False
+    if not (getattr(node, "compiled_code", None) or getattr(node, "compiled_sql", None)):
+        return True
     source_path = Path(project_dir) / original
     if not source_path.exists():
         return False
 
-    # Locate compiled artifact — try with and without package-name nesting
-    target_dir = Path(project_dir) / "target" / "compiled"
+    # Locate compiled artifact — try with and without package-name nesting.
+    # Use the configured target base (respects DBT_TARGET_PATH) when provided.
+    compiled_dir = (target_base or Path(project_dir) / "target") / "compiled"
     package_name: str = getattr(node, "package_name", "") or ""
-    candidates = [target_dir / package_name / original, target_dir / original]
+    candidates = [compiled_dir / package_name / original, compiled_dir / original]
     for compiled_path in candidates:
         if compiled_path.exists():
             return source_path.stat().st_mtime > compiled_path.stat().st_mtime
@@ -150,6 +164,7 @@ def _compile_node(project_dir: str, node: t.Any, target: str | None) -> bool:
         cmd += ["--target", target]
 
     logger.info(":hammer: Running dbt compile for stale compiled SQL => %s", node.name)
+    logger.debug("$ %s", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=project_dir)
     if result.returncode != 0:
         logger.warning(
@@ -194,19 +209,22 @@ def get_cll_results(
     """
     from dbt.artifacts.resources.types import NodeType
 
-    # Sources are leaf nodes with no compiled SQL — CLL has nothing to trace.
-    if node.resource_type == NodeType.Source:
+    # Sources and seeds are leaf/terminal nodes with no compiled SQL — CLL has nothing to trace.
+    if node.resource_type in (NodeType.Source, NodeType.Seed):
         return []
 
     runtime_cfg = context.project.runtime_cfg
     project_dir: str = str(runtime_cfg.project_root)
+    # Use the configured target directory (respects DBT_TARGET_PATH env var).
+    # project_target_path is the full absolute path to the target folder.
+    target_base: Path = Path(getattr(runtime_cfg, "project_target_path", None) or Path(project_dir) / "target")
     cache_key = (project_dir, node.name)
 
     # 1. In-memory
     if cache_key in _LINEAGE_CACHE:
         return _LINEAGE_CACHE[cache_key]
 
-    manifest_path = str(Path(project_dir) / "target" / "manifest.json")
+    manifest_path = str(target_base / "manifest.json")
     sql_hash = _compiled_sql_hash(project_dir, node)
 
     # 2. Disk cache
@@ -224,12 +242,12 @@ def get_cll_results(
         from dbt_column_lineage.api import get_column_lineage
         from dbt_column_lineage.artifacts.manifest_catalog import ManifestCatalogReader
 
-        # If the source SQL is newer than target/compiled/, CLL would read stale SQL
-        # and cache wrong column lists under the new source hash. Compile first.
+        # If the source SQL is newer than target/compiled/, the manifest's compiled_code
+        # is also stale. Compile first so CLL reads the correct SQL.
         compile_on_failure: bool = getattr(
             getattr(context, "settings", None), "compile_on_cll_failure", True
         )
-        if compile_on_failure and _is_compiled_sql_stale(project_dir, node):
+        if compile_on_failure and _is_compiled_sql_stale(project_dir, node, target_base):
             target_name: str | None = getattr(runtime_cfg, "target_name", None)
             if _compile_node(project_dir, node, target_name):
                 # Recompute source hash after compile (manifest may have been rewritten)
@@ -247,16 +265,19 @@ def get_cll_results(
             getattr(runtime_cfg, "credentials", None), "type", None
         )
 
+        from dbt_osmosis.config import get_config
+        _cfg = get_config()
         results = get_column_lineage(
             manifest_path=manifest_path,
             models=[node.name],
-            compiled_sql_source="target_dir",
+            compiled_sql_source="manifest",
             dialect=adapter_type,
             _catalog_reader_override=_READER_CACHE[project_dir],
+            placeholder_patterns=_cfg.compiled_sql_placeholder_patterns,
         )
     except Exception as exc:
         logger.warning(
-            ":warning: CLL unavailable for %s: %s — falling back to name-matching",
+            ":warning: CLL unavailable for %s: %s",
             node.unique_id,
             exc,
         )
@@ -278,6 +299,68 @@ def get_cll_results(
             _save_disk_cache(project_dir)
 
     return results
+
+
+def maybe_bulk_compile(context: "YamlRefactorContextProtocol") -> None:
+    """Compile all in-scope models with stale compiled SQL in one ``dbt compile`` call.
+
+    Runs upfront before CLL analysis so ``get_cll_results`` never needs to fall back
+    to per-model compiles (each of which carries ~2-4 s of dbt startup overhead).
+    When no models are stale this is a no-op.
+    """
+    import subprocess
+    import sys
+
+    from dbt_osmosis.core.node_filters import _iter_candidate_nodes
+
+    try:
+        from dbt.artifacts.resources import ModelNode  # dbt ≥ 1.8
+    except ImportError:
+        from dbt.contracts.graph.nodes import ModelNode  # type: ignore[no-redef]
+
+    runtime_cfg = context.project.runtime_cfg
+    project_dir = str(runtime_cfg.project_root)
+    target_name: str | None = getattr(runtime_cfg, "target_name", None)
+    target_base = Path(project_dir) / getattr(runtime_cfg, "target_path", "target")
+
+    logger.info(":mag: Checking compiled SQL freshness for candidate nodes...")
+    stale = [
+        node
+        for _, node in _iter_candidate_nodes(context)
+        if isinstance(node, ModelNode)
+        and _is_compiled_sql_stale(project_dir, node, target_base)
+    ]
+
+    if not stale:
+        logger.info(":white_check_mark: All compiled SQL is up-to-date — skipping bulk compile.")
+        return
+
+    logger.info(":hammer: %d stale model(s) — running bulk dbt compile upfront.", len(stale))
+
+    select_str = " ".join(n.name for n in stale)
+    # Windows CreateProcess has a ~32 767 char command-line limit; stay well below it.
+    # When the select string is too long just compile everything (no --select).
+    _MAX_SELECT_LEN = 8_000
+    cmd = [sys.executable, "-m", "dbt.cli.main", "compile", "--project-dir", project_dir]
+    if len(select_str) <= _MAX_SELECT_LEN:
+        cmd += ["--select", select_str]
+    else:
+        logger.debug(":information: select string too long (%d chars) — compiling all models.", len(select_str))
+    if target_name:
+        cmd += ["--target", target_name]
+
+    logger.debug("$ %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=project_dir)
+    if result.returncode != 0:
+        logger.warning(
+            ":warning: Bulk dbt compile failed (exit %d):\n%s",
+            result.returncode,
+            result.stderr or result.stdout,
+        )
+    else:
+        logger.info(":white_check_mark: Bulk compile done (%d models).", len(stale))
+        # Invalidate reader cache so ManifestCatalogReader picks up the refreshed manifest.
+        _READER_CACHE.pop(project_dir, None)
 
 
 def invalidate_cll_for_node(project_dir: str, node: t.Any) -> None:
@@ -335,7 +418,7 @@ Two cases both receive this sentinel:
 
 In both cases there is no single ancestor to inherit documentation from.  The sentinel
 tells ``_build_column_knowledge_graph`` to skip name-matching inheritance entirely —
-``enrich_rename_descriptions`` will attach a "Berechnet in:" annotation instead.
+``annotate_column_origins`` will attach a "computed in" annotation instead.
 """
 
 
@@ -361,8 +444,8 @@ def build_parent_map(results: list[t.Any], node_name: str) -> dict[str, str]:
             parent_map[r.column.lower()] = _CLL_COMPUTED_SENTINEL
             continue
         if r.is_computed:
-            # Single-source computed (e.g. COALESCE(a, 0)) — parent is known but derived.
-            # Still map to progenitor so "Abgeleitet aus:" annotation can fire.
+            # Single-source computed (e.g. COALESCE(a, 0)) — parent model is known but the
+            # column is derived. Still map it so a "derived from" annotation can fire.
             pass
         parent_map[r.column.lower()] = r.progenitor_model.lower()
     return parent_map
@@ -464,9 +547,11 @@ def _compute_column_origin(
             column_name,
         )
         return None
+
+    node_lower = node.name.lower()
+
     results = get_cll_results(context, node)
     col_lower = column_name.lower()
-    node_lower = node.name.lower()
 
     result = next(
         (r for r in results if r.model.lower() == node_lower and r.column.lower() == col_lower),
@@ -476,9 +561,16 @@ def _compute_column_origin(
     if result is None:
         return None
 
-    # Multi-source computed: no single traceable origin
+    # Multi-source computed: column is born in this model (UNION ALL, multi-arg expression…).
+    # Return (schema, model, "") as a sentinel so the caller can write "Berechnet in: SCHEMA.MODEL"
+    # rather than silently dropping the annotation.
     if result.progenitor_column is None and result.is_computed:
-        return None
+        schema = (
+            getattr(getattr(node, "unrendered_config", None), "schema", None)
+            or getattr(node, "schema", None)
+            or ""
+        )
+        return (str(schema).upper(), node.name.upper(), "")
 
     # Column originates here (source-layer or seed — first in dbt chain)
     if result.progenitor_model is None:
@@ -559,15 +651,15 @@ def _wrap_annotation(tag: str) -> str:
 
 def format_origin_tag(origin_col: str, origin_table: str, source_description: str | None) -> str:
     """Return the full annotation block for a **renamed** column."""
-    base = f"{get_config().annotation_renamed} {origin_table} -> {origin_col}"
+    base = f"{get_config().annotation_renamed} {origin_table}.{origin_col}"
     if source_description:
         base = f"{base} — {source_description}"
     return _wrap_annotation(base)
 
 
 def format_computed_origin_tag(origin_col: str, origin_table: str, source_description: str | None) -> str:
-    """Return the full annotation block for a **computed/transformed** column."""
-    base = f"{get_config().annotation_derived} {origin_table} -> {origin_col}"
+    """Return the full annotation block for a **passthrough / computed** column."""
+    base = f"{get_config().annotation_derived} {origin_table}.{origin_col}"
     if source_description:
         base = f"{base} — {source_description}"
     return _wrap_annotation(base)
@@ -576,6 +668,39 @@ def format_computed_origin_tag(origin_col: str, origin_table: str, source_descri
 def format_derived_tag(schema: str, model: str) -> str:
     """Return the annotation block for a **multi-source derived** column."""
     return _wrap_annotation(f"{get_config().annotation_computed} {schema}.{model}")
+
+
+def format_aggregate_from_tag(progenitor_col: str, progenitor_model: str) -> str:
+    """Return annotation for a single-source aggregate: ``Aggregated from COL in: MODEL``."""
+    cfg = get_config()
+    return _wrap_annotation(f"{cfg.annotation_aggregate_from} {progenitor_col} in: {progenitor_model}")
+
+
+def format_aggregate_in_tag(schema: str, model: str) -> str:
+    """Return annotation for an aggregate with no traceable source: ``Aggregated in: SCHEMA.MODEL``."""
+    return _wrap_annotation(f"{get_config().annotation_aggregate_in} {schema}.{model}")
+
+
+def format_window_from_tag(progenitor_col: str, progenitor_model: str) -> str:
+    """Return annotation for a window function with a traceable value column: ``Window from COL in: MODEL``."""
+    cfg = get_config()
+    return _wrap_annotation(f"{cfg.annotation_window_from} {progenitor_col} in: {progenitor_model}")
+
+
+def format_window_in_tag(schema: str, model: str) -> str:
+    """Return annotation for a window function with no traceable source: ``Window in: SCHEMA.MODEL``."""
+    return _wrap_annotation(f"{get_config().annotation_window_in} {schema}.{model}")
+
+
+def format_union_tag(schema: str, model: str) -> str:
+    """Return annotation for a top-level UNION ALL column: ``UNION ALL in: SCHEMA.MODEL``."""
+    return _wrap_annotation(f"{get_config().annotation_union} {schema}.{model}")
+
+
+def format_literal_tag(literal_value: str, schema: str, model: str) -> str:
+    """Return annotation for a hardcoded constant: ``Literal 'SAP' set in: SCHEMA.MODEL``."""
+    cfg = get_config()
+    return _wrap_annotation(f"{cfg.annotation_literal} {literal_value} set in: {schema}.{model}")
 
 
 def strip_origin_tag(description: str) -> str:
@@ -588,12 +713,28 @@ def strip_origin_tag(description: str) -> str:
     sep_idx = description.find(cfg.annotation_separator)
     if sep_idx != -1:
         return description[:sep_idx].rstrip()
-    # Legacy bare prefixes (pre-separator format) — always strip regardless of config
+    # Legacy bare prefixes (pre-separator format) — always strip regardless of config.
+    # Namespace-prefixed variants are checked first so that old single-line annotations
+    # like "NAMESPACE -> VERB TABLE.COL" strip to "" rather than leaving
+    # the orphaned "NAMESPACE ->" prefix behind.
+    _ns = cfg.annotation_namespace
     for marker in (
+        # Namespace-prefixed forms (legacy "NAMESPACE -> VERB ..." on a single line)
+        f"{_ns} -> {cfg.annotation_renamed}",
+        f"{_ns} -> {cfg.annotation_derived}",
+        f"{_ns} -> {cfg.annotation_computed}",
+        f"{_ns} -> {cfg.annotation_aggregate_from}",
+        f"{_ns} -> {cfg.annotation_aggregate_in}",
+        f"{_ns} -> {cfg.annotation_window_from}",
+        f"{_ns} -> {cfg.annotation_window_in}",
+        f"{_ns} -> {cfg.annotation_union}",
+        f"{_ns} -> {cfg.annotation_literal}",
+        # Bare verb forms (even older format, or when namespace was different)
         cfg.annotation_renamed, cfg.annotation_derived, cfg.annotation_computed,
+        cfg.annotation_aggregate_from, cfg.annotation_aggregate_in,
+        cfg.annotation_window_from, cfg.annotation_window_in,
+        cfg.annotation_union, cfg.annotation_literal,
         _CBM_ORIGIN_TAG, _CBM_DERIVED_TAG,
-        # Hard-coded originals for backward compat if user changed the config strings
-        "Umbenannt von:", "Abgeleitet aus:", "Berechnet in:",
     ):
         idx = description.find(marker)
         if idx != -1:

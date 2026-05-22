@@ -154,3 +154,50 @@ repos:
 ```
 
 That hook keeps schema YAML changes visible in the commit that introduced them.
+
+## Column-level lineage (CLL) configuration
+
+This fork extends dbt-osmosis with column-level lineage tracing and a project-level `.osmosis` configuration file.
+
+### `.osmosis` — project config file
+
+Place a `.osmosis` file in your dbt project root (next to `dbt_project.yml`):
+
+```ini
+[osmosis]
+# Annotation strings written into column descriptions
+annotation-renamed   = Renamed from:
+annotation-derived   = Derived from:
+annotation-computed  = Computed in:
+annotation-namespace = MY-ORG
+annotation-separator = __________
+
+# CLL cache location (relative to project root)
+cll-cache-path       = target/cll_cache.json
+cll-max-origin-depth = 60
+
+# Column reference file — see below
+column-docs-path     = docs/osmosis_column_references.yml
+
+# YAML output width
+yaml-best-width = 150
+```
+
+### Column reference (`column-docs-path`)
+
+A flat YAML file that maps column names (case-insensitive) to canonical descriptions. Every column listed there is **automatically CLL-ignored**:
+
+- No `cbm_derived_col` or `cbm_source_name` meta tags are written.
+- Stale tags from previous runs are stripped on the next osmosis run.
+- The description is injected whenever the column has no existing description in the YAML.
+
+This is the right place for audit/technical columns that are computed in every model (e.g. `ROW_BATCH_TIMESTAMP`) — define them once, osmosis handles them everywhere. No separate `cll-ignore-columns` setting is needed.
+
+```yaml
+# docs/osmosis_column_references.yml
+ROW_BATCH_TIMESTAMP: >-
+  Timestamp of the last batch load process that inserted or updated this record.
+ROW_CREATE_TIMESTAMP: >-
+  Timestamp when this record was first created in the database.
+```
+

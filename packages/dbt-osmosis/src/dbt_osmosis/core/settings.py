@@ -24,12 +24,33 @@ def _create_yaml_instance() -> ruamel.yaml.YAML:
 
 __all__ = [
     "EMPTY_STRING",
+    "get_managed_meta_keys",
     "YamlRefactorContext",
     "YamlRefactorSettings",
 ]
 
 EMPTY_STRING = ""
 """A null string constant for use in placeholder lists, this is always considered undocumented"""
+
+
+def get_managed_meta_keys() -> frozenset[str]:
+    """Return the set of meta keys owned by osmosis internals.
+
+    The set is computed from ``.osmosis`` config on every call (cached by
+    ``get_config()`` after the first read).  Keys in this set:
+
+    - Must NOT propagate downstream into child-layer YAML via inheritance.
+    - ARE re-applied when the column locally owns them (e.g. ``anchor-description``
+      set by AML enrichment survives on the STG node that owns it).
+    """
+    from dbt_osmosis.config import get_config
+    cfg = get_config()
+    return frozenset({
+        cfg.anchor_meta_key,
+        cfg.meta_key_renamed_from,
+        cfg.meta_key_derived_from,
+        cfg.meta_key_computed_in,
+    })
 
 
 @dataclass
@@ -69,8 +90,6 @@ class YamlRefactorSettings:
     """Skip adding data types in the yaml files."""
     skip_add_source_columns: bool = False
     """Skip adding columns in the source yaml files specifically."""
-    add_progenitor_to_meta: bool = False
-    """Add a custom progenitor field to the meta section indicating a column's origin."""
     numeric_precision_and_scale: bool = False
     """Include numeric precision in the data type."""
     string_length: bool = False
@@ -395,6 +414,14 @@ class YamlRefactorContext:
             self.placeholders = (EMPTY_STRING, *self.placeholders)
         for setting, val in self.yaml_settings.items():
             setattr(self.yaml_handler, setting, val)
+        # Apply yaml_best_width from .osmosis config (takes precedence over yaml_settings).
+        # Update BOTH best_width and width so the str_representer closure (which reads
+        # y.best_width at call time) and ruamel's own emitter both use the same limit.
+        from dbt_osmosis.config import get_config  # local import — avoids circular imports
+        _best_width = get_config().yaml_best_width
+        if _best_width > 0:
+            self.yaml_handler.best_width = _best_width
+            self.yaml_handler.width = _best_width
         # Override max_workers with dbt's thread count when available.
         if hasattr(self.project.runtime_cfg, "threads") and self.project.runtime_cfg.threads:
             self.pool._max_workers = self.project.runtime_cfg.threads

@@ -130,7 +130,12 @@ def get_target_yaml_path(context: YamlRefactorContextProtocol, node: ResultNode)
 
     tpl = _get_yaml_path_template(context, node)
     if not tpl:
-        logger.warning(":warning: No path template found for => %s", node.unique_id)
+        if node.resource_type == NodeType.Source:
+            # Sources not in source_definitions fall back to original_file_path, which is correct.
+            # No warning needed — this is expected for sources managed via their own YAML files.
+            logger.debug(":page_facing_up: No source_definitions entry for => %s; using original_file_path", node.unique_id)
+        else:
+            logger.warning(":warning: No path template found for => %s", node.unique_id)
         return Path(project_root, t.cast("str", node.original_file_path))
 
     path = Path(project_root, t.cast("str", node.original_file_path))

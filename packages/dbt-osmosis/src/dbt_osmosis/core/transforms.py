@@ -18,6 +18,8 @@ if t.TYPE_CHECKING:
     )
 
 from dbt_osmosis.core import logger
+from dbt_osmosis.core.settings import get_managed_meta_keys
+from dbt_osmosis.config import get_config
 
 
 def _run_dbt_compile_for_node(context: t.Any, node: t.Any) -> None:
@@ -34,11 +36,10 @@ __all__ = [
     "TransformOperation",
     "TransformPipeline",
     "_transform_op",
-    "enrich_rename_descriptions",
+    "annotate_column_origins",
     "inherit_upstream_column_knowledge",
     "inject_missing_columns",
     "remove_columns_not_in_database",
-    "report_name_match_fallbacks",
     "sort_columns_alphabetically",
     "sort_columns_as_configured",
     "sort_columns_as_in_database",
@@ -226,8 +227,12 @@ def inherit_upstream_column_knowledge(
         # Must process sequentially in topological order so that upstream in-memory
         # state is already updated when downstream nodes inherit from it.
         # pool.map would process concurrently and break the cascade (requires 2 passes).
-        for _, n in _iter_candidate_nodes(context):
+        nodes = list(_iter_candidate_nodes(context))
+        total = len(nodes)
+        for i, (_, n) in enumerate(nodes, start=1):
             inherit_upstream_column_knowledge(context, n)
+            if i % 25 == 0 or i == total:
+                logger.info(":hourglass: Inherit Upstream Column Knowledge progress => %d / %d", i, total)
         return
 
     logger.info(":dna: Inheriting column knowledge for => %s", node.unique_id)
@@ -265,28 +270,11 @@ def inherit_upstream_column_knowledge(
             if extra not in inheritable:
                 inheritable.append(extra)
 
-        # Special case: osmosis_progenitor should always be inherited if add-progenitor-to-meta is enabled,
-        # regardless of skip-merge-meta setting. This ensures progenitor tracking works independently.
-        if _get_setting_for_node(
-            "add-progenitor-to-meta",
-            node,
-            name,
-            fallback=context.settings.add_progenitor_to_meta,
-        ):
-            # Check if meta has osmosis_progenitor in kwargs (check both top-level and config.meta for dbt 1.10)
-            meta_progenitor = kwargs.get("meta", {}).get("osmosis_progenitor")
-            if not meta_progenitor:
-                meta_progenitor = kwargs.get("config", {}).get("meta", {}).get("osmosis_progenitor")
-            if meta_progenitor:
-                # Ensure meta is in inheritable if not already present
-                if "meta" not in inheritable:
-                    inheritable.append("meta")
-
-        # Special case: if force_inherit_descriptions is False and the local column already has
+        # Special case: if force_inherit_descriptions is Falseand the local column already has
         # a description, don't inherit the description from upstream (preserve local description).
         # If anchor-description is set on a column via meta, it is exempt from
         # force-inherit-descriptions — the manually curated description is preserved even during
-        # a forced re-propagation pass. The CLL annotation step (enrich_rename_descriptions) runs
+        # a forced re-propagation pass. The CLL annotation step (annotate_column_origins) runs
         # as a separate transform and is unaffected by anchoring.
         #
         # Exception: a column whose description consists ONLY of a CBM-ODP annotation (no real
@@ -314,6 +302,46 @@ def inherit_upstream_column_knowledge(
             inheritable.remove("description")
 
         updated_metadata = {k: v for k, v in kwargs.items() if v is not None and k in inheritable}
+
+        # Strip CBM annotation blocks from inherited descriptions.
+        # Annotations are layer-specific — each layer's annotate_column_origins writes its
+        # own annotation based on that layer's config.  Letting them bleed downstream via
+        # inheritance causes intermediate layers (prom__aa, kwm_aa, etc.) to show staging-level
+        # annotations that belong only in the staging YAML.
+        # Note: annotation always runs AFTER inheritance in the pipeline, so this stripping
+        # never removes freshly-written annotation from the current node — it only cleans
+        # stale annotation carried on the upstream node's in-memory description.
+        if "description" in updated_metadata and isinstance(updated_metadata["description"], str):
+            from dbt_osmosis.core.cll import strip_all_cbm_tags
+            _clean_desc = strip_all_cbm_tags(updated_metadata["description"]).strip()
+            updated_metadata = {**updated_metadata, "description": _clean_desc}
+
+        # Strip osmosis-internal protection markers from inherited meta.
+        # MANAGED keys (anchor_meta_key, meta_key_renamed_from, meta_key_derived_from,
+        # meta_key_computed_in) must not
+        # propagate downstream, but ARE re-applied when the column locally owns them.
+        # Both top-level meta AND config.meta are filtered (fusion_compat stores
+        # anchor-description in config.meta).
+        _managed = get_managed_meta_keys()
+        if "meta" in updated_metadata and isinstance(updated_metadata["meta"], dict):
+            local_meta = dict(node_column.meta or {})
+            filtered_meta = {k: v for k, v in updated_metadata["meta"].items() if k not in _managed}
+            # Re-apply managed keys the column itself owns (e.g. anchor-description set by AML injection)
+            for key in _managed:
+                if key in local_meta:
+                    filtered_meta[key] = local_meta[key]
+            updated_metadata = {**updated_metadata, "meta": filtered_meta}
+
+        if isinstance(updated_metadata.get("config"), dict):
+            config_meta = updated_metadata["config"].get("meta", {})
+            if config_meta:
+                local_config_meta = dict((getattr(node_column, "config", None) or {}).get("meta", {}))
+                filtered_config_meta = {k: v for k, v in config_meta.items() if k not in _managed}
+                for key in _managed:
+                    if key in local_config_meta:
+                        filtered_config_meta[key] = local_config_meta[key]
+                updated_metadata["config"]["meta"] = filtered_config_meta
+
         logger.debug(
             ":star2: Inheriting updated metadata => %s for column => %s",
             updated_metadata,
@@ -336,11 +364,24 @@ def inject_missing_columns(
         return
     if node is None:
         logger.info(":wave: Injecting missing columns for all matched nodes.")
-        for _ in context.pool.map(
+        # Batch-prefetch source columns in a single DB round trip before per-node processing.
+        # For source nodes, get_columns always hits the DB (no CLL) — batching here eliminates
+        # the N sequential round trips that make large source refreshes slow.
+        from dbt_osmosis.core.introspection import prefetch_columns
+
+        source_nodes = [
+            n for _, n in _iter_candidate_nodes(context) if n.resource_type == NodeType.Source
+        ]
+        if source_nodes:
+            prefetch_columns(context, source_nodes)
+        nodes = list(_iter_candidate_nodes(context))
+        total = len(nodes)
+        for i, _ in enumerate(context.pool.map(
             partial(inject_missing_columns, context),
-            (n for _, n in _iter_candidate_nodes(context)),
-        ):
-            ...
+            (n for _, n in nodes),
+        ), start=1):
+            if i % 25 == 0 or i == total:
+                logger.info(":hourglass: Inject Missing Columns progress => %d / %d", i, total)
         return
     if (
         _get_setting_for_node(
@@ -779,34 +820,45 @@ def synchronize_data_types(
 
 
 
-@_transform_op("Enrich Column Origins")
-def enrich_rename_descriptions(
+@_transform_op("Annotate Column Origins")
+def annotate_column_origins(
     context: YamlRefactorContextProtocol,
     node: ResultNode | None = None,
 ) -> None:
-    """Annotate columns with CLL-traced origin via meta tags and optional description injection.
+    """Annotate columns with their CLL-traced origin via meta tags and optional description blocks.
 
     For each column that was **renamed** relative to its ultimate source column:
-      - Writes ``cbm_source_name: SCHEMA.MODEL.COL`` to column meta.
-      - Writes ``cbm_source_description: <text>`` when the source YAML has a description.
+      - Writes ``cbm_origin: SCHEMA.MODEL.COL`` to column meta.
       - Removes stale tags from passthrough columns (same name end-to-end).
     For each column derived from multiple sources (unresolvable progenitor):
       - Writes ``cbm_derived_col: SCHEMA.MODEL`` to column meta.
 
-    When ``append-col-origin-to-description: true`` is also set:
-      - Renamed/transformed columns (col name differs from ultimate source col):
-        appends ``CBM_ORIGIN: SCHEMA.MODEL.COL`` to description.
-      - Multi-source columns: appends ``CBM_DERIVED_IN: SCHEMA.MODEL`` to description.
-      - Passthrough columns (same name end-to-end): no description injection.
+    Annotation is controlled by ``annotate-column-origin-infos`` (per node/layer):
+      - ``if_altered``: annotate only renamed / derived / computed columns.
+      - ``always``: annotate every column, including passthrough (intended for DP
+        endpoint layers where origins are non-obvious).
+      - absent / empty: no annotation appended to descriptions.
+      In all cases: source description is omitted from the annotation when it is
+      identical to the column's own description (deduplication).
 
-    Controlled by ``add-col-origin-to-meta: true`` in ``+dbt-osmosis-options``.
+    When ``write-cll-tags-to-meta: true`` is set in ``.osmosis``:
+      - Pure renames: ``meta_key_renamed_from`` (``TABLE.COLUMN``) written to meta.
+      - Single-source computed: ``meta_key_derived_from`` (``TABLE.COLUMN``) written to meta.
+      - Multi-source columns: ``meta_key_computed_in`` (``SCHEMA.MODEL``) written to meta.
+      Off by default — enable when querying the dbt manifest for lineage.
     Sources are always skipped (no SQL to trace through).
     """
     from dbt.artifacts.resources.types import NodeType
     from dbt_osmosis.core.cll import (
+        format_aggregate_from_tag,
+        format_aggregate_in_tag,
         format_computed_origin_tag,
         format_derived_tag,
+        format_literal_tag,
         format_origin_tag,
+        format_union_tag,
+        format_window_from_tag,
+        format_window_in_tag,
         get_column_origin,
         get_cll_results,
         get_origin_source_description,
@@ -817,19 +869,31 @@ def enrich_rename_descriptions(
 
     if node is None:
         logger.info(":wave: Enriching column origins across all matched nodes.")
-        for _ in context.pool.map(
-            partial(enrich_rename_descriptions, context),
-            (n for _, n in _iter_candidate_nodes(context)),
-        ):
-            ...
+        nodes = list(_iter_candidate_nodes(context))
+        total = len(nodes)
+        for i, _ in enumerate(context.pool.map(
+            partial(annotate_column_origins, context),
+            (n for _, n in nodes),
+        ), start=1):
+            if i % 25 == 0 or i == total:
+                logger.info(":hourglass: Annotate Column Origins progress => %d / %d", i, total)
         return
 
-    if not _get_setting_for_node("add-col-origin-to-meta", node, fallback=False):
-        return
     if node.resource_type == NodeType.Source:
         return
 
-    append_to_desc = _get_setting_for_node("append-col-origin-to-description", node, fallback=False)
+    from dbt_osmosis.config import get_column_docs as _get_col_docs_fn
+    _col_docs: dict[str, str] = _get_col_docs_fn()
+    # Columns in the reference file are implicitly ignored by CLL annotation.
+    _ignore_cols: frozenset[str] = frozenset(_col_docs.keys())
+
+    # annotate-column-origin-infos controls annotation depth per node/layer:
+    #   "if_altered" → annotate renamed / derived / computed columns only
+    #   "always"     → also annotate passthrough columns (use on DP endpoint layers)
+    #   "never" / false / absent → no annotation (but CLL still runs to fill renamed
+    #                              column descriptions and strip stale annotation tags)
+    _raw_annotate = _get_setting_for_node("annotate-column-origin-infos", node, fallback=None)
+    _annotate_mode: str = "" if (not _raw_annotate or _raw_annotate == "never") else str(_raw_annotate)
 
     results = get_cll_results(context, node)
     node_lower = node.name.lower()
@@ -844,116 +908,310 @@ def enrich_rename_descriptions(
     ).upper()
     node_ref = f"{node_schema}.{node.name.upper()}"
 
+    _cfg = get_config()
+    _managed = get_managed_meta_keys()
+    _key_renamed = _cfg.meta_key_renamed_from
+    _key_derived = _cfg.meta_key_derived_from
+    _key_computed = _cfg.meta_key_computed_in
+    _write_meta = _cfg.write_cll_tags_to_meta
+
     for col_name, node_col in node.columns.items():
+        # Columns in the ignore list are never annotated. If stale tags from a
+        # previous run are present, strip them now so the YAML stays clean.
+        # Central docs provide a canonical description when the column has none.
+        if _ignore_cols and col_name.lower() in _ignore_cols:
+            # Strip ALL managed keys from both top-level meta and config.meta.
+            stale_meta = dict(node_col.meta or {})
+            removed_meta = {stale_meta.pop(k, None) for k in _managed} - {None}
+
+            raw_config_meta: dict[str, t.Any] = {}
+            node_config = getattr(node_col, "config", None)
+            if node_config is not None:
+                raw_config_meta = dict(
+                    node_config.get("meta", {}) if isinstance(node_config, dict)
+                    else getattr(node_config, "meta", None) or {}
+                )
+            removed_config = {raw_config_meta.pop(k, None) for k in _managed} - {None}
+
+            cleaned_config: dict[str, t.Any] | None = None
+            if removed_config and node_config is not None:
+                from dbt_osmosis.core.inheritance import _column_to_dict
+                col_as_dict = _column_to_dict(node_col, omit_none=True)
+                config_base = col_as_dict.get("config") or {}
+                cleaned_config = {**config_base, "meta": raw_config_meta}
+
+            stripped_desc = strip_all_cbm_tags((node_col.description or "").strip())
+            if _col_docs:
+                central_doc = _col_docs.get(col_name.lower())
+                if central_doc and (not stripped_desc or stripped_desc in context.placeholders):
+                    stripped_desc = central_doc
+
+            any_removed = bool(removed_meta) or bool(removed_config)
+            if any_removed or stripped_desc != (node_col.description or "").strip():
+                replace_kwargs: dict[str, t.Any] = {"meta": stale_meta, "description": stripped_desc}
+                if cleaned_config is not None:
+                    replace_kwargs["config"] = cleaned_config
+                node.columns[col_name] = node_col.replace(**replace_kwargs)
+            continue
+
         result = result_by_col.get(col_name.lower())
         if result is None:
+            # CLL has no trace for this column.
+            # Still clean any stale managed meta keys left by previous runs.
+            stale_meta = dict(node_col.meta or {})
+            removed_any = bool({stale_meta.pop(k, None) for k in _managed} - {None})
+
+            raw_config_meta: dict[str, t.Any] = {}
+            node_config = getattr(node_col, "config", None)
+            if node_config is not None:
+                raw_config_meta = dict(
+                    node_config.get("meta", {}) if isinstance(node_config, dict)
+                    else getattr(node_config, "meta", None) or {}
+                )
+            removed_cfg = bool({raw_config_meta.pop(k, None) for k in _managed} - {None})
+
+            cleaned_config: dict[str, t.Any] | None = None
+            if removed_cfg and node_config is not None:
+                from dbt_osmosis.core.inheritance import _column_to_dict
+                col_as_dict = _column_to_dict(node_col, omit_none=True)
+                config_base = col_as_dict.get("config") or {}
+                cleaned_config = {**config_base, "meta": raw_config_meta}
+
+            replace_kwargs: dict[str, t.Any] = {}
+            if removed_any:
+                replace_kwargs["meta"] = stale_meta
+            if cleaned_config is not None:
+                replace_kwargs["config"] = cleaned_config
+
+            # Strip stale CBM annotation tags from the description even when CLL has
+            # no result for this column.  Ensures annotations from previous runs are
+            # removed when annotation mode is turned off or CLL fails to trace the column.
+            raw_desc = (node_col.description or "").strip()
+            stripped_desc = strip_all_cbm_tags(raw_desc)
+            if stripped_desc in context.placeholders:
+                stripped_desc = ""
+            if stripped_desc != raw_desc:
+                replace_kwargs["description"] = stripped_desc
+
+            # Try central docs for a description when column has none.
+            if _col_docs:
+                central_doc = _col_docs.get(col_name.lower())
+                if central_doc and (not stripped_desc or stripped_desc in context.placeholders):
+                    replace_kwargs["description"] = central_doc
+
+            if replace_kwargs:
+                node.columns[col_name] = node_col.replace(**replace_kwargs)
             continue
 
         new_meta = dict(node_col.meta or {})
         progenitor_col_raw = result.progenitor_column
         is_multi_source = result.is_computed and progenitor_col_raw is None
 
-        if is_multi_source:
-            new_meta["cbm_derived_col"] = node_ref
-            new_meta.pop("cbm_source_name", None)
+        # New semantic types — use getattr for backward compat with old SimpleNamespace disk cache entries
+        _is_union     = getattr(result, "is_union",     False)
+        _is_literal   = getattr(result, "is_literal",   False)
+        _is_aggregate = getattr(result, "is_aggregate", False)
+        _is_window    = getattr(result, "is_window",    False)
+        _literal_val  = getattr(result, "literal_value", None)
 
-            if append_to_desc:
-                # Multi-source: "Abgeleitet aus: SCHEMA.MODEL" — can't trace to a single column
-                derived_tag = format_derived_tag(node_schema, node.name.upper())
-                base_desc = strip_all_cbm_tags((node_col.description or "").strip())
-                new_desc = f"{base_desc}\n\n{derived_tag}".strip() if base_desc else derived_tag
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc)
+        # Clean managed meta keys from config.meta for all columns that have a CLL result.
+        # (Columns without results and ignore-list columns handle this in their own branches.)
+        _raw_cfg_meta: dict[str, t.Any] = {}
+        _node_config = getattr(node_col, "config", None)
+        if _node_config is not None:
+            _raw_cfg_meta = dict(
+                _node_config.get("meta", {}) if isinstance(_node_config, dict)
+                else getattr(_node_config, "meta", None) or {}
+            )
+        _removed_cfg = bool({_raw_cfg_meta.pop(k, None) for k in _managed} - {None})
+        _cleaned_config: dict[str, t.Any] | None = None
+        if _removed_cfg and _node_config is not None:
+            from dbt_osmosis.core.inheritance import _column_to_dict
+            _col_as_dict = _column_to_dict(node_col, omit_none=True)
+            _config_base = _col_as_dict.get("config") or {}
+            _cleaned_config = {**_config_base, "meta": _raw_cfg_meta}
+        _config_kwarg: dict[str, t.Any] = {"config": _cleaned_config} if _cleaned_config is not None else {}
+
+        if _is_union or _is_literal or _is_aggregate or _is_window:
+            new_meta.pop(_key_computed, None)
+            new_meta.pop(_key_renamed, None)
+            new_meta.pop(_key_derived, None)
+            base_desc = strip_all_cbm_tags((node_col.description or "").strip())
+            has_real_desc = bool(base_desc) and base_desc not in context.placeholders
+            central_doc = _col_docs.get(col_name.lower()) if _col_docs else None
+
+            if central_doc and not has_real_desc:
+                node.columns[col_name] = node_col.replace(meta=new_meta, description=central_doc, **_config_kwarg)
+            elif _annotate_mode:
+                if _is_union:
+                    tag = format_union_tag(node_schema, node.name.upper())
+                elif _is_literal:
+                    tag = format_literal_tag(_literal_val or "", node_schema, node.name.upper())
+                elif _is_aggregate:
+                    if result.progenitor_column is not None:
+                        tag = format_aggregate_from_tag(
+                            result.progenitor_column.upper(), result.progenitor_model.upper()
+                        )
+                    else:
+                        tag = format_aggregate_in_tag(node_schema, node.name.upper())
+                else:  # _is_window
+                    if result.progenitor_column is not None:
+                        tag = format_window_from_tag(
+                            result.progenitor_column.upper(), result.progenitor_model.upper()
+                        )
+                    else:
+                        tag = format_window_in_tag(node_schema, node.name.upper())
+
+                new_desc = f"{base_desc}\n\n{tag}".strip() if has_real_desc else tag
+                node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
             else:
-                node.columns[col_name] = node_col.replace(meta=new_meta)
+                # Non-annotation mode: still propagate the immediate progenitor description.
+                # Without this, wrong descriptions written by a previous (buggy) CLL run
+                # persist forever because no annotation tag ever replaces them.
+                if result.progenitor_column is not None:
+                    _raw_prog = get_origin_source_description(
+                        context, "", result.progenitor_model or "", result.progenitor_column
+                    )
+                    if _raw_prog:
+                        _prog_desc = strip_all_cbm_tags(_raw_prog).strip() or None
+                        if _prog_desc:
+                            _force_here = _get_setting_for_node(
+                                "force-inherit-descriptions", node, col_name,
+                                fallback=context.settings.force_inherit_descriptions,
+                            )
+                            _anchored_here = bool(
+                                _get_setting_for_node("anchor-description", node, col_name, fallback=False)
+                            )
+                            if not has_real_desc or (_force_here and not _anchored_here):
+                                base_desc = _prog_desc
+                node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
+            continue
+
+        if is_multi_source:
+            if _write_meta:
+                new_meta[_key_computed] = node_ref
+            else:
+                new_meta.pop(_key_computed, None)
+            new_meta.pop(_key_renamed, None)
+            new_meta.pop(_key_derived, None)
+
+            # Always strip old CBM tags; preserves real descriptions unchanged.
+            base_desc = strip_all_cbm_tags((node_col.description or "").strip())
+            has_real_desc = bool(base_desc) and base_desc not in context.placeholders
+
+            # Use central docs as the description when the column has none.
+            central_doc = _col_docs.get(col_name.lower()) if _col_docs else None
+            if central_doc and not has_real_desc:
+                node.columns[col_name] = node_col.replace(meta=new_meta, description=central_doc, **_config_kwarg)
+            elif _annotate_mode:
+                # Multi-source: "Berechnet in: SCHEMA.MODEL" — can't trace to a single column
+                derived_tag = format_derived_tag(node_schema, node.name.upper())
+                new_desc = f"{base_desc}\n\n{derived_tag}".strip() if has_real_desc else derived_tag
+                node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
+            else:
+                # No annotation mode: still write stripped description to remove any old tags.
+                node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
 
             logger.debug(":pencil: %s.%s => derived in %s", node.name, col_name, node_ref)
 
         else:
             origin = get_column_origin(context, node, col_name)
             if origin is None:
+                # Can't resolve origin — still clean stale meta and strip old annotations.
+                base_desc = strip_all_cbm_tags((node_col.description or "").strip())
+                if not base_desc or base_desc in context.placeholders:
+                    base_desc = ""
+                node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
                 continue
 
             schema, origin_model, origin_col = origin
+
+            if not origin_col:
+                # Computed column found upstream — origin_model is where it was computed.
+                # Write "Berechnet in: SCHEMA.MODEL" rather than a column-level reference.
+                if _write_meta:
+                    new_meta[_key_computed] = f"{schema}.{origin_model}"
+                else:
+                    new_meta.pop(_key_computed, None)
+                new_meta.pop(_key_renamed, None)
+                new_meta.pop(_key_derived, None)
+                base_desc = strip_all_cbm_tags((node_col.description or "").strip())
+                if not base_desc or base_desc in context.placeholders:
+                    base_desc = ""
+                if _annotate_mode:
+                    derived_tag = format_derived_tag(schema, origin_model)
+                    new_desc = f"{base_desc}\n\n{derived_tag}".strip() if base_desc else derived_tag
+                    node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
+                else:
+                    node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
+                continue
+
             # Use CLL's is_rename (pure alias, no expression) rather than a name-comparison
             # heuristic. is_computed covers casts, aggregations, CASE, arithmetic, etc.
             is_pure_rename = result.is_rename
             is_name_changed = col_name.upper() != origin_col.upper()
-            new_meta.pop("cbm_derived_col", None)
+            new_meta.pop(_key_computed, None)
 
-            if is_name_changed:
-                new_meta["cbm_source_name"] = f"{schema}.{origin_model}.{origin_col}"
-                source_desc = get_origin_source_description(context, schema, origin_model, origin_col)
-                if source_desc:
-                    new_meta["cbm_source_description"] = source_desc
-                else:
-                    new_meta.pop("cbm_source_description", None)
-            else:
-                new_meta.pop("cbm_source_name", None)
-                new_meta.pop("cbm_source_description", None)
-
-            if append_to_desc and is_name_changed:
-                # Pure alias rename → "Basiert auf:"; computed (cast/agg/expr) → "Abgeleitet aus:"
+            if _write_meta:
                 if is_pure_rename:
-                    origin_annotation = format_origin_tag(
-                        origin_col, origin_model, new_meta.get("cbm_source_description")
-                    )
+                    new_meta[_key_renamed] = f"{origin_model}.{origin_col}"
+                    new_meta.pop(_key_derived, None)
                 else:
-                    origin_annotation = format_computed_origin_tag(
-                        origin_col, origin_model, new_meta.get("cbm_source_description")
-                    )
-                base_desc = strip_all_cbm_tags((node_col.description or "").strip())
-                if not base_desc or base_desc in context.placeholders:
-                    base_desc = ""
-                new_desc = f"{base_desc}\n\n{origin_annotation}".strip() if base_desc else origin_annotation
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc)
+                    new_meta[_key_derived] = f"{origin_model}.{origin_col}"
+                    new_meta.pop(_key_renamed, None)
             else:
-                node.columns[col_name] = node_col.replace(meta=new_meta)
+                new_meta.pop(_key_renamed, None)
+                new_meta.pop(_key_derived, None)
+
+            raw_source_desc = get_origin_source_description(context, schema, origin_model, origin_col)
+            # Strip any CBM annotation tags that may have been written to the upstream
+            # manifest by a concurrent annotate_column_origins call in the same run.
+            # Without this, the annotation of the upstream leaks into the source_desc
+            # embedded in this node's annotation.
+            source_desc: str | None = strip_all_cbm_tags(raw_source_desc).strip() or None if raw_source_desc else None
+
+            # Always strip old CBM tags from the current description — ensures annotations
+            # from previous runs don't accumulate when annotate mode is "never".
+            base_desc = strip_all_cbm_tags((node_col.description or "").strip())
+            if not base_desc or base_desc in context.placeholders:
+                base_desc = ""
+
+            # When the column has no own description, promote source_desc as base_desc.
+            # This bridges the rename gap: name-based inheritance cannot propagate
+            # descriptions across renamed columns, so CLL-resolved source_desc fills the
+            # role instead. As a side-effect the dedup check below will suppress the
+            # source description from the annotation (no duplication).
+            if not base_desc and source_desc:
+                base_desc = source_desc
+
+            # Determine annotation block.
+            # annotation-include-source-description is a per-node option (default true):
+            #   true  → inject source desc into annotation when it differs from base_desc
+            #   false → write origin reference (TABLE.COL) only (DP layers)
+            origin_annotation: str | None = None
+            annotation_src_desc: str | None = None
+            if _get_setting_for_node("annotation-include-source-description", node, fallback=True):
+                annotation_src_desc = source_desc if source_desc and source_desc.strip() != base_desc else None
+            if is_name_changed:
+                # Renamed: always annotate (shows the original col name — not obvious from YAML).
+                if is_pure_rename:
+                    origin_annotation = format_origin_tag(origin_col, origin_model, annotation_src_desc)
+                else:
+                    origin_annotation = format_computed_origin_tag(origin_col, origin_model, annotation_src_desc)
+            elif _annotate_mode == "always":
+                # Passthrough: annotate only when layer is set to "always".
+                origin_annotation = format_computed_origin_tag(origin_col, origin_model, annotation_src_desc)
+
+            if _annotate_mode and origin_annotation is not None:
+                new_desc = f"{base_desc}\n\n{origin_annotation}".strip() if base_desc else origin_annotation
+            else:
+                # No annotation: write stripped description so old tags are removed.
+                new_desc = base_desc
+
+            node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
 
             if is_name_changed:
-                logger.debug(":pencil: %s.%s => renamed from %s", node.name, col_name, new_meta["cbm_source_name"])
-
-
-@_transform_op("Report Name-Match Fallbacks")
-def report_name_match_fallbacks(
-    context: YamlRefactorContextProtocol,
-    node: ResultNode | None = None,
-) -> None:
-    """Emit a warning summary of columns that fell back to name-matching.
-
-    When CLL has no lineage data for a column (parser failure, SQL construct CLL
-    can't trace, or CLL never ran for a model), osmosis falls back to name-matching
-    to find a description.  This transform collects those cases from the
-    inheritance accumulator and logs a single summary at the end of the pipeline
-    so developers know which models may have inherited descriptions via heuristics
-    rather than deterministic column-level lineage.
-    """
-    if node is not None:
-        # Only meaningful as a full-run (context-level) step; skip per-node calls.
-        return
-
-    from dbt_osmosis.core.inheritance import get_and_clear_name_match_fallback
-
-    fallbacks = get_and_clear_name_match_fallback()
-    if not fallbacks:
-        logger.info(
-            ":white_check_mark: All column lineage resolved via CLL — no name-matching fallbacks used."
-        )
-        return
-
-    lines = [
-        f":warning: CLL had no lineage data for {sum(len(v) for v in fallbacks.values())} "
-        f"column(s) across {len(fallbacks)} model(s) — name-matching was used as fallback:"
-    ]
-    for uid, cols in sorted(fallbacks.items()):
-        # Shorten "model.project.schema.name" to "schema.name" for readability
-        parts = uid.split(".")
-        short = ".".join(parts[-2:]) if len(parts) >= 2 else uid
-        lines.append(f"  {short}: {', '.join(cols)}")
-    lines.append(
-        "  → Verify these columns inherited the correct description. "
-        "CLL could not trace their lineage (unsupported SQL construct or parser failure)."
-    )
-    logger.warning("\n".join(lines))
+                logger.debug(":pencil: %s.%s => renamed from %s.%s", node.name, col_name, schema, origin_col)
 
 
 def _collect_upstream_documents(

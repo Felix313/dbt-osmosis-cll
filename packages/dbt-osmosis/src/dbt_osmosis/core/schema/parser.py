@@ -1,4 +1,5 @@
 import re
+import textwrap
 import typing as t
 from types import MappingProxyType
 
@@ -118,12 +119,13 @@ def create_yaml_instance(
 
         This representer applies different YAML scalar styles based on string content:
         - Quoted style (double quotes) for YAML boolean-like values (yes/no/on/off)
-        - Folded style (>) for long single-line strings exceeding configured width
-        - Literal style (|) for multi-line strings to preserve newlines
+        - Literal style (|) for multi-line strings, with long lines re-wrapped
+        - Literal style (|) for single-line strings that exceed the configured width
         - Plain style for all other strings
 
-        The function prevents ambiguous YAML values from being misinterpreted as booleans
-        and applies sensible formatting rules for dbt model descriptions and documentation.
+        Uses ``y.best_width`` at serialization time (not the captured ``width`` at
+        creation time) so that post-creation updates (e.g. from ``.osmosis`` config)
+        are honoured.  This makes repeated runs idempotent.
 
         Args:
             dumper: The ruamel.yaml RoundTripDumper instance
@@ -136,10 +138,26 @@ def create_yaml_instance(
         # https://github.com/commx/ruamel-yaml/blob/280677cf647912c599d8886000020d6ffbbb4216/resolver.py#L32
         if re.match(r"^(y|Y|yes|Yes|YES|n|N|no|No|NO|on|On|ON|off|Off|OFF)$", data):
             return dumper.represent_scalar("tag:yaml.org,2002:str", data, style='"')
+        # Use y.best_width at call time so post-creation config overrides (e.g. from
+        # .osmosis yaml-best-width) are reflected — not the stale captured `width`.
+        effective_width = y.best_width
         newlines = len(data.splitlines())
-        if newlines == 1 and len(data) > width - len(f"description{y.prefix_colon or ''}: "):
-            return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=">")
+        if newlines == 1 and len(data) > effective_width - len(f"description{y.prefix_colon or ''}: "):
+            # Wrap long single-line strings and emit as literal block (|) so that
+            # consumers (e.g. DBeaver column comments) receive real line breaks
+            # rather than one very long unbroken string.
+            wrapped = "\n".join(textwrap.wrap(data, effective_width) or [data])
+            return dumper.represent_scalar("tag:yaml.org,2002:str", wrapped, style="|")
         if newlines > 1:
+            # Pre-wrap any long lines before emitting as literal block (|).
+            # ruamel.yaml preserves | content verbatim, so we must wrap ourselves.
+            wrapped_lines: list[str] = []
+            for line in data.splitlines():
+                if len(line) > effective_width:
+                    wrapped_lines.extend(textwrap.wrap(line, effective_width) or [""])
+                else:
+                    wrapped_lines.append(line)
+            data = "\n".join(wrapped_lines)
             return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
         return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
