@@ -54,8 +54,15 @@ class ColumnLineageResult:
     is_union: bool = False
     """True when the column originates from a top-level UNION ALL / UNION / INTERSECT / EXCEPT."""
 
+    is_generated: bool = False
+    """True when the column is produced by a zero-argument system function with no column inputs
+    (CURRENT_DATE, SYSDATE, UUID_STRING, RANDOM, SEQ4, etc.)."""
+
     literal_value: Optional[str] = None
     """The string representation of the constant when ``is_literal`` is True, else None."""
+
+    generated_value: Optional[str] = None
+    """The expression string when ``is_generated`` is True (e.g. 'CURRENT_DATE', 'UUID_STRING()')."""
 
     is_first_in_chain: bool = False
     """True when this column has no traceable upstream dbt model and is not computed.
@@ -227,7 +234,9 @@ def get_column_lineage(
             is_window     = ttype == "window"
             is_literal    = ttype == "literal"
             is_union      = ttype == "union"
-            literal_value = lin.sql_expression if is_literal else None
+            is_generated  = ttype == "generated"
+            literal_value   = lin.sql_expression if is_literal  else None
+            generated_value = lin.sql_expression if is_generated else None
             # Multiple source columns → no single traceable progenitor
             if len(lin.source_columns) > 1:
                 progenitor_model, progenitor_column = None, None
@@ -250,7 +259,9 @@ def get_column_lineage(
                     is_window=is_window,
                     is_literal=is_literal,
                     is_union=is_union,
+                    is_generated=is_generated,
                     literal_value=literal_value,
+                    generated_value=generated_value,
                     is_first_in_chain=is_first,
                 )
             )

@@ -854,6 +854,7 @@ def annotate_column_origins(
         format_aggregate_in_tag,
         format_computed_origin_tag,
         format_derived_tag,
+        format_generated_tag,
         format_literal_tag,
         format_origin_tag,
         format_union_tag,
@@ -1008,11 +1009,13 @@ def annotate_column_origins(
         is_multi_source = result.is_computed and progenitor_col_raw is None
 
         # New semantic types — use getattr for backward compat with old SimpleNamespace disk cache entries
-        _is_union     = getattr(result, "is_union",     False)
-        _is_literal   = getattr(result, "is_literal",   False)
-        _is_aggregate = getattr(result, "is_aggregate", False)
-        _is_window    = getattr(result, "is_window",    False)
-        _literal_val  = getattr(result, "literal_value", None)
+        _is_union      = getattr(result, "is_union",      False)
+        _is_literal    = getattr(result, "is_literal",    False)
+        _is_aggregate  = getattr(result, "is_aggregate",  False)
+        _is_window     = getattr(result, "is_window",     False)
+        _is_generated  = getattr(result, "is_generated",  False)
+        _literal_val   = getattr(result, "literal_value",   None)
+        _generated_val = getattr(result, "generated_value", None)
 
         # Clean managed meta keys from config.meta for all columns that have a CLL result.
         # (Columns without results and ignore-list columns handle this in their own branches.)
@@ -1032,7 +1035,7 @@ def annotate_column_origins(
             _cleaned_config = {**_config_base, "meta": _raw_cfg_meta}
         _config_kwarg: dict[str, t.Any] = {"config": _cleaned_config} if _cleaned_config is not None else {}
 
-        if _is_union or _is_literal or _is_aggregate or _is_window:
+        if _is_union or _is_literal or _is_generated or _is_aggregate or _is_window:
             new_meta.pop(_key_computed, None)
             new_meta.pop(_key_renamed, None)
             new_meta.pop(_key_derived, None)
@@ -1047,6 +1050,8 @@ def annotate_column_origins(
                     tag = format_union_tag(node_schema, node.name.upper())
                 elif _is_literal:
                     tag = format_literal_tag(_literal_val or "", node_schema, node.name.upper())
+                elif _is_generated:
+                    tag = format_generated_tag(_generated_val or "", node_schema, node.name.upper())
                 elif _is_aggregate:
                     if result.progenitor_column is not None:
                         tag = format_aggregate_from_tag(

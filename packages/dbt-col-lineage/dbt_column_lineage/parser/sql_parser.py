@@ -169,13 +169,13 @@ class StarExpressionHandler:
                                 context, source_table, col_name
                             )
                         if not stop_at_boundary and effective_source == "":
-                            # Multi-source sentinel: column was derived from multiple upstream
-                            # columns in this CTE. Emit empty source_columns so api.py marks it
-                            # as is_computed=True with progenitor_column=None (→ "Berechnet in:").
+                            # Multi-source / zero-source sentinel: emit empty source_columns so
+                            # api.py gets no single traceable progenitor. Preserve the stored
+                            # trans_type so "generated", "aggregate", etc. survive CTE hops.
                             columns[col_name.lower()] = [
                                 ColumnLineage(
                                     source_columns=set(),
-                                    transformation_type="derived",
+                                    transformation_type=trans_type,  # type: ignore[arg-type]
                                     sql_expression=sql_expr,
                                 )
                             ]
@@ -183,9 +183,7 @@ class StarExpressionHandler:
                             columns[col_name.lower()] = [
                                 ColumnLineage(
                                     source_columns={effective_source},
-                                    transformation_type=cast(
-                                        Literal["direct", "renamed", "derived"], trans_type
-                                    ),
+                                    transformation_type=trans_type,  # type: ignore[arg-type]
                                     sql_expression=sql_expr,
                                 )
                             ]
@@ -221,6 +219,12 @@ def _classify_expression(expr: Any) -> tuple[str, Optional[str]]:
         return ("window", None)
     if inner.find(exp.AggFunc):
         return ("aggregate", None)
+    # Zero-column expressions: system functions and generators with no column inputs
+    # (CURRENT_DATE, SYSDATE, UUID_STRING, RANDOM, SEQ4, etc.).  These are distinct
+    # from both hard-coded literals (exp.Literal/Boolean/Null) and multi-source derived
+    # columns — they produce a value without referencing any upstream column.
+    if not any(True for _ in inner.find_all(exp.Column)):
+        return ("generated", str(inner))
     return ("derived", None)
 
 
@@ -652,10 +656,12 @@ class SQLColumnParser:
             else:
                 context.cte_sources[cte_name][col_name] = sorted_sources[0]
         else:
-            if context.table_context:
-                context.cte_sources[cte_name][col_name] = f"{context.table_context}.*"
-            else:
-                context.cte_sources[cte_name][col_name] = col_name
+            # Zero-source column: system functions (CURRENT_DATE, SYSDATE, UUID_STRING, etc.)
+            # or constant expressions with no column inputs. Use the same "" sentinel as
+            # multi-source computed columns so downstream expansion emits
+            # ColumnLineage(source_columns=set()) → annotated as "Berechnet in:".
+            # Previously stored as "table.*" which incorrectly propagated as a star source.
+            context.cte_sources[cte_name][col_name] = ""
         context.cte_transformation_types[cte_name][col_name] = lineage.transformation_type
         context.cte_sql_expressions[cte_name][col_name] = lineage.sql_expression
 
@@ -759,12 +765,15 @@ class SQLColumnParser:
         elif is_aliased:
             trans_type = "renamed"
 
-        # Multi-source sentinel propagated through explicit column reference
+        # Multi-source / zero-source sentinel propagated through explicit column reference.
+        # Use trans_type (looked up from cte_transformation_types above) so that semantic
+        # types like "generated", "aggregate", "literal" are preserved across CTE hops
+        # rather than being flattened to "derived".
         if resolved_source == "":
             return [
                 ColumnLineage(
                     source_columns=set(),
-                    transformation_type="derived",
+                    transformation_type=trans_type if trans_type != "direct" else "derived",
                     sql_expression=sql_expr,
                 )
             ]
@@ -778,7 +787,7 @@ class SQLColumnParser:
         return [
             ColumnLineage(
                 source_columns={resolved_source},
-                transformation_type=cast(Literal["direct", "renamed", "derived"], trans_type),
+                transformation_type=trans_type,  # type: ignore[arg-type]
                 sql_expression=sql_expr,
             )
         ]

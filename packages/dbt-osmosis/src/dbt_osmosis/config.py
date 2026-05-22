@@ -86,6 +86,10 @@ class OsmosisConfig:
     annotation_literal: str = "Literal"
     """Prefix for hardcoded constant columns. Literal value follows."""
 
+    annotation_generated: str = "Generated"
+    """Prefix for zero-argument system-function columns (CURRENT_DATE, SYSDATE, UUID_STRING…).
+    Expression string follows, then ``in: SCHEMA.MODEL``."""
+
     annotation_namespace: str = "OSMOSIS"
     """Namespace label that appears before every annotation tag."""
 
@@ -299,6 +303,7 @@ def _load_config(start: Path) -> OsmosisConfig:
             annotation_window_in               = _str("annotation-window-in",        OsmosisConfig.annotation_window_in),
             annotation_union                   = _str("annotation-union",            OsmosisConfig.annotation_union),
             annotation_literal                 = _str("annotation-literal",          OsmosisConfig.annotation_literal),
+            annotation_generated               = _str("annotation-generated",        OsmosisConfig.annotation_generated),
             annotation_namespace               = _str("annotation-namespace",        OsmosisConfig.annotation_namespace),
             annotation_separator               = _str("annotation-separator",        OsmosisConfig.annotation_separator),
             anchor_meta_key                    = _str("anchor-meta-key",      OsmosisConfig.anchor_meta_key),
