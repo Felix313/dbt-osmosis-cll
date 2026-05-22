@@ -68,12 +68,13 @@ def get_all_tables_from_select(select: Any) -> List[str]:
 
 
 def get_final_select(parsed: Any) -> Optional[Any]:
-    # Top-level set operations (UNION ALL / UNION / INTERSECT / EXCEPT) cannot be
-    # reduced to a single SELECT — the output columns derive from multiple branches.
-    # Return None so the caller can handle them explicitly instead of silently
-    # using only the first branch.
+    # UNION / UNION ALL: both branches contribute columns — return None so the caller
+    # handles them as a union-type (multi-source). exp.Union covers both variants.
     if isinstance(parsed, exp.Union):
         return None
+    # INTERSECT / EXCEPT: result columns are defined by the first (left) branch;
+    # the right branch is a filter. Walk into .this to return that first SELECT.
+    # (exp.Intersect and exp.Except are NOT subclasses of exp.Union in sqlglot.)
 
     query = parsed
     while hasattr(query, "this") and query.this:
