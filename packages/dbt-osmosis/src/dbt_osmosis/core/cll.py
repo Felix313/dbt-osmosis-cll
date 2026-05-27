@@ -54,7 +54,8 @@ _CACHE_LOCK = threading.Lock()
 _RESULT_FIELDS = (
     "model", "column", "is_computed", "progenitor_model", "progenitor_column",
     "is_first_in_chain", "is_rename", "source_column",
-    "is_aggregate", "is_window", "is_literal", "is_union", "literal_value",
+    "is_aggregate", "is_window", "is_literal", "is_union", "is_generated",
+    "literal_value", "generated_value",
 )
 
 
@@ -120,24 +121,14 @@ def _compiled_sql_hash(project_dir: str, node: t.Any) -> str | None:
 
 def _is_compiled_sql_stale(project_dir: str, node: t.Any, target_base: "Path | None" = None) -> bool:
     """Return True if the compiled SQL artifact is older than the source SQL file,
-    or if the manifest node has no inline compiled_code.
+    or if no compiled artifact exists yet.
 
-    When a developer edits a model, the source .sql mtime advances past the
-    compiled artifact's mtime. Running CLL on the stale compiled file would
-    produce wrong column lists and store them under the new source hash —
-    corrupting the cache for subsequent runs.
-
-    The compiled_code check handles the case where the manifest was regenerated
-    by ``dbt parse`` after a prior ``dbt compile``: compiled files may still be
-    fresh by mtime, but the manifest has no inline SQL for CLL to read.
+    Uses file mtime only — does not check manifest compiled_code, which is
+    unreliable (wiped by dbt parse, overwritten by per-model compiles).
     """
-    # No inline compiled_code in manifest → always stale regardless of file state.
-    # Seeds and sources have no compiled SQL by design — they're never stale.
     original: str = getattr(node, "original_file_path", "") or ""
     if not original.endswith(".sql"):
         return False
-    if not (getattr(node, "compiled_code", None) or getattr(node, "compiled_sql", None)):
-        return True
     source_path = Path(project_dir) / original
     if not source_path.exists():
         return False
@@ -152,31 +143,6 @@ def _is_compiled_sql_stale(project_dir: str, node: t.Any, target_base: "Path | N
             return source_path.stat().st_mtime > compiled_path.stat().st_mtime
     # Compiled file doesn't exist at all — also stale
     return True
-
-
-def _compile_node(project_dir: str, node: t.Any, target: str | None) -> bool:
-    """Run ``dbt compile --select <model>`` scoped to *node*. Returns True on success."""
-    import subprocess
-    import sys
-
-    cmd = [sys.executable, "-m", "dbt.cli.main", "compile", "--select", node.name, "--project-dir", project_dir]
-    if target:
-        cmd += ["--target", target]
-
-    logger.info(":hammer: Running dbt compile for stale compiled SQL => %s", node.name)
-    logger.debug("$ %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=project_dir)
-    if result.returncode != 0:
-        logger.warning(
-            ":warning: dbt compile failed for %s (exit %d):\n%s",
-            node.name,
-            result.returncode,
-            result.stderr or result.stdout,
-        )
-        return False
-    logger.info(":white_check_mark: dbt compile succeeded for %s", node.name)
-    return True
-
 
 
 
@@ -237,30 +203,22 @@ def get_cll_results(
             logger.debug("CLL disk cache hit for %s", node.name)
             return results
 
-    # 3. Compute via CLL — ensure compiled SQL is fresh first
+    # 3. Compute via CLL.
+    # Always read compiled SQL from target/compiled/ rather than manifest.compiled_code:
+    # - manifest.compiled_code is wiped by dbt parse and overwritten by each per-model
+    #   dbt compile call, causing race conditions in multi-model runs.
+    # - target/compiled/ files are stable — dbt parse never touches them, and each
+    #   compile only writes the models it was asked to compile.
+    # Freshness is guaranteed by maybe_bulk_compile() running upfront before CLL.
     try:
         from dbt_column_lineage.api import get_column_lineage
         from dbt_column_lineage.artifacts.manifest_catalog import ManifestCatalogReader
-
-        # If the source SQL is newer than target/compiled/, the manifest's compiled_code
-        # is also stale. Compile first so CLL reads the correct SQL.
-        compile_on_failure: bool = getattr(
-            getattr(context, "settings", None), "compile_on_cll_failure", True
-        )
-        if compile_on_failure and _is_compiled_sql_stale(project_dir, node, target_base):
-            target_name: str | None = getattr(runtime_cfg, "target_name", None)
-            if _compile_node(project_dir, node, target_name):
-                # Recompute source hash after compile (manifest may have been rewritten)
-                sql_hash = _compiled_sql_hash(project_dir, node)
-            # Always invalidate reader cache so ManifestCatalogReader picks up the new manifest
-            _READER_CACHE.pop(project_dir, None)
 
         if project_dir not in _READER_CACHE:
             reader = ManifestCatalogReader(manifest_path=manifest_path)
             reader.load()
             _READER_CACHE[project_dir] = reader
 
-        # Pass the adapter type as dialect so CLL uses the correct SQL parser.
         adapter_type: str | None = getattr(
             getattr(runtime_cfg, "credentials", None), "type", None
         )
@@ -270,7 +228,7 @@ def get_cll_results(
         results = get_column_lineage(
             manifest_path=manifest_path,
             models=[node.name],
-            compiled_sql_source="manifest",
+            compiled_sql_source="target_dir",
             dialect=adapter_type,
             _catalog_reader_override=_READER_CACHE[project_dir],
             placeholder_patterns=_cfg.compiled_sql_placeholder_patterns,
@@ -361,20 +319,6 @@ def maybe_bulk_compile(context: "YamlRefactorContextProtocol") -> None:
         logger.info(":white_check_mark: Bulk compile done (%d models).", len(stale))
         # Invalidate reader cache so ManifestCatalogReader picks up the refreshed manifest.
         _READER_CACHE.pop(project_dir, None)
-
-
-def invalidate_cll_for_node(project_dir: str, node: t.Any) -> None:
-    """Evict *node* from the in-memory lineage and reader caches.
-
-    Call this after running ``dbt compile`` for a model so the next
-    ``get_cll_results`` call re-reads the freshly written compiled SQL.
-    ``_READER_CACHE`` is also cleared so ManifestCatalogReader reloads the
-    updated manifest.json (compile rewrites it).
-    """
-    cache_key = (project_dir, node.name)
-    _LINEAGE_CACHE.pop(cache_key, None)
-    _READER_CACHE.pop(project_dir, None)
-    logger.debug("CLL cache invalidated for %s", node.name)
 
 
 def get_model_columns_from_cll(

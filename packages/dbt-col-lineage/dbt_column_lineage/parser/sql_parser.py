@@ -358,16 +358,26 @@ class SQLColumnParser:
         final_select = get_final_select(parsed)
         if not final_select and isinstance(parsed, exp.Union):
             # Top-level UNION ALL / UNION / INTERSECT / EXCEPT: output columns
-            # derive from multiple branches — annotate all as computed rather
-            # than silently tracing only the first branch.
+            # derive from multiple branches — mark all as union type.
             first_branch = parsed.this  # first SELECT branch for column names
             if isinstance(first_branch, exp.Select):
+                col_names: list[str] = []
                 for expr in first_branch.expressions:
-                    col_name = strip_sql_comments(expr.alias_or_name.lower())
-                    if col_name:
-                        columns[col_name] = [
-                            ColumnLineage(source_columns=set(), transformation_type="union")
-                        ]
+                    name = strip_sql_comments(expr.alias_or_name.lower())
+                    if name and name != "*":
+                        col_names.append(name)
+                # SELECT * FROM cte: resolve actual column names from ephemeral_cte_lineage
+                if not col_names:
+                    from_clause = first_branch.find(exp.From)
+                    if from_clause:
+                        table = from_clause.find(exp.Table)
+                        if table:
+                            source_name = str(table.name).lower()
+                            col_names = list(ephemeral_cte_lineage.get(source_name, {}).keys())
+                for col_name in col_names:
+                    columns[col_name] = [
+                        ColumnLineage(source_columns=set(), transformation_type="union")
+                    ]
             return SQLParseResult(
                 column_lineage=columns,
                 star_sources=star_sources,

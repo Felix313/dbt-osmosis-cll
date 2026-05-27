@@ -22,15 +22,6 @@ from dbt_osmosis.core.settings import get_managed_meta_keys
 from dbt_osmosis.config import get_config
 
 
-def _run_dbt_compile_for_node(context: t.Any, node: t.Any) -> None:
-    """Run ``dbt compile --select <model>`` for *node* and invalidate the CLL cache."""
-    from dbt_osmosis.core.cll import _compile_node, invalidate_cll_for_node
-
-    project_dir = str(context.project.runtime_cfg.project_root)
-    target: str | None = getattr(context.project.runtime_cfg, "target_name", None)
-    _compile_node(project_dir, node, target)
-    invalidate_cll_for_node(project_dir, node)
-
 
 __all__ = [
     "TransformOperation",
@@ -394,7 +385,7 @@ def inject_missing_columns(
         logger.debug(":no_entry_sign: Skipping column injection (skip_add_source_columns=True).")
         return
 
-    from dbt_osmosis.core.cll import get_model_columns_from_cll, invalidate_cll_for_node
+    from dbt_osmosis.core.cll import get_model_columns_from_cll
     from dbt_osmosis.core.introspection import normalize_column_name
 
     incoming_columns: dict[str, t.Any] | None = None
@@ -1053,14 +1044,14 @@ def annotate_column_origins(
                 elif _is_generated:
                     tag = format_generated_tag(_generated_val or "", node_schema, node.name.upper())
                 elif _is_aggregate:
-                    if result.progenitor_column is not None:
+                    if result.progenitor_column is not None and result.progenitor_model is not None:
                         tag = format_aggregate_from_tag(
                             result.progenitor_column.upper(), result.progenitor_model.upper()
                         )
                     else:
                         tag = format_aggregate_in_tag(node_schema, node.name.upper())
                 else:  # _is_window
-                    if result.progenitor_column is not None:
+                    if result.progenitor_column is not None and result.progenitor_model is not None:
                         tag = format_window_from_tag(
                             result.progenitor_column.upper(), result.progenitor_model.upper()
                         )

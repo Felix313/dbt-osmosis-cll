@@ -163,12 +163,6 @@ def get_column_lineage(
         _assert_compiled_sql_present(manifest_path)
 
     use_target_dir = compiled_sql_source in ("target_dir", "auto_compile")
-    if use_target_dir and compiled_sql_source == "target_dir":
-        logger.warning(
-            "compiled_sql_source='target_dir': falling back to target/compiled/ files. "
-            "These files may be stale if models have changed since the last 'dbt compile' run. "
-            "Column lineage may be inaccurate."
-        )
 
     catalog_reader = _catalog_reader_override or _build_catalog_reader(
         manifest_path=manifest_path,

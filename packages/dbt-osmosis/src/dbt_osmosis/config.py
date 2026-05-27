@@ -328,7 +328,7 @@ def _load_config(start: Path) -> OsmosisConfig:
             meta_key_renamed_from              = _str("col-renamed-from",     OsmosisConfig.meta_key_renamed_from),
             meta_key_derived_from              = _str("col-derived-from",     OsmosisConfig.meta_key_derived_from),
             meta_key_computed_in               = _str("col-computed-in",      OsmosisConfig.meta_key_computed_in),
-            legacy_strip_markers               = _strlist("legacy-strip-markers", OsmosisConfig.legacy_strip_markers),
+            legacy_strip_markers               = _strlist("legacy-strip-markers", []),
         )
         logger.debug("Loaded dbt-osmosis-cll config from %s: %s", osmosis_file, cfg)
         return cfg
