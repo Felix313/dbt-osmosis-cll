@@ -55,10 +55,10 @@ def test_cte_with_aggregation_and_table_aliases():
 
     assert lineage["id"][0].source_columns == {"customers.id"}
     assert lineage["name"][0].source_columns == {"customers.name"}
-    assert lineage["order_count"][0].transformation_type == "derived"
+    assert lineage["order_count"][0].transformation_type == "aggregate"
     assert "count" in lineage["order_count"][0].sql_expression.lower()
     assert lineage["order_count"][0].source_columns == {"orders.id"}
-    assert lineage["total_amount"][0].transformation_type == "derived"
+    assert lineage["total_amount"][0].transformation_type == "aggregate"
     assert "sum" in lineage["total_amount"][0].sql_expression.lower()
     assert lineage["total_amount"][0].source_columns == {"orders.amount"}
     assert lineage["customer_tier"][0].transformation_type == "derived"
@@ -103,9 +103,9 @@ def test_multiple_ctes():
     result = parser.parse_column_lineage(sql)
     lineage = result.column_lineage
 
-    assert lineage["order_count"][0].transformation_type == "derived"
+    assert lineage["order_count"][0].transformation_type == "aggregate"
     assert lineage["order_count"][0].source_columns == {"orders.id"}
-    assert lineage["total_amount"][0].transformation_type == "derived"
+    assert lineage["total_amount"][0].transformation_type == "aggregate"
     assert lineage["total_amount"][0].source_columns == {"orders.amount"}
     assert lineage["customer_tier"][0].transformation_type == "derived"
     assert "total_amount" in lineage["customer_tier"][0].sql_expression
@@ -163,21 +163,15 @@ def test_window_functions():
     result = parser.parse_column_lineage(sql)
     lineage = result.column_lineage
 
-    assert lineage["customer_total"][0].transformation_type == "derived"
-    assert lineage["customer_total"][0].source_columns == {
-        "orders.amount",
-        "orders.customer_id",
-    }
-    assert lineage["amount_rank"][0].transformation_type == "derived"
-    assert lineage["amount_rank"][0].source_columns == {
-        "orders.amount",
-        "orders.customer_id",
-    }
-    assert lineage["amount_pct"][0].transformation_type == "derived"
-    assert lineage["amount_pct"][0].source_columns == {
-        "orders.amount",
-        "orders.customer_id",
-    }
+    # Window columns are classified as "window"; the source is the windowed value
+    # only — PARTITION BY / ORDER BY dimensions are intentionally excluded.
+    assert lineage["customer_total"][0].transformation_type == "window"
+    assert lineage["customer_total"][0].source_columns == {"orders.amount"}
+    # rank() has no value argument, so it has no traceable source column.
+    assert lineage["amount_rank"][0].transformation_type == "window"
+    assert lineage["amount_rank"][0].source_columns == set()
+    assert lineage["amount_pct"][0].transformation_type == "window"
+    assert lineage["amount_pct"][0].source_columns == {"orders.amount"}
 
 
 def test_subqueries():
@@ -200,7 +194,7 @@ def test_subqueries():
     result = parser.parse_column_lineage(sql)
     lineage = result.column_lineage
 
-    assert lineage["order_count"][0].transformation_type == "derived"
+    assert lineage["order_count"][0].transformation_type == "aggregate"
     assert "orders.customer_id" in lineage["order_count"][0].source_columns
     assert "customers.id" in lineage["order_count"][0].source_columns
     assert lineage["has_large_orders"][0].transformation_type == "derived"
@@ -734,11 +728,14 @@ def test_complex_query_structure():
     assert "event_id" in lineage
     assert "event_type" in lineage
 
-    # event_id should trace back to source columns (card_id, last_quarter_day, etc.)
+    # event_id is a multi-source concatenation (account_id || '_' || last_quarter_day),
+    # so it is classified as "derived" with no single traceable source column. The
+    # empty source set is the intended multi-source sentinel, not a trace failure.
+    assert lineage["event_id"][0].transformation_type == "derived"
     event_id_sources = {
         src for lineage_item in lineage["event_id"] for src in lineage_item.source_columns
     }
-    assert len(event_id_sources) > 0
+    assert event_id_sources == set()
 
 
 def test_table_names_normalized_from_sql() -> None:

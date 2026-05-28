@@ -88,7 +88,7 @@ def test_mixed_rename_and_transform():
     assert lineage["order_id"][0].source_column == "id"
 
     assert lineage["row_count"][0].is_rename is False
-    assert lineage["row_count"][0].transformation_type == "derived"
+    assert lineage["row_count"][0].transformation_type == "aggregate"
 
     # unaliased direct reference → direct, not rename
     assert lineage["customer_id"][0].is_rename is False

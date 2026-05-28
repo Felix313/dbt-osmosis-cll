@@ -131,14 +131,14 @@ class TestEphemeralCteLineage:
         assert lin.source_columns == {"upstream.id"}
         assert lin.transformation_type == "renamed"
 
-    def test_derived_column_recorded(self):
+    def test_aggregate_column_recorded(self):
         sql = _sql_with_ephemeral(
             "SELECT SUM(amount) AS total FROM upstream",
             f"SELECT total FROM {EPH_L}",
         )
         result = SQLColumnParser().parse_column_lineage(sql, stop_at_ephemeral=True)
         lin = result.ephemeral_cte_lineage[EPH_L]["total"]
-        assert lin.transformation_type == "derived"
+        assert lin.transformation_type == "aggregate"
         assert "sum" in lin.sql_expression.lower()
 
     def test_not_populated_when_stop_at_ephemeral_false(self):
