@@ -261,16 +261,16 @@ def inherit_upstream_column_knowledge(
             if extra not in inheritable:
                 inheritable.append(extra)
 
-        # desc-authority controls who owns the column description.
+        # desc-owner controls who owns the column description.
         # "upstream" → upstream always overwrites (old force-inherit: true behaviour).
-        # Any other value ("local", "aml", or custom) → preserve the existing description;
+        # Any other value ("this", "aml", or custom) → preserve the existing description;
         # upstream only fills gaps.  Column-level meta wins over model/layer defaults via
         # _get_setting_for_node's standard resolution order.
         #
         # Exception: a description that consists ONLY of a CBM-ODP annotation block (no real
         # business content) is treated as if the column has no description — it is always
-        # refreshed from upstream regardless of desc-authority.
-        desc_authority = _get_setting_for_node("desc-authority", node, name, fallback="local")
+        # refreshed from upstream regardless of desc-owner.
+        desc_authority = _get_setting_for_node("desc-owner", node, name, fallback="this")
         force_inherit = str(desc_authority).lower() == "upstream"
         existing_desc = node_column.description.strip()
         if not force_inherit and existing_desc:
@@ -1064,7 +1064,7 @@ def annotate_column_origins(
                         _prog_desc = strip_all_cbm_tags(_raw_prog).strip() or None
                         if _prog_desc:
                             _desc_auth = _get_setting_for_node(
-                                "desc-authority", node, col_name, fallback="local"
+                                "desc-owner", node, col_name, fallback="this"
                             )
                             _force_here = str(_desc_auth).lower() == "upstream"
                             if not has_real_desc or _force_here:

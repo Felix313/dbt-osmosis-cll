@@ -72,7 +72,7 @@ def get_managed_meta_keys() -> frozenset[str]:
     from dbt_osmosis.config import get_config
     cfg = get_config()
     return frozenset({
-        "desc-authority",       # new unified ownership key (replaces anchor-description)
+        "desc-owner",       # new unified ownership key (replaces anchor-description)
         cfg.anchor_meta_key,    # legacy "anchor-description" key — kept for backward compat
         cfg.meta_key_renamed_from,
         cfg.meta_key_derived_from,
