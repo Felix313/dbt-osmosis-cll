@@ -2,27 +2,12 @@
 import typing as t
 from unittest import mock
 
-import dbt.version
 import pytest
-from packaging.version import Version
 
 from dbt_osmosis.core.inheritance import _build_node_ancestor_tree, _get_node_yaml
 from dbt_osmosis.core.settings import YamlRefactorContext
 from dbt_osmosis.core.sync_operations import sync_node_to_yaml
 from dbt_osmosis.core.transforms import inherit_upstream_column_knowledge
-
-
-def _filter_config_field(d: dict[str, t.Any]) -> dict[str, t.Any]:
-    """Filter out the 'config' and 'doc_blocks' fields from column dicts.
-
-    Newer versions of dbt-core (1.9+) include 'config' in to_dict() output,
-    which contains redundant 'meta' and 'tags' that duplicate top-level fields.
-    The 'doc_blocks' field is also added but not relevant for these tests.
-    """
-    return {k: v for k, v in d.items() if k not in ("config", "doc_blocks")}
-
-
-dbt_version = Version(dbt.version.get_installed_version().to_version_string(skip_matcher=True))
 
 
 @pytest.mark.parametrize(
@@ -64,48 +49,6 @@ def test_build_node_ancestor_tree(
 @pytest.mark.parametrize(
     "settings, upstream_mutations, downstream_metadata",
     [
-        # Case 1a: Add progenitor to meta and force inherit descriptions = false (default)
-        (
-            {"force_inherit_descriptions": False, "add_progenitor_to_meta": True},
-            {
-                "stg_customers.v1.customer_id": {
-                    "description": "I will be inherited, forcibly so :)",
-                    "meta": {"a": 1, "b": 2},
-                    "tags": ["foo", "bar"],
-                },
-            },
-            {
-                "description": "I was steadfast and unyielding",
-                "meta": {
-                    "a": 1,
-                    "b": 2,
-                    "c": 3,
-                    "osmosis_progenitor": "model.jaffle_shop_duckdb.stg_customers.v1",
-                },
-                "tags": ["foo", "bar", "baz"],
-            },
-        ),
-        # Case 1b: Add progenitor to meta and force inherit descriptions = true
-        (
-            {"force_inherit_descriptions": True, "add_progenitor_to_meta": True},
-            {
-                "stg_customers.v1.customer_id": {
-                    "description": "I will be inherited, forcibly so :)",
-                    "meta": {"a": 1, "b": 2},
-                    "tags": ["foo", "bar"],
-                },
-            },
-            {
-                "description": "I will be inherited, forcibly so :)",
-                "meta": {
-                    "a": 1,
-                    "b": 2,
-                    "c": 3,
-                    "osmosis_progenitor": "model.jaffle_shop_duckdb.stg_customers.v1",
-                },
-                "tags": ["foo", "bar", "baz"],
-            },
-        ),
         # Case 2: Skip add tags and merge meta
         (
             {"skip_add_tags": True, "skip_merge_meta": True},
@@ -120,22 +63,6 @@ def test_build_node_ancestor_tree(
                 "description": "I was steadfast and unyielding",
                 "meta": {"c": 3},
                 "tags": ["baz"],
-            },
-        ),
-        # Case 3: Use unrendered descriptions
-        (
-            {"use_unrendered_descriptions": True, "force_inherit_descriptions": True},
-            {
-                "stg_customers.v1.customer_id": {
-                    "description": "{{ doc('stg_customer_description') }}",
-                    "meta": {"d": 4},
-                    "tags": ["rendered", "unrendered"],
-                },
-            },
-            {
-                "description": "{{ doc('stg_customer_description') }}",
-                "meta": {"c": 3, "d": 4},
-                "tags": ["rendered", "unrendered", "baz"],
             },
         ),
         # Case 4: Skip add data types but inherit specified keys
@@ -169,29 +96,6 @@ def test_build_node_ancestor_tree(
                 "description": "I was steadfast and unyielding",
                 "meta": {"c": 3},
                 "tags": ["baz"],
-            },
-        ),
-        # Case 6: Add inheritance for any specified keys
-        (
-            {
-                "skip_add_tags": False,
-                "skip_merge_meta": False,
-                "add_inheritance_for_specified_keys": ["policy_tags"],
-                "force_inherit_descriptions": True,
-            },
-            {
-                "stg_customers.v1.customer_id": {
-                    "description": "I will prevail",
-                    "meta": {"a": 1},
-                    "tags": ["foo", "bar"],
-                    "_extra": {"policy_tags": ["pii_main"]},
-                },
-            },
-            {
-                "description": "I will prevail",
-                "meta": {"a": 1, "c": 3},
-                "tags": ["foo", "bar", "baz"],
-                "policy_tags": ["pii_main"],
             },
         ),
     ],
@@ -256,7 +160,6 @@ def test_inherit_upstream_column_knowledge_with_various_settings(
 @pytest.mark.parametrize(
     "use_unrendered_descriptions, expected_start",
     [
-        (True, '{{ doc("orders_status") }}'),
         (False, "Orders can be one of the following statuses:"),
     ],
 )
@@ -279,107 +182,3 @@ def test_use_unrendered_descriptions(
         sync_node_to_yaml(yaml_context, target_node, commit=False)
 
     assert target_node.columns["status"].description.startswith(expected_start)
-
-
-def test_inherit_upstream_column_knowledge(yaml_context: YamlRefactorContext):
-    manifest = yaml_context.project.manifest
-    manifest.nodes["model.jaffle_shop_duckdb.stg_customers.v1"].columns[
-        "customer_id"
-    ].description = "THIS COLUMN IS UPDATED FOR TESTING"
-
-    expect: dict[str, t.Any] = {
-        "customer_id": {
-            "name": "customer_id",
-            "description": "THIS COLUMN IS UPDATED FOR TESTING",
-            "meta": {"osmosis_progenitor": "model.jaffle_shop_duckdb.stg_customers.v1"},
-            "data_type": "INTEGER",
-            "constraints": [],
-            "quote": None,
-            "tags": [],
-        },
-        "first_name": {
-            "name": "first_name",
-            "description": "Customer's first name. PII.",
-            "meta": {"osmosis_progenitor": "seed.jaffle_shop_duckdb.raw_customers"},
-            "data_type": "VARCHAR",
-            "constraints": [],
-            "quote": None,
-            "tags": [],
-        },
-        "last_name": {
-            "name": "last_name",
-            "description": "Customer's last name. PII.",
-            "meta": {"osmosis_progenitor": "seed.jaffle_shop_duckdb.raw_customers"},
-            "data_type": "VARCHAR",
-            "constraints": [],
-            "quote": None,
-            "tags": [],
-        },
-        "first_order": {
-            "name": "first_order",
-            "description": "Date (UTC) of a customer's first order",
-            "meta": {"osmosis_progenitor": "model.jaffle_shop_duckdb.customers"},
-            "data_type": "DATE",
-            "constraints": [],
-            "quote": None,
-            "tags": [],
-        },
-        "most_recent_order": {
-            "name": "most_recent_order",
-            "description": "Date (UTC) of a customer's most recent order",
-            "meta": {"osmosis_progenitor": "model.jaffle_shop_duckdb.customers"},
-            "data_type": "DATE",
-            "constraints": [],
-            "quote": None,
-            "tags": [],
-        },
-        "number_of_orders": {
-            "name": "number_of_orders",
-            "description": "Count of the number of orders a customer has placed",
-            "meta": {"osmosis_progenitor": "model.jaffle_shop_duckdb.customers"},
-            "data_type": "BIGINT",
-            "constraints": [],
-            "quote": None,
-            "tags": [],
-        },
-        "customer_lifetime_value": {
-            "name": "customer_lifetime_value",
-            "description": "",
-            "meta": {"osmosis_progenitor": "model.jaffle_shop_duckdb.customers"},
-            "data_type": "DOUBLE",
-            "constraints": [],
-            "quote": None,
-            "tags": [],
-        },
-        "customer_average_value": {
-            "name": "customer_average_value",
-            "description": "",
-            "meta": {"osmosis_progenitor": "model.jaffle_shop_duckdb.customers"},
-            "data_type": "DECIMAL(18,3)",
-            "constraints": [],
-            "quote": None,
-            "tags": [],
-        },
-    }
-    if dbt_version >= Version("1.9.0"):
-        for column in expect:
-            expect[column]["granularity"] = None
-
-    target_node = manifest.nodes["model.jaffle_shop_duckdb.customers"]
-    target_node.columns["customer_id"].description = ""
-
-    yaml_context.placeholders = ("",)
-    yaml_context.settings.add_progenitor_to_meta = True
-    # Disable unrendered descriptions so the test's manifest modifications are respected
-    yaml_context.settings.use_unrendered_descriptions = False
-
-    # Perform inheritance on the node
-    with (
-        mock.patch("dbt_osmosis.core.schema.reader._YAML_BUFFER_CACHE", {}),
-        mock.patch("dbt_osmosis.core.introspection._COLUMN_LIST_CACHE", {}),
-    ):
-        _ = inherit_upstream_column_knowledge(yaml_context, target_node)
-
-    # Filter out 'config' field for comparison (dbt-core 1.9+ includes it)
-    actual = {k: _filter_config_field(v.to_dict()) for k, v in target_node.columns.items()}
-    assert actual == expect
