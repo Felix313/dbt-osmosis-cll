@@ -36,7 +36,6 @@ from dbt_osmosis.core.sql_operations import compile_sql_code, execute_sql_code
 from dbt_osmosis.core.test_suggestions import suggest_tests_for_model, suggest_tests_for_project
 from dbt_osmosis.core.transforms import (
     annotate_column_origins,
-    inherit_upstream_column_knowledge,
     inherit_upstream_column_knowledge_cll,
     inject_missing_columns,
     remove_columns_not_in_database,
@@ -184,7 +183,7 @@ def yaml_opts(func: t.Callable[P, T]) -> t.Callable[P, T]:
         "--select",
         multiple=True,
         type=click.STRING,
-        help="Select nodes using dbt selector syntax (e.g. 'source:EDW__AE_AML+', 'tag:nightly', 'path:models/staging'). "
+        help="Select nodes using dbt selector syntax (e.g. 'source:my_source+', 'tag:nightly', 'path:models/staging'). "
         "Supports all dbt selector methods. Mutually exclusive with --fqn.",
     )
     @click.option(
@@ -637,6 +636,97 @@ def document(
         _run_formatter_if_configured(context)
 
         if check and context.mutated:
+            exit(1)
+
+
+@yaml.command(context_settings=_CONTEXT)
+@dbt_opts
+@yaml_opts
+@logging_opts
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format. 'json' emits a stable machine-readable shape for tooling/agents.",
+)
+@click.option(
+    "--min-coverage",
+    type=click.FloatRange(0, 100),
+    default=None,
+    help="Fail with a non-zero exit code if documentation coverage is below this percentage. Useful as a CI gate.",
+)
+@click.option(
+    "--check-cll",
+    is_flag=True,
+    help="Also run CLL per model to report lineage-extraction failures (requires compiled SQL; slower).",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="List the undocumented column names per node (text format only).",
+)
+def doc_health(
+    target: str | None = None,
+    profile: str | None = None,
+    project_dir: str | None = None,
+    profiles_dir: str | None = None,
+    vars: str | None = None,
+    check: bool = False,
+    threads: int | None = None,
+    disable_introspection: bool = False,
+    output_format: str = "text",
+    min_coverage: float | None = None,
+    check_cll: bool = False,
+    verbose: bool = False,
+    **kwargs: t.Any,
+) -> None:
+    """Report column-level documentation coverage for in-scope nodes (read-only).
+
+    \f
+    Computes how many columns have real, human-authored descriptions versus
+    annotation-only or undocumented ones, without modifying any files.  Use
+    ``--min-coverage`` to gate CI, ``--format json`` for machine consumers, and
+    ``--check-cll`` to additionally surface models where lineage extraction fails.
+    """
+    import json as _json
+
+    logger.info(":water_wave: Executing dbt-osmosis\n")
+    settings = DbtConfiguration(
+        project_dir=t.cast(str, project_dir),
+        profiles_dir=t.cast(str, profiles_dir),
+        target=target,
+        profile=profile,
+        threads=threads,
+        vars=yaml_handler.safe_load(vars) if vars else {},
+        disable_introspection=disable_introspection,
+    )
+
+    with YamlRefactorContext(
+        project=create_dbt_project_context(settings),
+        settings=YamlRefactorSettings(
+            **{k: v for k, v in kwargs.items() if v is not None}, create_catalog_if_not_exists=False
+        ),
+    ) as context:
+        typed_context: t.Any = context
+        if check_cll:
+            maybe_bulk_compile(typed_context)
+
+        from dbt_osmosis.core.doc_health import compute_doc_health, format_report
+
+        report = compute_doc_health(typed_context, check_cll=check_cll)
+
+        if output_format == "json":
+            click.echo(_json.dumps(report.to_dict(), indent=2))
+        else:
+            click.echo(format_report(report, verbose=verbose))
+
+        if min_coverage is not None and report.coverage < min_coverage:
+            logger.error(
+                ":x: Documentation coverage %.1f%% is below the required %.1f%%.",
+                report.coverage,
+                min_coverage,
+            )
             exit(1)
 
 

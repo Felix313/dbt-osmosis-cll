@@ -70,7 +70,7 @@ def enrich_yaml_files(
         dry_run: Preview changes without writing files.
         verbose: Print per-column detail.
         max_line_width: Total line width for description word-wrapping.
-        model_anchor_globs: Shell-style glob patterns (e.g. ``["STG_EDW__AE_AML__*"]``).
+        model_anchor_globs: Shell-style glob patterns (e.g. ``["STG_MY_SOURCE__*"]``).
             Matching models get ``meta.<anchor_meta_key>: <anchor_value>`` written
             once at model level instead of per column — keeps YAML clean while
             blocking osmosis downstream propagation equally effectively.

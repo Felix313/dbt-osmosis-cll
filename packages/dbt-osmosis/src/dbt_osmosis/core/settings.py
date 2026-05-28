@@ -87,7 +87,7 @@ class YamlRefactorSettings:
     fqn: list[str] = field(default_factory=list)
     """Filter models to action via a fully qualified name match such as returned by `dbt ls`."""
     select: list[str] = field(default_factory=list)
-    """Filter nodes via dbt selector syntax (e.g. 'source:EDW__AE_AML+', 'tag:nightly').
+    """Filter nodes via dbt selector syntax (e.g. 'source:my_source+', 'tag:nightly').
     Mutually exclusive with --fqn. Uses dbt's graph engine so all selector methods work."""
     models: list[Path | str] = field(default_factory=list)
     """Filter models to action via a file path match."""

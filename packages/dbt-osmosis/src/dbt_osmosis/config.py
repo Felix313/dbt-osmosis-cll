@@ -99,7 +99,7 @@ class OsmosisConfig:
     legacy_strip_markers: list[str] = field(default_factory=list)
     """Project-specific legacy tag prefixes to strip from descriptions (e.g. old pre-CLL osmosis
     tags). Configured via ``legacy-strip-markers`` in .osmosis as a comma-separated list.
-    Example: ``legacy-strip-markers = CBM_ORIGIN:, CBM_DERIVED_IN:``"""
+    Example: ``legacy-strip-markers = OLD_ORIGIN:, OLD_DERIVED_IN:``"""
 
     # ── Enrichment ───────────────────────────────────────────────────────────
     anchor_meta_key: str = "anchor-description"

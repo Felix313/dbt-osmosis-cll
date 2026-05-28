@@ -410,11 +410,6 @@ def build_parent_map(results: list[t.Any], node_name: str) -> dict[str, str]:
 # Origin tracing
 # ---------------------------------------------------------------------------
 
-_LEGACY_STRIP_MARKERS: list[str] = []
-"""Project-specific legacy tag prefixes loaded from config at first call to strip_origin_tag.
-Do not use directly — access via get_config().legacy_strip_markers."""
-
-
 def _ensure_manifest_index(context: YamlRefactorContextProtocol) -> None:
     """Build name→node lookup dicts for sources and model nodes (once per project)."""
     runtime_cfg = context.project.runtime_cfg
@@ -569,8 +564,8 @@ def _compute_column_origin(
         return None
 
     # Multi-source computed: column is born in this model (UNION ALL, multi-arg expression…).
-    # Return (schema, model, "") as a sentinel so the caller can write "Berechnet in: SCHEMA.MODEL"
-    # rather than silently dropping the annotation.
+    # Return (schema, model, "") as a sentinel so the caller can write the "computed in: SCHEMA.MODEL"
+    # annotation rather than silently dropping it.
     if (result.progenitor_column is None or result.progenitor_column == "") and result.is_computed:
         schema = (
             getattr(getattr(node, "unrendered_config", None), "schema", None)
@@ -675,12 +670,12 @@ def format_derived_tag(schema: str, model: str, entry_col: str | None = None) ->
     """Return the annotation block for a **multi-source / computed** column.
 
     When *entry_col* is supplied and differs from the queried column name, it is
-    appended as ``(als ENTRY_COL)`` so the reader knows what name to search for
+    appended as ``(as ENTRY_COL)`` so the reader knows what name to search for
     in the referenced model.
     """
     tag = f"{get_config().annotation_computed} {schema}.{model}"
     if entry_col:
-        tag = f"{tag} (als {entry_col})"
+        tag = f"{tag} (as {entry_col})"
     return _wrap_annotation(tag)
 
 
@@ -723,11 +718,13 @@ def format_generated_tag(generated_expr: str, schema: str, model: str) -> str:
     return _wrap_annotation(f"{cfg.annotation_generated} {generated_expr} in: {schema}.{model}")
 
 
-def strip_origin_tag(description: str) -> str:
+def strip_annotation_tags(description: str) -> str:
     """Remove any annotation block from a description string.
 
     Strips from the configured separator onwards so a fresh annotation can be
-    appended on the next run.  Also handles legacy bare prefixes for backward compat.
+    appended on the next run.  Also handles legacy bare prefixes — both the
+    current annotation verbs and any project-specific ``legacy-strip-markers``
+    configured in ``.osmosis`` — for backward compatibility.
     """
     cfg = get_config()
     sep_idx = description.find(cfg.annotation_separator)
@@ -762,12 +759,3 @@ def strip_origin_tag(description: str) -> str:
         if idx != -1:
             description = description[:idx].rstrip()
     return description
-
-
-def strip_annotation_tags(description: str) -> str:
-    """Remove all annotation tags (current format and project legacy markers)."""
-    return strip_origin_tag(description)
-
-
-# Backward-compat alias — prefer strip_annotation_tags in new code.
-strip_all_cbm_tags = strip_annotation_tags

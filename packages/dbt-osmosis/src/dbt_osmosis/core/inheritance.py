@@ -418,7 +418,7 @@ def _build_column_knowledge_graph(
     # CLL-first parent resolution: ask CLL which direct parent provides each column.
     # When CLL succeeds the result disambiguates multi-parent joins deterministically.
     # Multi-source computed columns carry _CLL_COMPUTED_SENTINEL — inheritance is skipped
-    # entirely for them; annotate_column_origins will add a "Berechnet in:" annotation.
+    # entirely for them; annotate_column_origins will add a "computed in:" annotation.
     from dbt_osmosis.core.cll import _CLL_COMPUTED_SENTINEL, build_parent_map, get_cll_results
     from dbt_osmosis.core.introspection import _get_setting_for_node
     cll_parent_map = build_parent_map(get_cll_results(context, node), node.name)
@@ -451,7 +451,7 @@ def _build_column_knowledge_graph(
                 cll_parent = cll_parent_map.get(name.lower())
                 if cll_parent == _CLL_COMPUTED_SENTINEL:
                     # CLL confirmed: multi-source computed column — no single progenitor.
-                    # Skip inheritance for all ancestors; the "Berechnet in:" annotation
+                    # Skip inheritance for all ancestors; the "computed in:" annotation
                     # will be attached by annotate_column_origins instead.
                     continue
                 elif cll_parent is not None:
