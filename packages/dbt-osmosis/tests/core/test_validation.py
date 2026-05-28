@@ -97,7 +97,7 @@ class TestValidationIssue:
         assert d["severity"] == "error"
         assert d["code"] == "TEST_CODE"
         assert d["message"] == "Test message"
-        assert d["file_path"] == "/test/path.yml"
+        assert d["file_path"] == str(Path("/test/path.yml"))
         assert d["line_number"] == 42
         assert d["column_name"] == "test_col"
         assert d["fixable"] is True
@@ -114,7 +114,7 @@ class TestValidationIssue:
         )
         s = str(issue)
         assert "❌" in s
-        assert "/test/path.yml:42" in s
+        assert f"{Path('/test/path.yml')}:42" in s
         assert "[TEST_CODE]" in s
         assert "Test message" in s
 

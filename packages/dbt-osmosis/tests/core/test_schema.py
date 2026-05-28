@@ -234,12 +234,12 @@ def test_yaml_string_representer_none_prefix_colon():
         yaml.dump(data, output)
         result = output.getvalue()
 
-        # Check if folded style is used
-        has_folded = ">" in result.split("description:")[1].split("\n")[0]
+        # Long single-line descriptions are emitted as a literal block scalar (|).
+        has_block = "|" in result.split("description:")[1].split("\n")[0]
 
-        assert has_folded == should_fold, (
+        assert has_block == should_fold, (
             f"Description of {length} chars should {'use' if should_fold else 'not use'} "
-            f"folded style, but got: {repr(result.split('description:')[1].split(chr(10))[0])}"
+            f"a literal block scalar, but got: {repr(result.split('description:')[1].split(chr(10))[0])}"
         )
 
 

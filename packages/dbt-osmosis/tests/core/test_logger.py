@@ -21,8 +21,12 @@ from dbt_osmosis.core.logger import (
 
 @pytest.fixture
 def temp_log_dir():
-    """Create a temporary directory for log files during testing"""
-    with tempfile.TemporaryDirectory() as temp_dir:
+    """Create a temporary directory for log files during testing.
+
+    ``ignore_cleanup_errors=True`` keeps teardown from raising on Windows, where
+    a still-open RotatingFileHandler locks the log file (WinError 32) during rmtree.
+    """
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         yield Path(temp_dir)
 
 

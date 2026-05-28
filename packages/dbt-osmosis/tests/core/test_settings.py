@@ -32,7 +32,6 @@ class TestYamlRefactorSettings:
         assert settings.skip_add_tags is False
         assert settings.skip_add_data_types is False
         assert settings.skip_add_source_columns is False
-        assert settings.add_progenitor_to_meta is False
         assert settings.numeric_precision_and_scale is False
         assert settings.string_length is False
         assert settings.force_inherit_descriptions is False
@@ -55,7 +54,6 @@ class TestYamlRefactorSettings:
             skip_add_tags=True,
             skip_add_data_types=True,
             skip_add_source_columns=True,
-            add_progenitor_to_meta=True,
             numeric_precision_and_scale=True,
             string_length=True,
             force_inherit_descriptions=True,
@@ -74,7 +72,6 @@ class TestYamlRefactorSettings:
         assert settings.skip_add_tags is True
         assert settings.skip_add_data_types is True
         assert settings.skip_add_source_columns is True
-        assert settings.add_progenitor_to_meta is True
         assert settings.numeric_precision_and_scale is True
         assert settings.string_length is True
         assert settings.force_inherit_descriptions is True

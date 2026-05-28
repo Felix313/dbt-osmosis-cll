@@ -34,7 +34,9 @@ def _make_context(
     *nodes: mock.MagicMock, include_external: bool = False, models: list[Path | str] | None = None
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        settings=SimpleNamespace(include_external=include_external, models=models or [], fqn=[]),
+        settings=SimpleNamespace(
+            include_external=include_external, models=models or [], fqn=[], select=[]
+        ),
         project=SimpleNamespace(
             runtime_cfg=SimpleNamespace(project_name="my_project", project_root="/repo"),
             manifest=SimpleNamespace(

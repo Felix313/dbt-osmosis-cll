@@ -33,10 +33,10 @@ class TestRunExternalFormatter:
             assert cmd == [
                 "prettier",
                 "--write",
-                "models/staging/orders.yml",
-                "models/marts/customers.yml",
+                str(Path("models/staging/orders.yml")),
+                str(Path("models/marts/customers.yml")),
             ]
-            assert call_args[1]["cwd"] == "/project"
+            assert call_args[1]["cwd"] == str(Path("/project"))
             assert call_args[1]["check"] is False
             assert call_args[1]["capture_output"] is True
 
@@ -114,7 +114,7 @@ class TestRunExternalFormatter:
                 "--tab-width",
                 "2",
                 "--single-quote",
-                "models/a.yml",
+                str(Path("models/a.yml")),
             ]
 
     def test_yamlfmt_command(self):
@@ -127,7 +127,7 @@ class TestRunExternalFormatter:
             run_external_formatter("yamlfmt", files, cwd=Path("/project"))
 
             cmd = mock_run.call_args[0][0]
-            assert cmd == ["yamlfmt", "models/a.yml", "models/b.yml"]
+            assert cmd == ["yamlfmt", str(Path("models/a.yml")), str(Path("models/b.yml"))]
 
     def test_yq_inplace_command(self):
         """yq in-place identity command is parsed correctly."""
@@ -139,7 +139,7 @@ class TestRunExternalFormatter:
             run_external_formatter("yq -i '.'", files, cwd=Path("/project"))
 
             cmd = mock_run.call_args[0][0]
-            assert cmd == ["yq", "-i", ".", "models/a.yml"]
+            assert cmd == ["yq", "-i", ".", str(Path("models/a.yml"))]
 
     def test_frozenset_input(self):
         """frozenset of Paths (as returned by context.written_files) works correctly."""
@@ -155,7 +155,7 @@ class TestRunExternalFormatter:
             # First two elements are the command, rest are files (order may vary for frozenset)
             assert cmd[0] == "prettier"
             assert cmd[1] == "--write"
-            assert set(cmd[2:]) == {"models/a.yml", "models/b.yml"}
+            assert set(cmd[2:]) == {str(Path("models/a.yml")), str(Path("models/b.yml"))}
 
     def test_invalid_shlex_command(self):
         """Malformed command string (unclosed quotes) is handled gracefully."""
@@ -212,6 +212,6 @@ class TestRunExternalFormatter:
             run_external_formatter("fmt", files, cwd=Path("/project"))
 
             cmd = mock_run.call_args[0][0]
-            assert cmd == ["fmt", "/absolute/path/models/a.yml"]
+            assert cmd == ["fmt", str(Path("/absolute/path/models/a.yml"))]
             # Verify it's a string, not a Path
             assert isinstance(cmd[1], str)

@@ -36,6 +36,7 @@ def _build_source_bootstrap_context(tmp_path: Path, *, dry_run: bool) -> YamlRef
     runtime_cfg.credentials = mock.Mock(database="analytics")
     runtime_cfg.model_paths = ["models"]
     runtime_cfg.project_root = str(tmp_path)
+    runtime_cfg.threads = 1  # real int — __post_init__ compares resolved_threads > 1
     runtime_cfg.vars = mock.Mock()
     runtime_cfg.vars.to_dict.return_value = {
         "dbt-osmosis": {"sources": {"raw": {"schema": "raw", "path": "sources/raw.yml"}}},
@@ -263,8 +264,8 @@ def test_pretty_print_plan(caplog):
             pretty_print_plan(plan)
     logs = caplog.text
     assert "Restructure plan includes => 2 operations" in logs
-    assert "CREATE or MERGE => models/some_file.yml" in logs
-    assert "['old_file.yml'] -> sources/another_file.yml" in logs
+    assert f"CREATE or MERGE => {Path('models/some_file.yml')}" in logs
+    assert f"['old_file.yml'] -> {Path('sources/another_file.yml')}" in logs
 
 
 def test_apply_restructure_plan_confirm_prompt(

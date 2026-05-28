@@ -11,8 +11,6 @@ Covers:
 """
 from __future__ import annotations
 
-import pytest
-
 from dbt_column_lineage.parser import SQLColumnParser
 from dbt_column_lineage.api import _resolve_progenitor
 from dbt_column_lineage.models.schema import ColumnLineage

@@ -134,7 +134,7 @@ def test_cte_explicit_rename_detected():
 def test_unparseable_sql_does_not_raise():
     sql = "THIS IS NOT VALID SQL !!!@#$"
     try:
-        lineage = _parse(sql)
+        _parse(sql)
     except Exception:
         # Outer parse failures are acceptable as long as the property accessors
         # themselves don't raise on a ColumnLineage object

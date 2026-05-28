@@ -1,28 +1,23 @@
-"""Behavior-focused tests for column knowledge inheritance.
+"""Behavior-focused tests for the legacy name-match column inheritance.
 
-This module tests the actual USER-FACING BEHAVIOR of column inheritance,
-not the internal implementation details. The core value proposition of
-dbt-osmosis is "inheriting descriptions downstream" - these tests verify
-that behavior works correctly in real-world scenarios.
+These tests exercise ``inherit_upstream_column_knowledge`` (the original
+name-match transform, still used as a pre-pass before LLM synthesis). The
+CLL-driven inheritance that the pipeline uses by default is covered separately
+in ``test_inheritance_cll.py``.
 
-Key scenarios tested:
-- Multi-generation inheritance (A → B → C)
-- Empty columns inheriting from upstream
-- Partial documentation propagation
-- Tag and meta inheritance across generations
-- Diamond pattern (multiple upstream sources)
+Tests for behaviours the fork removed or replaced have been dropped:
+- ``osmosis_progenitor`` / ``add_progenitor_to_meta`` (progenitor tracking removed)
+- ``default_progenitor`` / ``column_default_progenitor`` overrides (removed)
+- multi-hop propagation through an empty intermediate and settings-level
+  ``force_inherit_descriptions`` overwrite (now governed by CLL + ``desc-owner``)
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest import mock
 
 import pytest
 
-from dbt_osmosis.core.inheritance import _get_node_yaml
-from dbt_osmosis.core.schema.reader import _read_yaml
-from dbt_osmosis.core.sync_operations import sync_node_to_yaml
 from dbt_osmosis.core.transforms import inherit_upstream_column_knowledge
 
 
@@ -34,101 +29,6 @@ def fresh_caches():
         mock.patch("dbt_osmosis.core.schema.reader._YAML_BUFFER_CACHE", {}),
     ):
         yield
-
-
-def _set_column_progenitor_override(
-    yaml_context,
-    node_id: str,
-    column_name: str,
-    *,
-    model_default_progenitor: str | None = None,
-    column_default_progenitor: str | None = None,
-) -> None:
-    """Mutate the cached YAML for a model so inheritance reads the requested override."""
-    manifest = yaml_context.project.manifest
-    node = manifest.nodes[node_id]
-    project_dir = Path(yaml_context.project.runtime_cfg.project_root)
-    path = project_dir.joinpath(node.patch_path.split("://")[-1])
-    yaml_doc = _read_yaml(yaml_context.yaml_handler, yaml_context.yaml_handler_lock, path)
-    model = next(model for model in yaml_doc["models"] if model["name"] == node.name)
-
-    if model_default_progenitor is not None:
-        model.setdefault("meta", {})["default_progenitor"] = model_default_progenitor
-
-    if column_default_progenitor is not None:
-        column = next(column for column in model["columns"] if column["name"] == column_name)
-        column.setdefault("meta", {})["column_default_progenitor"] = column_default_progenitor
-
-
-def test_multi_generation_inheritance_chain(yaml_context, fresh_caches):
-    """Test that documentation propagates through multi-generation model chains.
-
-    Scenario: raw_customers (seed) → stg_customers.v1 → customers
-
-    When raw_customers.seed has column documentation and customers does NOT,
-    the documentation should propagate through stg_customers.v1 to customers.
-
-    This tests the core value proposition: descriptions flow downstream across
-    multiple hops in the DAG.
-    """
-    manifest = yaml_context.project.manifest
-
-    # Set up: raw_customers has documentation for first_name, customers does not
-    raw_customers = manifest.nodes["seed.jaffle_shop_duckdb.raw_customers"]
-    raw_customers.columns["id"].description = "Unique customer identifier from source system"
-    raw_customers.columns["first_name"].description = "Customer first name from source"
-
-    # Clear the description in stg_customers and customers to test propagation
-    stg_customers = manifest.nodes["model.jaffle_shop_duckdb.stg_customers.v1"]
-    stg_customers.columns["customer_id"].description = ""
-    stg_customers.columns["first_name"].description = ""
-
-    customers = manifest.nodes["model.jaffle_shop_duckdb.customers"]
-    customers.columns["customer_id"].description = ""
-    customers.columns["first_name"].description = ""
-
-    # Execute: Run inheritance on customers
-    yaml_context.settings.force_inherit_descriptions = True
-    yaml_context.settings.add_progenitor_to_meta = True
-
-    inherit_upstream_column_knowledge(yaml_context, customers)
-
-    # Assert: first_name should have inherited from raw_customers
-    assert customers.columns["first_name"].description == "Customer first name from source"
-    # The progenitor should be the original source (raw_customers)
-    assert (
-        customers.columns["first_name"].meta.get("osmosis_progenitor")
-        == "seed.jaffle_shop_duckdb.raw_customers"
-    )
-
-
-def test_empty_column_inherits_from_upstream(yaml_context, fresh_caches):
-    """Test that an empty column description inherits from the nearest upstream source.
-
-    This is the most common use case: a downstream model has an undocumented column,
-    and it should inherit documentation from its upstream parent.
-    """
-    manifest = yaml_context.project.manifest
-
-    # Set up: raw_customers (seed) has documentation, customers does not
-    raw_customers = manifest.nodes["seed.jaffle_shop_duckdb.raw_customers"]
-    raw_customers.columns["first_name"].description = "Customer's first name - PII sensitive"
-
-    customers = manifest.nodes["model.jaffle_shop_duckdb.customers"]
-    customers.columns["first_name"].description = ""  # Empty - should inherit
-
-    # Execute
-    yaml_context.settings.force_inherit_descriptions = True
-    yaml_context.settings.add_progenitor_to_meta = True  # Enable progenitor tracking
-    inherit_upstream_column_knowledge(yaml_context, customers)
-
-    # Assert: first_name should inherit from raw_customers
-    assert customers.columns["first_name"].description == "Customer's first name - PII sensitive"
-    # Progenitor should be the seed (original source)
-    assert (
-        customers.columns["first_name"].meta.get("osmosis_progenitor")
-        == "seed.jaffle_shop_duckdb.raw_customers"
-    )
 
 
 def test_partial_documentation_propagation(yaml_context, fresh_caches):
@@ -191,12 +91,10 @@ def test_tag_and_meta_inheritance(yaml_context, fresh_caches):
 
 
 def test_diamond_pattern_inheritance(yaml_context, fresh_caches):
-    """Test inheritance when a column comes from multiple upstream models.
+    """Test inheritance when a column is provided by an upstream model.
 
-    Scenario: customers model depends on stg_customers, stg_orders, and stg_payments.
-    If first_name appears in multiple upstreams, the FIRST documented source should win.
-
-    This tests the "diamond pattern" DAG where multiple models converge.
+    Scenario: customers depends on stg_customers (among others). A documented
+    first_name in stg_customers should flow into an undocumented customers.first_name.
     """
     manifest = yaml_context.project.manifest
 
@@ -209,37 +107,10 @@ def test_diamond_pattern_inheritance(yaml_context, fresh_caches):
 
     # Execute
     yaml_context.settings.force_inherit_descriptions = True
-    yaml_context.settings.add_progenitor_to_meta = True
     inherit_upstream_column_knowledge(yaml_context, customers)
 
     # Assert: Should inherit from stg_customers
     assert customers.columns["first_name"].description == "First name from customers staging"
-    # Progenitor should be set
-    assert customers.columns["first_name"].meta.get("osmosis_progenitor") is not None
-
-
-def test_force_inherit_overrides_existing_descriptions(yaml_context, fresh_caches):
-    """Test that force_inherit_descriptions=true overrides existing documentation.
-
-    When force_inherit_descriptions is enabled, even columns that already have
-    descriptions should inherit from upstream. This is useful for standardizing
-    documentation across the data warehouse.
-    """
-    manifest = yaml_context.project.manifest
-
-    # Set up: both upstream and downstream have descriptions
-    stg_customers = manifest.nodes["model.jaffle_shop_duckdb.stg_customers.v1"]
-    stg_customers.columns["first_name"].description = "Standardized first name"
-
-    customers = manifest.nodes["model.jaffle_shop_duckdb.customers"]
-    customers.columns["first_name"].description = "Local first name description"
-
-    # Execute with force_inherit_descriptions = True
-    yaml_context.settings.force_inherit_descriptions = True
-    inherit_upstream_column_knowledge(yaml_context, customers)
-
-    # Assert: Should override local description with upstream
-    assert customers.columns["first_name"].description == "Standardized first name"
 
 
 def test_skip_add_tags_preserves_local_tags(yaml_context, fresh_caches):
@@ -311,108 +182,6 @@ def test_inheritance_with_placeholder_descriptions(yaml_context, fresh_caches):
     assert customers.columns["first_name"].description == "Customer first name"
 
 
-def test_inheritance_across_all_models(yaml_context, fresh_caches):
-    """Test that inheritance works correctly when run across all models in the project.
-
-    This is an integration test that verifies inheritance works end-to-end
-    for all models in the jaffle_shop project.
-    """
-    # Execute inheritance on all models
-    yaml_context.settings.force_inherit_descriptions = True
-    yaml_context.settings.add_progenitor_to_meta = True
-
-    inherit_upstream_column_knowledge(yaml_context)
-
-    # Verify: Check that inheritance propagated through the DAG
-    manifest = yaml_context.project.manifest
-
-    # Verify stg_customers has some columns with progenitor set
-    stg_customers = manifest.nodes["model.jaffle_shop_duckdb.stg_customers.v1"]
-    # At least some columns should have progenitor from seeds
-    progenitor_count = sum(
-        1
-        for col in stg_customers.columns.values()
-        if col.meta.get("osmosis_progenitor") == "seed.jaffle_shop_duckdb.raw_customers"
-    )
-    assert progenitor_count > 0, (
-        "At least some columns should have progenitor from raw_customers seed"
-    )
-
-
-def test_progenitor_tracking_across_generations(yaml_context, fresh_caches):
-    """Test that osmosis_progenitor correctly tracks the column's origin.
-
-    The progenitor field should always point to the ORIGINAL source of the column,
-    not just the immediate parent.
-    """
-    manifest = yaml_context.project.manifest
-
-    # Set up documentation at the seed level
-    raw_customers = manifest.nodes["seed.jaffle_shop_duckdb.raw_customers"]
-    raw_customers.columns["first_name"].description = "Original first name documentation"
-
-    # Clear intermediate descriptions
-    stg_customers = manifest.nodes["model.jaffle_shop_duckdb.stg_customers.v1"]
-    stg_customers.columns["first_name"].description = ""
-
-    customers = manifest.nodes["model.jaffle_shop_duckdb.customers"]
-    customers.columns["first_name"].description = ""
-
-    # Execute inheritance
-    yaml_context.settings.force_inherit_descriptions = True
-    yaml_context.settings.add_progenitor_to_meta = True
-
-    inherit_upstream_column_knowledge(yaml_context, customers)
-
-    # Assert: Progenitor should point to the seed, not stg_customers
-    assert (
-        customers.columns["first_name"].meta.get("osmosis_progenitor")
-        == "seed.jaffle_shop_duckdb.raw_customers"
-    )
-
-
-def test_default_progenitor_override_reuses_selected_ancestor_knowledge(
-    yaml_context,
-    fresh_caches,
-):
-    """A default_progenitor should inherit the override node's resolved lineage, not its raw column."""
-    manifest = yaml_context.project.manifest
-
-    raw_customers = manifest.nodes["seed.jaffle_shop_duckdb.raw_customers"]
-    raw_customers.columns["first_name"].description = "Original first name documentation"
-    raw_customers.columns["first_name"].meta = {"classification": "restricted"}
-    raw_customers.columns["first_name"].tags = ["pii"]
-
-    stg_customers = manifest.nodes["model.jaffle_shop_duckdb.stg_customers.v1"]
-    stg_customers.columns["first_name"].description = ""
-    stg_customers.columns["first_name"].meta = {}
-    stg_customers.columns["first_name"].tags = []
-
-    customers = manifest.nodes["model.jaffle_shop_duckdb.customers"]
-    customers.columns["first_name"].description = ""
-    customers.columns["first_name"].meta = {}
-    customers.columns["first_name"].tags = []
-
-    yaml_context.settings.force_inherit_descriptions = True
-    yaml_context.settings.add_progenitor_to_meta = True
-    _set_column_progenitor_override(
-        yaml_context,
-        "model.jaffle_shop_duckdb.customers",
-        "first_name",
-        model_default_progenitor="model.jaffle_shop_duckdb.stg_customers.v1",
-    )
-
-    inherit_upstream_column_knowledge(yaml_context, customers)
-
-    assert customers.columns["first_name"].description == "Original first name documentation"
-    assert customers.columns["first_name"].meta.get("classification") == "restricted"
-    assert "pii" in customers.columns["first_name"].tags
-    assert (
-        customers.columns["first_name"].meta.get("osmosis_progenitor")
-        == "seed.jaffle_shop_duckdb.raw_customers"
-    )
-
-
 def test_whitespace_only_description_inherits_from_upstream(yaml_context, fresh_caches):
     """Whitespace-only local descriptions are treated as empty and inherit from upstream.
 
@@ -453,42 +222,3 @@ def test_whitespace_only_upstream_description_does_not_propagate(yaml_context, f
 
     # Whitespace-only upstream doc must not propagate; description stays empty/unchanged
     assert not customers.columns["first_name"].description.strip()
-
-
-def test_column_default_progenitor_override_applies_without_progenitor_tracking(
-    yaml_context,
-    fresh_caches,
-):
-    """column_default_progenitor should work even when osmosis_progenitor tracking is disabled."""
-    manifest = yaml_context.project.manifest
-
-    raw_customers = manifest.nodes["seed.jaffle_shop_duckdb.raw_customers"]
-    raw_customers.columns["first_name"].description = "Original first name documentation"
-
-    stg_customers = manifest.nodes["model.jaffle_shop_duckdb.stg_customers.v1"]
-    stg_customers.columns["first_name"].description = "Stage-level first name documentation"
-
-    customers = manifest.nodes["model.jaffle_shop_duckdb.customers"]
-    customers.columns["first_name"].description = ""
-
-    yaml_context.settings.fusion_compat = False
-    yaml_context.settings.force_inherit_descriptions = True
-    yaml_context.settings.add_progenitor_to_meta = False
-    _set_column_progenitor_override(
-        yaml_context,
-        "model.jaffle_shop_duckdb.customers",
-        "first_name",
-        column_default_progenitor="seed.jaffle_shop_duckdb.raw_customers",
-    )
-
-    inherit_upstream_column_knowledge(yaml_context, customers)
-    sync_node_to_yaml(yaml_context, customers, commit=False)
-    yaml_slice = _get_node_yaml(yaml_context, customers)
-    assert yaml_slice is not None
-
-    yaml_column = next(column for column in yaml_slice["columns"] if column["name"] == "first_name")
-
-    assert customers.columns["first_name"].description == "Original first name documentation"
-    assert (
-        yaml_column["meta"]["column_default_progenitor"] == "seed.jaffle_shop_duckdb.raw_customers"
-    )

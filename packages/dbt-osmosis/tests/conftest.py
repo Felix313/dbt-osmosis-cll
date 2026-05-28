@@ -20,6 +20,30 @@ from dbt_osmosis.core.settings import YamlRefactorContext, YamlRefactorSettings
 from tests.support import run_dbt_command
 
 
+def _release_duckdb_connections() -> None:
+    """Drop dbt-duckdb's cached connection so the DuckDB file is unlocked.
+
+    dbt-duckdb caches the live connection on ``DuckDBConnectionManager._ENV`` (a
+    class-level global), which dbt-core's ``reset_adapters()`` does not touch. On
+    Windows that lingering handle locks ``test.db`` / ``test.db.wal`` and makes the
+    next ``shutil.copytree`` of the template fail with WinError 32. Nulling ``_ENV``
+    and forcing GC releases the handle.
+    """
+    try:
+        from dbt.adapters.duckdb.connections import DuckDBConnectionManager
+
+        DuckDBConnectionManager.close_all_connections()
+    except Exception:
+        pass
+    try:
+        from dbt.adapters.factory import reset_adapters
+
+        reset_adapters()
+    except Exception:
+        pass
+    gc.collect()
+
+
 def _run_dbt_commands(project_dir: str, profiles_dir: str, target: str = "test") -> None:
     """Run dbt seed and dbt run to populate the database.
 
@@ -139,6 +163,12 @@ def built_duckdb_template() -> Iterator[Path]:
             _run_dbt_commands(str(template_project_dir), str(template_project_dir))
         finally:
             os.chdir(old_cwd)
+
+        # The dbt commands above run in-process (dbtRunner), so dbt-duckdb keeps an
+        # open handle on the template's test.db. On Windows that handle locks the file,
+        # making the per-test shutil.copytree of this template fail with WinError 32.
+        # Release the cached connection before any copies happen.
+        _release_duckdb_connections()
 
         # Verify the database file was created
         db_file = template_project_dir / "test.db"
@@ -265,6 +295,12 @@ def yaml_context(built_duckdb_template: Path) -> Iterator[YamlRefactorContext]:
                 print("✓ DbtProject reference deleted and garbage collected")
         except Exception as e:
             print(f"Warning: Error deleting DbtProject reference: {e}")
+
+        # Forcefully release any remaining dbt-duckdb connection held on the global
+        # DuckDBConnectionManager._ENV cache. Without this, an open handle on this
+        # test's test.db lingers and (on Windows) locks files, making the NEXT test's
+        # copytree fail with WinError 32.
+        _release_duckdb_connections()
 
         # Remove the temp directory
         try:
