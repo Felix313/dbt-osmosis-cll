@@ -261,33 +261,25 @@ def inherit_upstream_column_knowledge(
             if extra not in inheritable:
                 inheritable.append(extra)
 
-        # Special case: if force_inherit_descriptions is Falseand the local column already has
-        # a description, don't inherit the description from upstream (preserve local description).
-        # If anchor-description is set on a column via meta, it is exempt from
-        # force-inherit-descriptions — the manually curated description is preserved even during
-        # a forced re-propagation pass. The CLL annotation step (annotate_column_origins) runs
-        # as a separate transform and is unaffected by anchoring.
+        # desc-authority controls who owns the column description.
+        # "upstream" → upstream always overwrites (old force-inherit: true behaviour).
+        # Any other value ("local", "aml", or custom) → preserve the existing description;
+        # upstream only fills gaps.  Column-level meta wins over model/layer defaults via
+        # _get_setting_for_node's standard resolution order.
         #
-        # Exception: a column whose description consists ONLY of a CBM-ODP annotation (no real
-        # business content) is treated as effectively un-anchored, even if anchor-description is
-        # set at folder level.  Annotation-only descriptions are derived, not manually curated,
-        # so they should always be refreshed from upstream.
-        force_inherit = _get_setting_for_node(
-            "force-inherit-descriptions",
-            node,
-            name,
-            fallback=context.settings.force_inherit_descriptions,
-        )
-        is_anchored = bool(_get_setting_for_node("anchor-description", node, name, fallback=False))
+        # Exception: a description that consists ONLY of a CBM-ODP annotation block (no real
+        # business content) is treated as if the column has no description — it is always
+        # refreshed from upstream regardless of desc-authority.
+        desc_authority = _get_setting_for_node("desc-authority", node, name, fallback="local")
+        force_inherit = str(desc_authority).lower() == "upstream"
         existing_desc = node_column.description.strip()
-        if is_anchored and existing_desc:
+        if not force_inherit and existing_desc:
             from dbt_osmosis.core.cll import strip_all_cbm_tags
-            annotation_only = not strip_all_cbm_tags(existing_desc).strip()
-            if annotation_only:
-                is_anchored = False  # annotation-only ⟹ treat as un-anchored
+            if not strip_all_cbm_tags(existing_desc).strip():
+                force_inherit = True  # annotation-only ⟹ treat as no real description
         if (
             "description" in inheritable
-            and (not force_inherit or is_anchored)
+            and not force_inherit
             and existing_desc
         ):
             inheritable.remove("description")
@@ -1071,14 +1063,11 @@ def annotate_column_origins(
                     if _raw_prog:
                         _prog_desc = strip_all_cbm_tags(_raw_prog).strip() or None
                         if _prog_desc:
-                            _force_here = _get_setting_for_node(
-                                "force-inherit-descriptions", node, col_name,
-                                fallback=context.settings.force_inherit_descriptions,
+                            _desc_auth = _get_setting_for_node(
+                                "desc-authority", node, col_name, fallback="local"
                             )
-                            _anchored_here = bool(
-                                _get_setting_for_node("anchor-description", node, col_name, fallback=False)
-                            )
-                            if not has_real_desc or (_force_here and not _anchored_here):
+                            _force_here = str(_desc_auth).lower() == "upstream"
+                            if not has_real_desc or _force_here:
                                 base_desc = _prog_desc
                 node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
             continue

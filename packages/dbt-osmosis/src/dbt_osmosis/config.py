@@ -147,6 +147,22 @@ class OsmosisConfig:
     Leave empty (default) to disable.
     """
 
+    # ── CLL-driven inheritance (Phase 4) ────────────────────────────────────
+    inherit_through_renames: bool = False
+    """When ``True``, CLL-driven inheritance follows column renames across model hops
+    and propagates the upstream description even when the column name changes.
+
+    Set ``True`` for layers that only rename/cast (e.g. staging) where upstream
+    descriptions remain semantically valid after a rename.  Set ``False`` (default)
+    for domain/DP layers where renames signal a semantic change — inheriting the
+    upstream description would be misleading (e.g. ``SUM(bpartner_id) AS cnt_bpart``
+    should not inherit the bpartner_id description).
+
+    Configured as ``inherit-through-renames`` in ``.osmosis`` or via
+    ``+dbt-osmosis-options`` in ``dbt_project.yml`` for per-layer control.
+    Has no effect until the CLL-driven inheritance rewrite (Phase 4) is active.
+    """
+
     # ── YAML output ──────────────────────────────────────────────────────────
     yaml_best_width: int = 0
     """Maximum line width for YAML output (ruamel ``best_width`` setting).
@@ -323,6 +339,7 @@ def _load_config(start: Path) -> OsmosisConfig:
             cll_max_origin_depth               = _int("cll-max-origin-depth", OsmosisConfig.cll_max_origin_depth),
             column_docs_path                   = _str("column-docs-path",     OsmosisConfig.column_docs_path),
             compiled_sql_placeholder_patterns  = _patterns("compiled-sql-placeholder-patterns"),
+            inherit_through_renames            = _bool("inherit-through-renames", OsmosisConfig.inherit_through_renames),
             yaml_best_width                    = _int("yaml-best-width",      OsmosisConfig.yaml_best_width),
             write_cll_tags_to_meta             = _bool("write-cll-tags-to-meta", OsmosisConfig.write_cll_tags_to_meta),
             meta_key_renamed_from              = _str("col-renamed-from",     OsmosisConfig.meta_key_renamed_from),
