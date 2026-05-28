@@ -29,6 +29,7 @@ __all__ = [
     "_transform_op",
     "annotate_column_origins",
     "inherit_upstream_column_knowledge",
+    "inherit_upstream_column_knowledge_cll",
     "inject_missing_columns",
     "remove_columns_not_in_database",
     "sort_columns_alphabetically",
@@ -351,6 +352,331 @@ def inherit_upstream_column_knowledge(
             name,
         )
         node.columns[name] = node_column.replace(**updated_metadata)
+
+
+def _find_cll_description(
+    context: YamlRefactorContextProtocol,
+    parent_model_name: str,
+    parent_col_name: str,
+    depth: int = 0,
+    max_depth: int | None = None,
+) -> str | None:
+    """Walk the CLL progenitor chain to find the closest ancestor with a real description.
+
+    Reads from stable YAML buffers (not in-memory manifest) — safe for parallel execution.
+    Stops at: computed walls, aggregate/window/union/literal/generated columns, source nodes,
+    unresolvable nodes, depth limit.
+    """
+    from dbt_osmosis.core.cll import (
+        _SOURCE_INDEX,
+        _NODE_INDEX,
+        _ensure_manifest_index,
+        get_cll_results,
+        strip_all_cbm_tags,
+    )
+    from dbt_osmosis.core.inheritance import _read_ancestor_yaml_description
+
+    if max_depth is None:
+        max_depth = get_config().cll_max_origin_depth
+
+    # 1. Depth guard — protects against cyclic or pathological lineage chains.
+    if depth > max_depth:
+        logger.warning(
+            ":warning: CLL description search exceeded max depth (%d) at => %s.%s",
+            max_depth,
+            parent_model_name,
+            parent_col_name,
+        )
+        return None
+
+    # 2. Resolve the parent model name to a manifest node (source or model).
+    _ensure_manifest_index(context)
+    project_dir = str(context.project.runtime_cfg.project_root)
+    src_node = _SOURCE_INDEX[project_dir].get(parent_model_name.lower())
+    model_node = _NODE_INDEX[project_dir].get(parent_model_name.lower())
+    upstream_node = src_node or model_node
+    if upstream_node is None:
+        return None
+
+    # 3. Prefer the stable YAML buffer description (reflects pre-run enrichment, parallel-safe).
+    variants = [parent_col_name, parent_col_name.upper(), parent_col_name.lower()]
+    yaml_desc = _read_ancestor_yaml_description(context, upstream_node, variants)
+    if yaml_desc:
+        cleaned = strip_all_cbm_tags(yaml_desc).strip()
+        if cleaned and cleaned not in context.placeholders:
+            return cleaned
+
+    # 4. Fall back to the in-memory manifest description.
+    cols = getattr(upstream_node, "columns", {})
+    col_info = next(
+        (v for k, v in cols.items() if k.lower() == parent_col_name.lower()), None
+    )
+    if col_info:
+        raw = getattr(col_info, "description", None) or ""
+        cleaned = strip_all_cbm_tags(raw).strip()
+        if cleaned and cleaned not in context.placeholders:
+            return cleaned
+
+    # 5. Sources are terminal — CLL cannot recurse further (no compiled SQL).
+    if src_node is not None:
+        return None
+
+    # 6. Ask CLL for this upstream column's own progenitor to continue the walk.
+    parent_results = get_cll_results(context, model_node)
+    parent_result = next(
+        (
+            r
+            for r in parent_results
+            if r.model.lower() == parent_model_name.lower()
+            and r.column.lower() == parent_col_name.lower()
+        ),
+        None,
+    )
+    if parent_result is None:
+        return None
+
+    # 7. Stop at computed walls — no single traceable upstream column.
+    _is_aggregate = getattr(parent_result, "is_aggregate", False)
+    _is_window = getattr(parent_result, "is_window", False)
+    _is_union = getattr(parent_result, "is_union", False)
+    _is_literal = getattr(parent_result, "is_literal", False)
+    _is_generated = getattr(parent_result, "is_generated", False)
+    if (
+        _is_aggregate
+        or _is_window
+        or _is_union
+        or _is_literal
+        or _is_generated
+        or (parent_result.is_computed and parent_result.progenitor_column is None)
+    ):
+        return None
+
+    # 8. Stop if there is no progenitor to recurse into.
+    if parent_result.progenitor_model is None:
+        return None
+
+    # 9. Recurse into the grandparent (always follow the chain past intermediate renames).
+    progenitor_col = (parent_result.progenitor_column or parent_col_name).strip('"').strip("'")
+    return _find_cll_description(
+        context,
+        parent_result.progenitor_model.lower(),
+        progenitor_col,
+        depth + 1,
+        max_depth,
+    )
+
+
+@_transform_op("Inherit Upstream Column Knowledge (CLL)")
+def inherit_upstream_column_knowledge_cll(
+    context: YamlRefactorContextProtocol,
+    node: ResultNode | None = None,
+) -> None:
+    """CLL-driven column description inheritance — runs in parallel, no name-matching.
+
+    Replaces inherit_upstream_column_knowledge for projects using CLL.
+
+    For each column in the node:
+    - Queries CLL for the immediate upstream progenitor.
+    - Skips computed / aggregate / window / union / literal / generated columns.
+    - If inherit-through-renames is False (default) and CLL detected a rename → skips description.
+    - Otherwise: walks the CLL progenitor chain to find the closest ancestor with a description.
+    - Applies desc-owner logic: "upstream" always overwrites; any other value only fills gaps.
+    - Tags and meta from the immediate CLL progenitor are inherited (not from the full chain).
+    - Managed meta keys (desc-owner, anchor-description, etc.) are filtered from inherited meta
+      and re-applied only from the local column's own meta.
+    - No name-matching fallback. CLL failure = column skipped, existing description preserved.
+    """
+    if node is None:
+        logger.info(":wave: CLL-driven column inheritance across all matched nodes.")
+        from dbt_osmosis.core.cll import _ensure_manifest_index
+
+        # Build the index dicts once, up front, so the parallel pool only reads them.
+        _ensure_manifest_index(context)
+
+        from dbt_osmosis.core.node_filters import _iter_candidate_nodes
+
+        nodes = list(_iter_candidate_nodes(context))
+        total = len(nodes)
+        for i, _ in enumerate(
+            context.pool.map(
+                partial(inherit_upstream_column_knowledge_cll, context),
+                (n for _, n in nodes),
+            ),
+            start=1,
+        ):
+            if i % 25 == 0 or i == total:
+                logger.info(":hourglass: CLL Inherit progress => %d / %d", i, total)
+        return
+
+    logger.info(":dna: CLL-driven inheritance for => %s", node.unique_id)
+
+    from dbt_osmosis.core.cll import (
+        _ensure_manifest_index,
+        _SOURCE_INDEX,
+        _NODE_INDEX,
+        get_cll_results,
+        strip_all_cbm_tags,
+    )
+    from dbt_osmosis.core.introspection import _get_setting_for_node
+
+    _ensure_manifest_index(context)
+    project_dir = str(context.project.runtime_cfg.project_root)
+    _cfg = get_config()
+    _managed = get_managed_meta_keys()
+
+    # Sources have no SQL → CLL cannot run; their descriptions come from the DB.
+    if node.resource_type == NodeType.Source:
+        return
+
+    results = get_cll_results(context, node)
+    if not results:
+        # CLL failed or produced no results → skip entirely, preserve existing state.
+        # The failure (if any) was already recorded in _CLL_FAILURES by get_cll_results.
+        logger.debug(":warning: CLL unavailable for %s — skipping CLL inheritance.", node.name)
+        return
+
+    node_lower = node.name.lower()
+    result_by_col: dict[str, t.Any] = {
+        r.column.lower(): r for r in results if r.model.lower() == node_lower
+    }
+
+    # Per-node config (resolved once, can still be overridden per column below).
+    inherit_renames_node = _get_setting_for_node(
+        "inherit-through-renames", node, fallback=_cfg.inherit_through_renames
+    )
+
+    for col_name, node_col in node.columns.items():
+        result = result_by_col.get(col_name.lower())
+        if result is None:
+            # CLL has no entry for this column in this model → skip.
+            continue
+
+        # --- Skip columns with no single traceable upstream (annotate step handles them) ---
+        _is_aggregate = getattr(result, "is_aggregate", False)
+        _is_window = getattr(result, "is_window", False)
+        _is_union = getattr(result, "is_union", False)
+        _is_literal = getattr(result, "is_literal", False)
+        _is_generated = getattr(result, "is_generated", False)
+        _is_multi_src = result.is_computed and result.progenitor_column is None
+
+        if (
+            _is_aggregate
+            or _is_window
+            or _is_union
+            or _is_literal
+            or _is_generated
+            or _is_multi_src
+        ):
+            continue
+
+        if result.is_first_in_chain or result.progenitor_model is None:
+            # Column originates here; no upstream to inherit from.
+            continue
+
+        # --- Rename check ---
+        # Strip adapter quote characters before comparing names — progenitor_column may carry
+        # SQL-quoted identifiers like '"COLUMN_NAME"' that are the same logical name.
+        _prog_col_stripped = (result.progenitor_column or "").strip('"').strip("'").lower()
+        is_rename = bool(result.is_rename) or (
+            result.progenitor_column is not None and col_name.lower() != _prog_col_stripped
+        )
+
+        # Per-column override of inherit-through-renames is allowed.
+        inherit_renames = _get_setting_for_node(
+            "inherit-through-renames",
+            node,
+            col_name,
+            fallback=inherit_renames_node,
+        )
+
+        if is_rename and not inherit_renames:
+            # Rename detected and not configured to follow → skip description, still do tags/meta.
+            desc_to_apply = None
+        else:
+            # Walk the CLL progenitor chain for the closest ancestor with a real description.
+            progenitor_col = (result.progenitor_column or col_name).strip('"').strip("'")
+            desc_to_apply = _find_cll_description(
+                context,
+                result.progenitor_model.lower(),
+                progenitor_col,
+            )
+
+        # --- desc-owner: should we overwrite the existing description? ---
+        desc_authority = _get_setting_for_node("desc-owner", node, col_name, fallback="this")
+        force_inherit = str(desc_authority).lower() == "upstream"
+        existing_desc = node_col.description.strip() if node_col.description else ""
+        if not force_inherit and existing_desc:
+            # An annotation-only description (no real content after tag strip) counts as empty.
+            if not strip_all_cbm_tags(existing_desc).strip():
+                force_inherit = True
+
+        update_kwargs: dict[str, t.Any] = {}
+
+        if desc_to_apply is not None:
+            # Only write the description if allowed (force_inherit or the column is empty).
+            if force_inherit or not existing_desc:
+                clean_desc = strip_all_cbm_tags(desc_to_apply).strip()
+                if clean_desc and clean_desc not in context.placeholders:
+                    update_kwargs["description"] = clean_desc
+
+        # --- Inherit tags and meta from the immediate CLL progenitor (not the full chain) ---
+        prog_lower = result.progenitor_model.lower()
+        progenitor_node = _SOURCE_INDEX[project_dir].get(prog_lower) or _NODE_INDEX[
+            project_dir
+        ].get(prog_lower)
+        if progenitor_node is not None:
+            prog_col_name = (result.progenitor_column or col_name).strip('"').strip("'")
+            prog_cols = getattr(progenitor_node, "columns", {})
+            prog_col = next(
+                (v for k, v in prog_cols.items() if k.lower() == prog_col_name.lower()), None
+            )
+            if prog_col is not None:
+                skip_tags = _get_setting_for_node(
+                    "skip-add-tags",
+                    node,
+                    col_name,
+                    fallback=context.settings.skip_add_tags,
+                )
+                skip_meta = _get_setting_for_node(
+                    "skip-merge-meta",
+                    node,
+                    col_name,
+                    fallback=context.settings.skip_merge_meta,
+                )
+
+                if not skip_tags:
+                    upstream_tags = list(getattr(prog_col, "tags", None) or [])
+                    if upstream_tags:
+                        existing_tags = list(getattr(node_col, "tags", None) or [])
+                        merged_tags = list(set(existing_tags) | set(upstream_tags))
+                        if merged_tags != existing_tags:
+                            update_kwargs["tags"] = merged_tags
+
+                if not skip_meta:
+                    upstream_meta = dict(getattr(prog_col, "meta", None) or {})
+                    local_meta = dict(node_col.meta or {})
+                    # Filter managed keys from upstream meta — they must not propagate.
+                    filtered_upstream = {
+                        k: v for k, v in upstream_meta.items() if k not in _managed
+                    }
+                    # Merge: local wins on collision, then re-apply local-owned managed keys.
+                    merged_meta = {**filtered_upstream, **local_meta}
+                    for key in _managed:
+                        if key in local_meta:
+                            merged_meta[key] = local_meta[key]
+                        else:
+                            merged_meta.pop(key, None)
+                    if merged_meta != local_meta:
+                        update_kwargs["meta"] = merged_meta
+
+        if update_kwargs:
+            logger.debug(
+                ":star2: CLL inherit => %s.%s: %s",
+                node.name,
+                col_name,
+                list(update_kwargs.keys()),
+            )
+            node.columns[col_name] = node_col.replace(**update_kwargs)
 
 
 @_transform_op("Inject Missing Columns")

@@ -37,6 +37,7 @@ from dbt_osmosis.core.test_suggestions import suggest_tests_for_model, suggest_t
 from dbt_osmosis.core.transforms import (
     annotate_column_origins,
     inherit_upstream_column_knowledge,
+    inherit_upstream_column_knowledge_cll,
     inject_missing_columns,
     remove_columns_not_in_database,
     sort_columns_as_configured,
@@ -421,7 +422,7 @@ def refactor(
         transform = (
             inject_missing_columns
             >> remove_columns_not_in_database
-            >> inherit_upstream_column_knowledge
+            >> inherit_upstream_column_knowledge_cll
             >> annotate_column_origins
             >> sort_columns_as_configured
             >> synchronize_data_types
@@ -624,7 +625,7 @@ def document(
 
         transform = (
             inject_missing_columns
-            >> inherit_upstream_column_knowledge
+            >> inherit_upstream_column_knowledge_cll
             >> annotate_column_origins
             >> sort_columns_as_configured
         )

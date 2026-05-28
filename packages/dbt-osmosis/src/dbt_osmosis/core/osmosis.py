@@ -250,6 +250,7 @@ from dbt_osmosis.core.test_suggestions import (
 from dbt_osmosis.core.transforms import (
     apply_semantic_analysis,
     inherit_upstream_column_knowledge,
+    inherit_upstream_column_knowledge_cll,
     inject_missing_columns,
     remove_columns_not_in_database,
     sort_columns_alphabetically,
@@ -310,6 +311,7 @@ __all__ = list(
         "sync_node_to_yaml",
         "apply_restructure_plan",
         "inherit_upstream_column_knowledge",
+        "inherit_upstream_column_knowledge_cll",
         "inject_missing_columns",
         "remove_columns_not_in_database",
         "sort_columns_as_in_database",
