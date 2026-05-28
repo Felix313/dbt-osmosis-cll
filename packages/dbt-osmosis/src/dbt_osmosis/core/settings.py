@@ -16,6 +16,32 @@ if t.TYPE_CHECKING:
     from dbt_osmosis.core.config import DbtProjectContext
 
 
+def _read_profile_threads(runtime_cfg: t.Any) -> int | None:
+    """Read the thread count for the active target directly from profiles.yml.
+
+    dbt_core_interface hard-codes threads=1 as its default, ignoring the
+    profile setting when --threads is not passed on the CLI.  This helper
+    reads the raw YAML so osmosis respects the user's profile configuration.
+    Returns None if the profile cannot be read.
+    """
+    try:
+        import yaml
+
+        profiles_dir = getattr(runtime_cfg, "profiles_dir", None) or Path.home() / ".dbt"
+        profiles_path = Path(profiles_dir) / "profiles.yml"
+        if not profiles_path.exists():
+            return None
+        profiles = yaml.safe_load(profiles_path.read_text(encoding="utf-8")) or {}
+        profile_name = getattr(runtime_cfg, "profile_name", None)
+        target_name = getattr(runtime_cfg, "target_name", None)
+        if not profile_name or not target_name:
+            return None
+        threads = profiles.get(profile_name, {}).get("outputs", {}).get(target_name, {}).get("threads")
+        return int(threads) if threads else None
+    except Exception:
+        return None
+
+
 def _create_yaml_instance() -> ruamel.yaml.YAML:
     from dbt_osmosis.core.schema.parser import create_yaml_instance
 
@@ -422,9 +448,14 @@ class YamlRefactorContext:
         if _best_width > 0:
             self.yaml_handler.best_width = _best_width
             self.yaml_handler.width = _best_width
-        # Override max_workers with dbt's thread count when available.
-        if hasattr(self.project.runtime_cfg, "threads") and self.project.runtime_cfg.threads:
-            self.pool._max_workers = self.project.runtime_cfg.threads
+        # Override max_workers with the profile's thread count.
+        # dbt_core_interface defaults threads=1 when --threads is not passed on the CLI,
+        # ignoring the profile setting. Fall back to reading profiles.yml directly.
+        resolved_threads = _read_profile_threads(self.project.runtime_cfg) or getattr(
+            self.project.runtime_cfg, "threads", None
+        )
+        if resolved_threads and resolved_threads > 1:
+            self.pool._max_workers = resolved_threads
             logger.info(
                 ":notebook: Osmosis ThreadPoolExecutor max_workers using dbt threads => %s",
                 self.pool._max_workers,

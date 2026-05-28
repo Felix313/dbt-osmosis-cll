@@ -1112,21 +1112,31 @@ def annotate_column_origins(
 
         else:
             origin = get_column_origin(context, node, col_name)
-            if origin is None:
-                # Can't resolve origin — still clean stale meta and strip old annotations.
-                base_desc = strip_all_cbm_tags((node_col.description or "").strip())
-                if not base_desc or base_desc in context.placeholders:
-                    base_desc = ""
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
-                continue
 
-            schema, origin_model, origin_col = origin
+            if origin is None:
+                # Deep trace failed (broken chain, depth limit, unknown node).
+                # Fall back to immediate CLL progenitor so the annotation is never
+                # silently dropped when the deep chain is unresolvable.
+                imm_model = result.progenitor_model
+                imm_col = result.progenitor_column or ""
+                if not imm_model:
+                    # Truly unresolvable — strip stale tags, keep description.
+                    base_desc = strip_all_cbm_tags((node_col.description or "").strip())
+                    if not base_desc or base_desc in context.placeholders:
+                        base_desc = ""
+                    node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
+                    continue
+                origin = ("", imm_model.upper(), imm_col.upper(), imm_col.upper())
+
+            schema, origin_model, origin_col, entry_col = origin
 
             if not origin_col:
                 # Computed column found upstream — origin_model is where it was computed.
                 # Write "Berechnet in: SCHEMA.MODEL" rather than a column-level reference.
+                # If entry_col differs from col_name, a rename occurred along the chain —
+                # append "(als ENTRY_COL)" so the reader knows what to search for in that model.
                 if _write_meta:
-                    new_meta[_key_computed] = f"{schema}.{origin_model}"
+                    new_meta[_key_computed] = f"{schema}.{origin_model}" if schema else origin_model
                 else:
                     new_meta.pop(_key_computed, None)
                 new_meta.pop(_key_renamed, None)
@@ -1135,7 +1145,8 @@ def annotate_column_origins(
                 if not base_desc or base_desc in context.placeholders:
                     base_desc = ""
                 if _annotate_mode:
-                    derived_tag = format_derived_tag(schema, origin_model)
+                    renamed_entry = entry_col if entry_col and entry_col.upper() != col_name.upper() else None
+                    derived_tag = format_derived_tag(schema, origin_model, entry_col=renamed_entry)
                     new_desc = f"{base_desc}\n\n{derived_tag}".strip() if base_desc else derived_tag
                     node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
                 else:

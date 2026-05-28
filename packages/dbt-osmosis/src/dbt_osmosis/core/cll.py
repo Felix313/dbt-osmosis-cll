@@ -43,7 +43,7 @@ _SOURCE_INDEX: dict[str, dict[str, t.Any]] = {}
 _NODE_INDEX: dict[str, dict[str, t.Any]] = {}
 
 # (project_dir, model_name_lower, column_name_lower) → origin tuple or None
-_ORIGIN_CACHE: dict[tuple[str, str, str], tuple[str, str, str] | None] = {}
+_ORIGIN_CACHE: dict[tuple[str, str, str], tuple[str, str, str, str] | None] = {}
 
 # project_dir → {model_name: {"compiled_sql_hash": str, "results": [dict]}}
 _DISK_CACHE: dict[str, dict[str, t.Any]] = {}
@@ -434,7 +434,7 @@ def get_column_origin(
     node: ResultNode,
     column_name: str,
     _depth: int = 0,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str] | None:
     """Trace *column_name* in *node* back to its ultimate source-system origin.
 
     Recursively follows ``progenitor_model → progenitor_column`` through CLL
@@ -480,7 +480,7 @@ def _compute_column_origin(
     column_name: str,
     project_dir: str | None = None,
     _depth: int = 0,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str] | None:
     """Internal recursive implementation for :func:`get_column_origin`."""
     max_depth = get_config().cll_max_origin_depth
     if _depth > max_depth:
@@ -510,13 +510,13 @@ def _compute_column_origin(
     # Multi-source computed: column is born in this model (UNION ALL, multi-arg expression…).
     # Return (schema, model, "") as a sentinel so the caller can write "Berechnet in: SCHEMA.MODEL"
     # rather than silently dropping the annotation.
-    if result.progenitor_column is None and result.is_computed:
+    if (result.progenitor_column is None or result.progenitor_column == "") and result.is_computed:
         schema = (
             getattr(getattr(node, "unrendered_config", None), "schema", None)
             or getattr(node, "schema", None)
             or ""
         )
-        return (str(schema).upper(), node.name.upper(), "")
+        return (str(schema).upper(), node.name.upper(), "", column_name.upper())
 
     # Column originates here (source-layer or seed — first in dbt chain)
     if result.progenitor_model is None:
@@ -526,7 +526,7 @@ def _compute_column_origin(
                 or getattr(node, "schema", None)
                 or ""
             )
-            return (str(schema).upper(), node.name.upper(), column_name.upper())
+            return (str(schema).upper(), node.name.upper(), column_name.upper(), column_name.upper())
         return None
 
     progenitor_lower = result.progenitor_model.lower()
@@ -542,7 +542,7 @@ def _compute_column_origin(
     src_node = _SOURCE_INDEX[project_dir].get(progenitor_lower)
     if src_node is not None:
         schema = (getattr(src_node, "schema", None) or "").upper()
-        return (schema, progenitor_lower.upper(), progenitor_col.upper())
+        return (schema, progenitor_lower.upper(), progenitor_col.upper(), progenitor_col.upper())
 
     # Recurse into the progenitor dbt model
     model_node = _NODE_INDEX[project_dir].get(progenitor_lower)
@@ -610,9 +610,17 @@ def format_computed_origin_tag(origin_col: str, origin_table: str, source_descri
     return _wrap_annotation(base)
 
 
-def format_derived_tag(schema: str, model: str) -> str:
-    """Return the annotation block for a **multi-source derived** column."""
-    return _wrap_annotation(f"{get_config().annotation_computed} {schema}.{model}")
+def format_derived_tag(schema: str, model: str, entry_col: str | None = None) -> str:
+    """Return the annotation block for a **multi-source / computed** column.
+
+    When *entry_col* is supplied and differs from the queried column name, it is
+    appended as ``(als ENTRY_COL)`` so the reader knows what name to search for
+    in the referenced model.
+    """
+    tag = f"{get_config().annotation_computed} {schema}.{model}"
+    if entry_col:
+        tag = f"{tag} (als {entry_col})"
+    return _wrap_annotation(tag)
 
 
 def format_aggregate_from_tag(progenitor_col: str, progenitor_model: str) -> str:
