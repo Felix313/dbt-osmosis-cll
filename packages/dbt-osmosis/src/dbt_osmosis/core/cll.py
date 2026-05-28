@@ -42,13 +42,22 @@ _READER_CACHE: dict[str, t.Any] = {}
 _SOURCE_INDEX: dict[str, dict[str, t.Any]] = {}
 _NODE_INDEX: dict[str, dict[str, t.Any]] = {}
 
+# project_dir → {(db_upper, schema_upper, identifier_upper): source_node}
+# Built once per project from the manifest. Used by Phase 4 CLL-driven inheritance
+# to resolve compiled-SQL database references back to dbt source nodes.
+_SOURCE_REVERSE_INDEX: dict[str, dict[tuple[str, str, str], t.Any]] = {}
+
 # (project_dir, model_name_lower, column_name_lower) → origin tuple or None
 _ORIGIN_CACHE: dict[tuple[str, str, str], tuple[str, str, str, str] | None] = {}
 
 # project_dir → {model_name: {"compiled_sql_hash": str, "results": [dict]}}
 _DISK_CACHE: dict[str, dict[str, t.Any]] = {}
 
+# project_dir → set of model names for which CLL failed during this run
+_CLL_FAILURES: dict[str, set[str]] = {}
+
 _CACHE_LOCK = threading.Lock()
+_FAILURES_LOCK = threading.Lock()
 
 # Fields we read from ColumnLineageResult — serialised/deserialised for disk cache
 _RESULT_FIELDS = (
@@ -240,6 +249,8 @@ def get_cll_results(
             exc,
         )
         results = []
+        with _FAILURES_LOCK:
+            _CLL_FAILURES.setdefault(project_dir, set()).add(node.name)
 
     # Update both caches.
     # Never persist empty results: an empty list means CLL failed or the model
@@ -410,6 +421,7 @@ def _ensure_manifest_index(context: YamlRefactorContextProtocol) -> None:
     project_dir = str(runtime_cfg.project_root)
     if project_dir not in _SOURCE_INDEX:
         src_idx: dict[str, t.Any] = {}
+        rev_idx: dict[tuple[str, str, str], t.Any] = {}
         for src_node in context.project.manifest.sources.values():
             identifier = (getattr(src_node, "identifier", None) or "").lower()
             name = (getattr(src_node, "name", None) or "").lower()
@@ -419,7 +431,17 @@ def _ensure_manifest_index(context: YamlRefactorContextProtocol) -> None:
                 src_idx[identifier] = src_node
             if name and name != identifier:
                 src_idx.setdefault(name, src_node)
+            # Reverse index: (database, schema, identifier) → source_node.
+            # Used by Phase 4 CLL-driven inheritance to resolve compiled-SQL
+            # database references (e.g. EDW_DB_PROD.AE_AML.SOME_TABLE) back
+            # to dbt source nodes for description lookup.
+            db  = (getattr(src_node, "database",   None) or "").upper()
+            sch = (getattr(src_node, "schema",     None) or "").upper()
+            idf = (getattr(src_node, "identifier", None) or "").upper()
+            if db and sch and idf:
+                rev_idx[(db, sch, idf)] = src_node
         _SOURCE_INDEX[project_dir] = src_idx
+        _SOURCE_REVERSE_INDEX[project_dir] = rev_idx
     if project_dir not in _NODE_INDEX:
         node_idx: dict[str, t.Any] = {}
         for n in context.project.manifest.nodes.values():
@@ -427,6 +449,45 @@ def _ensure_manifest_index(context: YamlRefactorContextProtocol) -> None:
             if name:
                 node_idx[name] = n
         _NODE_INDEX[project_dir] = node_idx
+
+
+def get_source_node_by_relation(
+    context: YamlRefactorContextProtocol,
+    database: str,
+    schema: str,
+    identifier: str,
+) -> t.Any | None:
+    """Resolve a compiled-SQL database reference to a dbt source node.
+
+    CLL progenitors for source tables are expressed as ``DATABASE.SCHEMA.TABLE``
+    strings extracted from compiled SQL.  This function maps them back to the
+    manifest source node so Phase 4 CLL-driven inheritance can look up column
+    descriptions directly.
+
+    Returns ``None`` when no matching source node exists (e.g. the table is an
+    external reference not declared as a dbt source).
+    """
+    _ensure_manifest_index(context)
+    runtime_cfg = context.project.runtime_cfg
+    project_dir = str(runtime_cfg.project_root)
+    key = (database.upper(), schema.upper(), identifier.upper())
+    return _SOURCE_REVERSE_INDEX.get(project_dir, {}).get(key)
+
+
+def get_cll_failures(context: YamlRefactorContextProtocol) -> frozenset[str]:
+    """Return the set of model names for which CLL failed during this run."""
+    runtime_cfg = context.project.runtime_cfg
+    project_dir = str(runtime_cfg.project_root)
+    with _FAILURES_LOCK:
+        return frozenset(_CLL_FAILURES.get(project_dir, set()))
+
+
+def clear_cll_failures(context: YamlRefactorContextProtocol) -> None:
+    """Clear the CLL failure set for this project (call after emitting summary)."""
+    runtime_cfg = context.project.runtime_cfg
+    project_dir = str(runtime_cfg.project_root)
+    with _FAILURES_LOCK:
+        _CLL_FAILURES.pop(project_dir, None)
 
 
 def get_column_origin(

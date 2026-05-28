@@ -185,6 +185,26 @@ class TransformPipeline:
             )
             _ = atexit.register(_commit)
 
+        # Emit CLL failure summary after all operations and YAML writes are done.
+        # Failures are tracked per-model throughout the run; a consolidated summary
+        # here is more actionable than individual inline warnings buried in the log.
+        if context is not None:
+            try:
+                from dbt_osmosis.core.cll import clear_cll_failures, get_cll_failures
+                failures = get_cll_failures(context)
+                if failures:
+                    logger.warning(
+                        ":warning: CLL failed for %d model(s) — these were skipped during "
+                        "annotation and will not have updated lineage tags. "
+                        "Run [bold]dbt compile --select %s[/bold] to fix.\n  %s",
+                        len(failures),
+                        " ".join(sorted(failures)),
+                        "\n  ".join(sorted(failures)),
+                    )
+                clear_cll_failures(context)
+            except Exception:
+                pass
+
         return self
 
     def __repr__(self) -> str:
