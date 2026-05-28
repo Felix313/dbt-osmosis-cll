@@ -202,6 +202,50 @@ def test_model_filter_restricts_output(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Registry caching (perf): load once, reuse across per-model calls
+# ---------------------------------------------------------------------------
+
+def test_registry_loaded_once_across_calls(tmp_path):
+    """The loaded registry is cached, so repeated per-model calls do not re-parse.
+
+    This is the core of the O(N^2) -> O(N) fix: a caller that resolves lineage one
+    model at a time must not rebuild + reload (i.e. re-parse the whole project) on
+    every call.
+    """
+    from dbt_column_lineage.api import clear_lineage_caches
+
+    m = _make_manifest(tmp_path)
+    c = _make_catalog(tmp_path)
+
+    lin = ColumnLineage(source_columns={"src.col"}, transformation_type="direct")
+    all_models = {
+        "model_a": _make_model("model_a", {"col1": [lin]}),
+        "model_b": _make_model("model_b", {"col2": [lin]}),
+    }
+
+    with patch("dbt_column_lineage.artifacts.registry.ModelRegistry") as MockRegistry:
+        instance = MockRegistry.return_value
+        instance.get_models.return_value = all_models
+        instance.load.return_value = None
+        instance.get_ephemeral_lineage.return_value = {}
+
+        r1 = get_column_lineage(str(m), catalog_path=str(c), models=["model_a"])
+        r2 = get_column_lineage(str(m), catalog_path=str(c), models=["model_b"])
+
+        # Built and loaded exactly once despite two separate per-model calls.
+        assert MockRegistry.call_count == 1
+        assert instance.load.call_count == 1
+        # Each call still returns only its requested model.
+        assert {r.model for r in r1} == {"model_a"}
+        assert {r.model for r in r2} == {"model_b"}
+
+        # Clearing the cache forces a rebuild on the next call.
+        clear_lineage_caches()
+        get_column_lineage(str(m), catalog_path=str(c), models=["model_a"])
+        assert MockRegistry.call_count == 2
+
+
+# ---------------------------------------------------------------------------
 # _resolve_progenitor helper
 # ---------------------------------------------------------------------------
 

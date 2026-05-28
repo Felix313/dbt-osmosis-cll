@@ -15,6 +15,23 @@ from dbt_column_lineage.artifacts.exceptions import CompiledSqlMissingError
 
 logger = logging.getLogger(__name__)
 
+# Process-level cache of fully-loaded registries.  Building a registry parses the
+# compiled SQL of EVERY model in the project, so without this cache a per-model
+# caller (e.g. dbt-osmosis resolving lineage one node at a time) re-parses the
+# whole project on every call — O(N^2) over the model count.  Safe to cache for
+# the lifetime of the process because the manifest and compiled SQL are immutable
+# during a run.  Each entry is (registry, terminal_node_names).
+_REGISTRY_CACHE: dict = {}
+
+
+def clear_lineage_caches() -> None:
+    """Clear the process-level registry cache.
+
+    Call this if the manifest or compiled SQL changes within a single long-lived
+    process (e.g. between test cases that rebuild artifacts at the same path).
+    """
+    _REGISTRY_CACHE.clear()
+
 
 @dataclass
 class ColumnLineageResult:
@@ -164,42 +181,35 @@ def get_column_lineage(
 
     use_target_dir = compiled_sql_source in ("target_dir", "auto_compile")
 
-    catalog_reader = _catalog_reader_override or _build_catalog_reader(
+    registry, terminal_node_names = _load_registry_cached(
         manifest_path=manifest_path,
         catalog_path=catalog_path,
         live_db=live_db,
         project_dir=project_dir,
         profiles_dir=profiles_dir,
         target=target,
-    )
-
-    from dbt_column_lineage.artifacts.registry import ModelRegistry
-
-    registry = ModelRegistry(
-        catalog_path=None,       # type: ignore[arg-type]  # overridden below
-        manifest_path=manifest_path,
-        adapter_override=dialect,
-        _catalog_reader_override=catalog_reader,
-        use_target_dir_fallback=use_target_dir,
+        dialect=dialect,
+        use_target_dir=use_target_dir,
         stop_at_ephemeral=include_ephemeral,
         placeholder_patterns=placeholder_patterns,
+        catalog_reader_override=_catalog_reader_override,
     )
-    registry.load()
 
-    # Build a set of terminal node names (sources + seeds) — columns whose progenitor
-    # is one of these are at the origin of the lineage graph (first-in-chain).
     all_nodes = registry.get_models()
-    terminal_node_names: set = {
-        name for name, node in all_nodes.items()
-        if node.resource_type in ("source", "seed")
-    }
 
     model_filter = {m.lower() for m in models} if models else None
     results: List[ColumnLineageResult] = []
 
-    for model_name, model_obj in sorted(all_nodes.items()):
-        if model_filter and model_name not in model_filter:
-            continue
+    # When a model filter is supplied, iterate only the requested models instead of
+    # every node in the project — keeps per-call work proportional to the request.
+    if model_filter:
+        iter_items = [
+            (name, all_nodes[name]) for name in sorted(model_filter) if name in all_nodes
+        ]
+    else:
+        iter_items = sorted(all_nodes.items())
+
+    for model_name, model_obj in iter_items:
         if model_obj.resource_type not in ("model",):
             continue
 
@@ -296,6 +306,80 @@ def get_column_lineage(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _load_registry_cached(
+    *,
+    manifest_path: str,
+    catalog_path: Optional[str],
+    live_db: bool,
+    project_dir: Optional[str],
+    profiles_dir: Optional[str],
+    target: Optional[str],
+    dialect: Optional[str],
+    use_target_dir: bool,
+    stop_at_ephemeral: bool,
+    placeholder_patterns: Optional[List[str]],
+    catalog_reader_override: Optional[object],
+):
+    """Return a fully-loaded (registry, terminal_node_names), using the process cache.
+
+    Loading parses every model's compiled SQL, so the result is cached and reused
+    across calls for the same project/parameters within a process.
+    """
+    # Discriminate the catalog source so different inputs never share a registry.
+    if catalog_reader_override is not None:
+        catalog_disc: tuple = ("override", id(catalog_reader_override))
+    elif live_db:
+        catalog_disc = ("livedb", project_dir, profiles_dir, target)
+    else:
+        catalog_disc = ("catalog", catalog_path)
+
+    cache_key = (
+        manifest_path,
+        dialect,
+        use_target_dir,
+        stop_at_ephemeral,
+        tuple(placeholder_patterns) if placeholder_patterns else None,
+        catalog_disc,
+    )
+    cached = _REGISTRY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    catalog_reader = catalog_reader_override or _build_catalog_reader(
+        manifest_path=manifest_path,
+        catalog_path=catalog_path,
+        live_db=live_db,
+        project_dir=project_dir,
+        profiles_dir=profiles_dir,
+        target=target,
+    )
+
+    from dbt_column_lineage.artifacts.registry import ModelRegistry
+
+    registry = ModelRegistry(
+        catalog_path=None,       # type: ignore[arg-type]  # overridden below
+        manifest_path=manifest_path,
+        adapter_override=dialect,
+        _catalog_reader_override=catalog_reader,
+        use_target_dir_fallback=use_target_dir,
+        stop_at_ephemeral=stop_at_ephemeral,
+        placeholder_patterns=placeholder_patterns,
+    )
+    registry.load()
+
+    # Terminal node names (sources + seeds) — columns whose progenitor is one of
+    # these sit at the origin of the lineage graph (first-in-chain).  Computed once
+    # here so per-call result construction does not re-scan every node.
+    all_nodes = registry.get_models()
+    terminal_node_names = frozenset(
+        name for name, node in all_nodes.items()
+        if node.resource_type in ("source", "seed")
+    )
+
+    _REGISTRY_CACHE[cache_key] = (registry, terminal_node_names)
+    return registry, terminal_node_names
 
 
 def _build_catalog_reader(

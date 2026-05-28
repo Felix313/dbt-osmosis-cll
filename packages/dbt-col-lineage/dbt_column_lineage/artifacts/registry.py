@@ -213,7 +213,10 @@ class ModelRegistry:
 
             # For DML statements (MERGE / INSERT INTO), extract just the source
             # SELECT so the parser never sees {{ this }} as a self-reference target.
-            sql = _extract_source_select(sql, dialect=self._adapter_override)
+            # Only DML needs this (and it costs a full parse_one), so plain SELECTs —
+            # the vast majority — skip the throwaway parse via a cheap keyword check.
+            if re.search(r"\b(?:MERGE|INSERT)\b", sql, re.IGNORECASE):
+                sql = _extract_source_select(sql, dialect=self._adapter_override)
 
             # Replace unresolved custom-materialization placeholders (e.g.
             # __PERIOD_FILTER__) with TRUE so the SQL parser sees valid syntax.

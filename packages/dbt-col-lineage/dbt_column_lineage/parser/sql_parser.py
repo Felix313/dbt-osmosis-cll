@@ -35,9 +35,9 @@ class ParserContext:
 
 
 class CTEHandler:
-    def extract_cte_model_mappings_from_parsed(self, parsed: Any) -> Dict[str, str]:
+    def extract_cte_model_mappings_from_parsed(self, ctes: List[Any]) -> Dict[str, str]:
         mappings = {}
-        for cte in parsed.find_all(exp.CTE):
+        for cte in ctes:
             cte_name = cte.alias.lower()
             select = cte.this.find(exp.Select)
             if select:
@@ -307,7 +307,10 @@ class SQLColumnParser:
         # on which columns appear in the output or their transformation types.
         sql = re.sub(r"\bGROUP\s+BY\s+ALL\b", "", sql, flags=re.IGNORECASE)
         parsed = parse_one(sql, dialect=self.dialect)
-        cte_to_model = self._cte_handler.extract_cte_model_mappings_from_parsed(parsed)
+        # Collect CTE nodes once — they are needed by several passes below and a full
+        # AST walk per pass is wasteful on large Snowflake CTE chains.
+        ctes = list(parsed.find_all(exp.CTE))
+        cte_to_model = self._cte_handler.extract_cte_model_mappings_from_parsed(ctes)
 
         cte_transformation_types: Dict[str, Dict[str, str]] = {}
         cte_sql_expressions: Dict[str, Dict[str, Optional[str]]] = {}
@@ -317,16 +320,16 @@ class SQLColumnParser:
         ephemeral_cte_names: Set[str] = set()
         if stop_at_ephemeral:
             ephemeral_cte_names = {
-                cte.alias.lower() for cte in parsed.find_all(exp.CTE)
+                cte.alias.lower() for cte in ctes
                 if cte.alias.lower().startswith("__dbt__cte__")
             }
 
         aliases = get_table_aliases(parsed)
-        for cte in parsed.find_all(exp.CTE):
+        for cte in ctes:
             cte_base_tables[cte.alias.lower()] = set()
 
         cte_sources = self._build_cte_sources(
-            parsed,
+            ctes,
             cte_to_model,
             cte_transformation_types,
             cte_sql_expressions,
@@ -398,7 +401,7 @@ class SQLColumnParser:
                             # Don't unwrap ephemeral CTEs — the boundary check in
                             # expand_from_cte must see the ephemeral name as source_table.
                             if table_name not in ephemeral_cte_names:
-                                for cte in parsed.find_all(exp.CTE):
+                                for cte in ctes:
                                     if cte.alias.lower() == table_name:
                                         cte_select = cte.this.find(exp.Select)
                                         if cte_select:
@@ -512,7 +515,7 @@ class SQLColumnParser:
 
     def _build_cte_sources(
         self,
-        parsed: Any,
+        ctes: List[Any],
         cte_to_model: Optional[Dict[str, str]],
         cte_transformation_types: Dict[str, Dict[str, str]],
         cte_sql_expressions: Dict[str, Dict[str, Optional[str]]],
@@ -520,7 +523,7 @@ class SQLColumnParser:
     ) -> Dict[str, Dict[str, str]]:
         cte_sources: Dict[str, Dict[str, str]] = {}
 
-        for cte in parsed.find_all(exp.CTE):
+        for cte in ctes:
             cte_name = cte.alias.lower()
             cte_sources[cte_name] = {}
             cte_transformation_types[cte_name] = {}
