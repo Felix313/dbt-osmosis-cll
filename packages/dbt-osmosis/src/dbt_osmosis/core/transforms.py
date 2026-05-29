@@ -1243,7 +1243,11 @@ def annotate_column_origins(
     _key_renamed = _cfg.meta_key_renamed_from
     _key_derived = _cfg.meta_key_derived_from
     _key_computed = _cfg.meta_key_computed_in
-    _write_meta = _cfg.write_cll_tags_to_meta
+    # Node-level: enable per layer via +dbt-osmosis-options (e.g. only on the data
+    # product layer), falling back to the package-level .osmosis default.
+    _write_meta = _get_setting_for_node(
+        "write-cll-tags-to-meta", node, fallback=_cfg.write_cll_tags_to_meta
+    )
 
     for col_name, node_col in node.columns.items():
         # Columns in the ignore list are never annotated. If stale tags from a

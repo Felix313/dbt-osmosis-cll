@@ -508,7 +508,7 @@ def get_column_origin(
         logger.warning(
             "CLL origin depth %d exceeded for %s.%s — treating as computed "
             "(no description will be inherited). Raise cll-max-origin-depth in "
-            "[tool.dbt-osmosis-cll] if this column has legitimate deep lineage.",
+            "the .osmosis [osmosis] section if this column has legitimate deep lineage.",
             max_depth,
             node.name,
             column_name,
@@ -543,7 +543,7 @@ def _compute_column_origin(
         logger.warning(
             "CLL origin depth %d exceeded for %s.%s — treating as computed "
             "(no description will be inherited). Raise cll-max-origin-depth in "
-            "[tool.dbt-osmosis-cll] if this column has legitimate deep lineage.",
+            "the .osmosis [osmosis] section if this column has legitimate deep lineage.",
             max_depth,
             node.name,
             column_name,

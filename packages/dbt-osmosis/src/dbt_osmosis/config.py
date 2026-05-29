@@ -112,10 +112,11 @@ class OsmosisConfig:
 
     # ── Depth guards ─────────────────────────────────────────────────────────
     cll_max_origin_depth: int = 60
-    """Maximum recursion depth when tracing a column back to its source origin.
-    Raise this only if you have legitimate lineage chains deeper than 60 hops.
-    Note: this counts CTE-level hops within compiled SQL, not DAG model hops —
-    macro-heavy models can have deep CTE chains within a single model file."""
+    """Maximum number of model hops to follow when tracing a column back to its
+    origin. Counts DAG model hops (each step crosses to the progenitor model), so
+    the default of 60 is far beyond any realistic warehouse depth — it exists only
+    as a cycle/runaway guard. Raise it only if you see "origin depth exceeded"
+    warnings on legitimately deep lineage."""
 
     # ── SQL preprocessing ────────────────────────────────────────────────────
     compiled_sql_placeholder_patterns: list = None  # type: ignore[assignment]

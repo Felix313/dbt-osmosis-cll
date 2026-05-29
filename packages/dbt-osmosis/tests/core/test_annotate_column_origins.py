@@ -216,27 +216,50 @@ def test_no_cll_result_strips_stale_managed_meta():
     assert meta.get("keep") == "v"  # unmanaged meta preserved
 
 
-def test_rename_writes_meta_when_write_cll_tags_enabled():
-    from dbt_osmosis.config import OsmosisConfig
-
-    cfg = OsmosisConfig(write_cll_tags_to_meta=True)
+def test_rename_writes_meta_when_write_cll_tags_enabled_per_node():
+    # write-cll-tags-to-meta is node-level: driven by the per-node setting here.
+    cfg = get_config()
     node = FakeNode("m", {"ORDER_ID": FakeColumn("ORDER_ID", "")})
-    with mock.patch("dbt_osmosis.core.transforms.get_config", lambda: cfg):
-        _annotate(
-            node,
-            results={
-                "m": [
-                    cll(
-                        "m",
-                        "order_id",
-                        is_rename=True,
-                        progenitor_model="src",
-                        progenitor_column="id",
-                    )
-                ]
-            },
-            settings={"annotate-column-origin-infos": "if_altered"},
-            origin=("DC_STG", "SRC", "ID", "ID"),
-        )
+    _annotate(
+        node,
+        results={
+            "m": [
+                cll(
+                    "m",
+                    "order_id",
+                    is_rename=True,
+                    progenitor_model="src",
+                    progenitor_column="id",
+                )
+            ]
+        },
+        settings={
+            "annotate-column-origin-infos": "if_altered",
+            "write-cll-tags-to-meta": True,
+        },
+        origin=("DC_STG", "SRC", "ID", "ID"),
+    )
     meta = node.columns["ORDER_ID"].meta
     assert meta.get(cfg.meta_key_renamed_from) == "SRC.ID"
+
+
+def test_no_cll_meta_written_when_setting_off():
+    cfg = get_config()
+    node = FakeNode("m", {"ORDER_ID": FakeColumn("ORDER_ID", "")})
+    _annotate(
+        node,
+        results={
+            "m": [
+                cll(
+                    "m",
+                    "order_id",
+                    is_rename=True,
+                    progenitor_model="src",
+                    progenitor_column="id",
+                )
+            ]
+        },
+        settings={"annotate-column-origin-infos": "if_altered"},  # write-cll-tags off (default)
+        origin=("DC_STG", "SRC", "ID", "ID"),
+    )
+    assert cfg.meta_key_renamed_from not in node.columns["ORDER_ID"].meta

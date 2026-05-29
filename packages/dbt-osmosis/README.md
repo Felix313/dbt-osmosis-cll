@@ -250,11 +250,16 @@ CLL does not distinguish `UNION` from `UNION ALL`; both use `annotation-union`.
 
 ### Machine-readable lineage (`write-cll-tags-to-meta`)
 
-Off by default. When `true`, osmosis also writes the origin to column `meta` using the
+Off by default. When enabled, osmosis also writes the origin to column `meta` using the
 `col-renamed-from` / `col-derived-from` / `col-computed-in` keys, so downstream tooling
 (data catalogs, lineage UIs, AI agents) can read lineage programmatically from the dbt
 manifest instead of parsing the annotation text. Trade-off: larger YAML and more diff
 churn, since the same information is already in the annotation block.
+
+It resolves **per node**, so you can enable it for just the layers an agent consumes —
+e.g. set `+dbt-osmosis-options: {write-cll-tags-to-meta: true}` on your data-product
+path in `dbt_project.yml` — while leaving intermediate layers untagged. A global default
+can still be set in `.osmosis`.
 
 ### Column reference (`column-docs-path`)
 
