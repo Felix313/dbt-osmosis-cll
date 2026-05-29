@@ -45,10 +45,11 @@ def _release_duckdb_connections() -> None:
 
 
 def _run_dbt_commands(project_dir: str, profiles_dir: str, target: str = "test") -> None:
-    """Run dbt seed and dbt run to populate the database.
+    """Run dbt seed and dbt run to populate the database and produce compiled SQL.
 
-    Uses dbt's CLI runner to execute seed and run commands. The in-memory
-    database is shared across all connections within the same process.
+    Uses dbt's CLI runner. ``seed`` + ``run`` create the DuckDB tables (for live
+    source introspection) and the compiled SQL under target/compiled (for CLL).
+    No catalog is generated — column metadata comes from live DuckDB and source YAMLs.
     """
     # Run dbt seed to load CSV files into the database.
     run_dbt_command([
@@ -64,19 +65,6 @@ def _run_dbt_commands(project_dir: str, profiles_dir: str, target: str = "test")
     # Run dbt run to create models.
     run_dbt_command([
         "run",
-        "--project-dir",
-        project_dir,
-        "--profiles-dir",
-        profiles_dir,
-        "--target",
-        target,
-    ])
-
-    # Generate catalog to use for introspection instead of live database queries
-    # This avoids connection issues when DbtProjectContext creates a new connection pool
-    run_dbt_command([
-        "docs",
-        "generate",
         "--project-dir",
         project_dir,
         "--profiles-dir",
@@ -181,12 +169,6 @@ def built_duckdb_template() -> Iterator[Path]:
             raise RuntimeError(f"Manifest file not created at {manifest_file}")
         print(f"✓ Template manifest created: {manifest_file}")
 
-        # Verify catalog.json was created
-        catalog_file = template_project_dir / "target" / "catalog.json"
-        if not catalog_file.exists():
-            raise RuntimeError(f"Catalog file not created at {catalog_file}")
-        print(f"✓ Template catalog created: {catalog_file}")
-
         print("=" * 60)
         print("SESSION SETUP: Template build complete")
         print("=" * 60 + "\n")
@@ -238,6 +220,12 @@ def yaml_context(built_duckdb_template: Path) -> Iterator[YamlRefactorContext]:
     if not db_file.exists():
         raise RuntimeError(f"Database file not copied to {db_file}")
 
+    # The duckdb profile uses a relative path ("test.db"), resolved against the CWD.
+    # chdir into this test's project copy so live introspection opens the copy's
+    # test.db (and not a stray one) — restored in teardown.
+    _fixture_old_cwd = os.getcwd()
+    os.chdir(str(project_dir))
+
     try:
         # Use the test profile with file-based database
         cfg = DbtConfiguration(
@@ -252,21 +240,25 @@ def yaml_context(built_duckdb_template: Path) -> Iterator[YamlRefactorContext]:
         project_context = create_dbt_project_context(cfg)
         print(f"✓ create_dbt_project_context took {time.time() - start:.2f}s")
 
-        # Set catalog_path to use the catalog.json copied from template
-        catalog_path = str(project_dir / "target" / "catalog.json")
-
+        # Column metadata comes from live DuckDB (sources) + CLL/compiled SQL (models);
+        # no catalog file is used.
         context = YamlRefactorContext(
             project_context,
             settings=YamlRefactorSettings(
                 dry_run=True,
                 use_unrendered_descriptions=True,
-                catalog_path=catalog_path,
             ),
         )
 
         yield context
 
     finally:
+        # Restore the working directory changed during setup.
+        try:
+            os.chdir(_fixture_old_cwd)
+        except Exception as e:
+            print(f"Warning: Error restoring cwd: {e}")
+
         # Teardown: Clean up temp directory
         print(f"\n=== Cleaning up temp directory {temp_dir} ===")
         try:

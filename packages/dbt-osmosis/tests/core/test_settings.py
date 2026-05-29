@@ -2,12 +2,10 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest import mock
 from unittest.mock import Mock
 
 import pytest
 import ruamel.yaml
-from dbt.contracts.results import CatalogResults
 
 from dbt_osmosis.core.settings import (
     EMPTY_STRING,
@@ -38,8 +36,6 @@ class TestYamlRefactorSettings:
         assert settings.use_unrendered_descriptions is False
         assert settings.add_inheritance_for_specified_keys == []
         assert settings.output_to_lower is False
-        assert settings.catalog_path is None
-        assert settings.create_catalog_if_not_exists is False
         assert settings.fusion_compat is None  # tri-state: None = auto-detect
 
     def test_custom_settings(self):
@@ -60,8 +56,6 @@ class TestYamlRefactorSettings:
             use_unrendered_descriptions=True,
             add_inheritance_for_specified_keys=["custom_field", "another_field"],
             output_to_lower=True,
-            catalog_path="/path/to/catalog.json",
-            create_catalog_if_not_exists=True,
         )
 
         assert settings.fqn == ["project.schema.model"]
@@ -78,8 +72,6 @@ class TestYamlRefactorSettings:
         assert settings.use_unrendered_descriptions is True
         assert settings.add_inheritance_for_specified_keys == ["custom_field", "another_field"]
         assert settings.output_to_lower is True
-        assert settings.catalog_path == "/path/to/catalog.json"
-        assert settings.create_catalog_if_not_exists is True
 
     def test_settings_immutability(self):
         """Test that settings are properly created as dataclass instances."""
@@ -87,9 +79,6 @@ class TestYamlRefactorSettings:
 
         # Should not have _mutation_count as it's init=False
         assert not hasattr(settings, "_mutation_count")
-
-        # Should not have _catalog as it's init=False
-        assert not hasattr(settings, "_catalog")
 
 
 class TestYamlRefactorContext:
@@ -150,9 +139,6 @@ class TestYamlRefactorContext:
         assert context._mutation_count == 0
         assert not context.mutation_count
         assert not context.mutated
-
-        # Check catalog
-        assert context._catalog is None
 
     def test_context_with_custom_settings(self, mock_project_context):
         """Test YamlRefactorContext with custom settings."""
@@ -302,66 +288,6 @@ class TestYamlRefactorContext:
         }
         assert context.yaml_settings == expected
 
-    def test_read_catalog_with_existing_catalog(self, mock_project_context):
-        """Test reading catalog when one already exists."""
-        mock_catalog = Mock(spec=CatalogResults)
-        context = YamlRefactorContext(project=mock_project_context)
-        context._catalog = mock_catalog
-
-        catalog = context.read_catalog()
-        assert catalog == mock_catalog
-
-    def test_read_catalog_without_existing_catalog(self, mock_project_context):
-        """Test reading catalog when none exists."""
-        context = YamlRefactorContext(project=mock_project_context)
-
-        with (
-            mock.patch("dbt_osmosis.core.introspection._load_catalog") as mock_load,
-            mock.patch("dbt_osmosis.core.introspection._generate_catalog") as mock_generate,
-        ):
-            mock_load.return_value = None
-            mock_generate.return_value = Mock(spec=CatalogResults)
-
-            context.read_catalog()
-
-            # Should have tried to load catalog first
-            mock_load.assert_called_once_with(context.settings)
-
-            # Since _load_catalog returned None and create_catalog_if_not_exists is False,
-            # catalog should remain None
-            assert context._catalog is None
-
-    def test_read_catalog_with_auto_generate(self, mock_project_context):
-        """Test auto-generating catalog when create_catalog_if_not_exists is True."""
-        settings = YamlRefactorSettings(create_catalog_if_not_exists=True)
-        context = YamlRefactorContext(project=mock_project_context, settings=settings)
-
-        with (
-            mock.patch("dbt_osmosis.core.introspection._load_catalog") as mock_load,
-            mock.patch("dbt_osmosis.core.introspection._generate_catalog") as mock_generate,
-        ):
-            mock_load.return_value = None
-            mock_generate.return_value = Mock(spec=CatalogResults)
-
-            context.read_catalog()
-
-            # Should have tried to generate catalog
-            mock_generate.assert_called_once_with(context.project)
-
-            # Catalog should now be set
-            assert context._catalog is not None
-
-    def test_read_catalog_caching(self, mock_project_context):
-        """Test that catalog is cached after first read."""
-        mock_catalog = Mock(spec=CatalogResults)
-        context = YamlRefactorContext(project=mock_project_context)
-        context._catalog = mock_catalog
-
-        # Multiple reads should return the same catalog
-        assert context.read_catalog() == mock_catalog
-        assert context.read_catalog() == mock_catalog
-        assert context.read_catalog() == mock_catalog
-
     def test_find_first_method(self, mock_project_context):
         """Test the _find_first helper method."""
         context = YamlRefactorContext(project=mock_project_context)
@@ -460,18 +386,6 @@ class TestYamlRefactorContextIntegration:
         assert context.yaml_handler_lock is not None
         assert hasattr(context.yaml_handler_lock, "acquire")
         assert hasattr(context.yaml_handler_lock, "release")
-
-    def test_read_catalog_with_real_project(self, demo_project_context):
-        """Test reading catalog with real dbt project."""
-        # This test ensures that the catalog reading process works
-        # with the actual demo_duckdb project
-        context = demo_project_context
-
-        # Try to read catalog (may return None if no catalog exists)
-        catalog = context.read_catalog()
-
-        # Either returns a catalog or None
-        assert catalog is None or isinstance(catalog, CatalogResults)
 
     def test_context_yaml_settings_integration(self, demo_project_context):
         """Test that YAML settings are properly integrated."""

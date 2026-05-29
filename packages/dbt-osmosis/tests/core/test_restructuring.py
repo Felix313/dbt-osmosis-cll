@@ -797,98 +797,16 @@ def test_partial_superseded_file_preserved(yaml_context: YamlRefactorContext, tm
 
 
 # ============================================================================
-# Catalog Data Type Sync Tests
+# Data Type Sync Tests
 # ============================================================================
 
 
-def test_catalog_data_type_used_in_sync(yaml_context: YamlRefactorContext, fresh_caches):
-    """Behavior test: Verify that data types from catalog are used when
-    --catalog-path is provided. Catalog data types should take precedence
-    over manifest data types.
-    """
-    from unittest import mock as mock_patch
-    from unittest.mock import PropertyMock
-
-    from dbt.artifacts.resources.types import NodeType
-    from dbt.contracts.graph.nodes import ModelNode
-    from dbt.contracts.results import CatalogResults
-    from dbt_common.contracts.metadata import ColumnMetadata, TableMetadata
-
-    from dbt_osmosis.core.sync_operations import _sync_doc_section
-
-    # Create a mock catalog table with specific data types
-    catalog_table = mock_patch.Mock()
-    catalog_table.metadata = TableMetadata(
-        name="test_model",
-        schema="test_schema",
-        database="test_db",
-        type="model",
-    )
-    catalog_table.columns = {
-        "col1": ColumnMetadata(name="col1", type="BIGINT", index=0),
-        "col2": ColumnMetadata(name="col2", type="VARCHAR(255)", index=1),
-    }
-
-    mock_catalog = mock_patch.Mock(spec=CatalogResults)
-    mock_catalog.nodes = {"model.test.test_model": catalog_table}
-    mock_catalog.sources = {}
-
-    # Create a mock node with different (incorrect) data types in manifest
-    mock_node = mock_patch.Mock(spec=ModelNode)
-    mock_node.unique_id = "model.test.test_model"
-    mock_node.name = "test_model"
-    mock_node.schema = "test_schema"
-    mock_node.description = "Test model"
-    mock_node.resource_type = NodeType.Model
-    mock_node.package_name = "test"
-
-    # Mock columns with different types than catalog
-    mock_col1 = mock_patch.Mock()
-    mock_col1.name = "col1"
-    mock_col1.to_dict.return_value = {"name": "col1", "data_type": "INTEGER"}  # Wrong type
-    mock_col1.meta = {}
-
-    mock_col2 = mock_patch.Mock()
-    mock_col2.name = "col2"
-    mock_col2.to_dict.return_value = {"name": "col2", "data_type": "TEXT"}  # Wrong type
-    mock_col2.meta = {}
-
-    mock_node.columns = {"col1": mock_col1, "col2": mock_col2}
-    mock_node.meta = {}
-    mock_node.config = mock_patch.Mock()
-    mock_node.config.extra = {}
-
-    # Doc section to sync into
-    doc_section = {"columns": []}
-
-    # Mock context with catalog and runtime_cfg credentials
-    mock_runtime = mock_patch.Mock()
-    mock_runtime.credentials.type = "postgres"
-
-    with mock_patch.patch.object(yaml_context, "_catalog", mock_catalog):
-        with mock_patch.patch.object(
-            type(yaml_context.project),
-            "runtime_cfg",
-            new_callable=PropertyMock,
-            return_value=mock_runtime,
-        ):
-            _sync_doc_section(yaml_context, mock_node, doc_section)
-
-    # Verify catalog data types were used
-    assert len(doc_section["columns"]) == 2
-    col_types = {col["name"]: col.get("data_type") for col in doc_section["columns"]}
-
-    # Should use catalog types (BIGINT, VARCHAR(255)), not manifest types (INTEGER, TEXT)
-    assert col_types["col1"] == "BIGINT"
-    assert col_types["col2"] == "VARCHAR(255)"
-
-
-def test_sync_without_catalog_falls_back_to_manifest(
+def test_sync_uses_manifest_data_types(
     yaml_context: YamlRefactorContext,
     fresh_caches,
 ):
-    """Behavior test: Verify that when no catalog is available, sync falls back
-    to manifest data types.
+    """Behavior test: _sync_doc_section writes the manifest's data types into the
+    doc section (the only source now that catalog support has been removed).
     """
     from unittest import mock as mock_patch
     from unittest.mock import PropertyMock
@@ -926,25 +844,20 @@ def test_sync_without_catalog_falls_back_to_manifest(
     # Doc section to sync into
     doc_section = {"columns": []}
 
-    # Mock context WITHOUT catalog (catalog is None)
     mock_runtime = mock_patch.Mock()
     mock_runtime.credentials.type = "postgres"
 
-    with (
-        mock_patch.patch.object(yaml_context, "_catalog", None),
-        mock_patch.patch.object(
-            type(yaml_context.project),
-            "runtime_cfg",
-            new_callable=PropertyMock,
-            return_value=mock_runtime,
-        ),
+    with mock_patch.patch.object(
+        type(yaml_context.project),
+        "runtime_cfg",
+        new_callable=PropertyMock,
+        return_value=mock_runtime,
     ):
         _sync_doc_section(yaml_context, mock_node, doc_section)
 
-    # Verify manifest data types were used (fallback behavior)
+    # Manifest data types are written into the doc section.
     assert len(doc_section["columns"]) == 2
     col_types = {col["name"]: col.get("data_type") for col in doc_section["columns"]}
 
-    # Should use manifest types when no catalog available
     assert col_types["col1"] == "INTEGER"
     assert col_types["col2"] == "TEXT"

@@ -26,9 +26,6 @@ def _sync_doc_section(
 
     This includes columns, description, meta, tags, etc.
     We assume node is the single source of truth, so doc_section is replaced.
-
-    If a catalog is available (via --catalog-path), data_type from the catalog
-    takes precedence over the manifest's data_type.
     """
     logger.debug(":arrows_counterclockwise: Syncing doc_section with node => %s", node.unique_id)
     if "description" in doc_section and doc_section["description"] is not None:
@@ -46,30 +43,6 @@ def _sync_doc_section(
 
         norm_name = normalize_column_name(c["name"], context.project.runtime_cfg.credentials.type)
         current_map[norm_name] = c
-
-    # Build a map of catalog column types if catalog is available
-    catalog_column_types: dict[str, str] = {}
-    if catalog := context.read_catalog():
-        from dbt_osmosis.core.introspection import _find_first, normalize_column_name
-
-        # For source nodes, search catalog.sources; for model nodes, search catalog.nodes
-        # CatalogTable metadata doesn't have a 'source' field, so we match based on which dict we're searching
-        if hasattr(node, "source_name"):
-            catalog_entries = catalog.sources.values()
-        else:
-            catalog_entries = catalog.nodes.values()
-
-        catalog_entry = _find_first(
-            catalog_entries,
-            lambda c: c.metadata.name == node.name and c.metadata.schema == node.schema,
-        )
-        if catalog_entry:
-            for col_name, col_meta in catalog_entry.columns.items():
-                norm_name = normalize_column_name(
-                    col_name,
-                    context.project.runtime_cfg.credentials.type,
-                )
-                catalog_column_types[norm_name] = col_meta.type
 
     for name, meta in node.columns.items():
         # Null check: validate meta exists before calling to_dict
@@ -92,10 +65,6 @@ def _sync_doc_section(
         from dbt_osmosis.core.introspection import _get_setting_for_node, normalize_column_name
 
         norm_name = normalize_column_name(name, context.project.runtime_cfg.credentials.type)
-
-        # Use catalog data_type if available, otherwise use manifest's data_type
-        if norm_name in catalog_column_types:
-            cdict["data_type"] = catalog_column_types[norm_name]
 
         current_yaml = t.cast("dict[str, t.Any]", current_map.get(norm_name, {}))
         merged = dict(current_yaml)

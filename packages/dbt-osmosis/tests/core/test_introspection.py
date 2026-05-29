@@ -93,7 +93,6 @@ def _make_introspection_context(
             numeric_precision_and_scale=numeric_precision_and_scale,
         ),
         ignore_patterns=list(ignore_patterns or []),
-        read_catalog=lambda: None,
     )
 
 

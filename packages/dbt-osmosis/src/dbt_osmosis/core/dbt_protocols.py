@@ -19,7 +19,6 @@ import ruamel.yaml
 
 if t.TYPE_CHECKING:
     from dbt.artifacts.resources.types import NodeType
-    from dbt.artifacts.schemas.catalog import CatalogResults
     from dbt_osmosis.core.config import DbtProjectContext
 
 
@@ -111,7 +110,6 @@ class YamlRefactorContextProtocol(t.Protocol):
     yaml_handler: ruamel.yaml.YAML
     yaml_handler_lock: threading.Lock
     placeholders: tuple[str, ...]
-    _catalog: CatalogResults | None
     _mutation_count: int
     current_node: ResultNodeProtocol | None
 
@@ -143,10 +141,6 @@ class YamlRefactorContextProtocol(t.Protocol):
     @property
     def fusion_compat(self) -> bool:
         """Whether to output Fusion-compatible YAML (meta/tags inside config block)."""
-        ...
-
-    def read_catalog(self) -> CatalogResults | None:
-        """Read and cache the catalog file."""
         ...
 
     def register_mutations(self, count: int) -> None: ...

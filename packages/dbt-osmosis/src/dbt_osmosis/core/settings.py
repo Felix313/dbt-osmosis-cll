@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import ruamel.yaml
-from dbt.artifacts.schemas.catalog import CatalogResults
 
 from dbt_osmosis.core import logger
 
@@ -133,10 +132,6 @@ class YamlRefactorSettings:
     """Force column name and data type output to lowercase in the yaml files."""
     output_to_upper: bool = False
     """Force column name and data type output to uppercase in the yaml files."""
-    catalog_path: str | None = None
-    """Path to the dbt catalog.json file to use preferentially instead of live warehouse introspection"""
-    create_catalog_if_not_exists: bool = False
-    """Generate the catalog.json for the project if it doesn't exist and use it for introspective queries."""
     scaffold_empty_configs: bool = False
     """When True, include empty/placeholder fields (e.g., empty descriptions) in YAML. When False, skip writing them."""
     strip_eof_blank_lines: bool = False
@@ -199,7 +194,6 @@ class YamlRefactorContext:
     """Tracks which YAML files were actually written to disk (for external formatter integration)."""
     _disk_mutation_count: int = field(default=0, init=False, repr=False)
     """Counts actual on-disk mutations so callers can distinguish dry-run from real writes."""
-    _catalog: CatalogResults | None = field(default=None, init=False)
     _closed: bool = field(default=False, init=False, repr=False)
     """Track whether the context has been closed to prevent double-cleanup."""
 
@@ -407,21 +401,6 @@ class YamlRefactorContext:
             {},
         )
         return toplevel_conf.get("yaml_settings", {})
-
-    def read_catalog(self) -> CatalogResults | None:
-        """Read the catalog file if it exists."""
-        logger.debug(":mag: Checking if catalog is already loaded => %s", bool(self._catalog))
-        if not self._catalog:
-            from dbt_osmosis.core.introspection import _generate_catalog, _load_catalog
-
-            catalog = _load_catalog(self.settings)
-            if not catalog and self.settings.create_catalog_if_not_exists:
-                logger.info(
-                    ":bookmark_tabs: No existing catalog found, generating new catalog.json.",
-                )
-                catalog = _generate_catalog(self.project)
-            self._catalog = catalog
-        return self._catalog
 
     def _find_first(
         self,

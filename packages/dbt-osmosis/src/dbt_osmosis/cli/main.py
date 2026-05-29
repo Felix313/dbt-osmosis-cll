@@ -199,11 +199,6 @@ def yaml_opts(func: t.Callable[P, T]) -> t.Callable[P, T]:
         help="Return a non-zero exit code if any files are changed or would have changed.",
     )
     @click.option(
-        "--catalog-path",
-        type=click.Path(exists=True),
-        help="Read the list of columns from the catalog.json file instead of querying the warehouse.",
-    )
-    @click.option(
         "--profile",
         type=click.STRING,
         help="Which profile to load. Overrides setting in dbt_project.yml.",
@@ -216,7 +211,8 @@ def yaml_opts(func: t.Callable[P, T]) -> t.Callable[P, T]:
     @click.option(
         "--disable-introspection",
         is_flag=True,
-        help="Allows running of program without a database connection, it is recommended to use the --catalog-path option if using this.",
+        help="Run without a database connection. Model columns and inheritance come from "
+        "CLL + YAML offline; source reconciliation (new/removed columns) is skipped.",
     )
     @click.option(
         "--introspect-sources-only/--no-introspect-sources-only",
@@ -263,10 +259,6 @@ def yaml_opts(func: t.Callable[P, T]) -> t.Callable[P, T]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         if kwargs.get("fqn") and kwargs.get("select"):
             raise click.UsageError("--fqn and --select are mutually exclusive. Use one or the other.")
-        if kwargs.get("disable_introspection") and not kwargs.get("catalog_path"):
-            logger.warning(
-                ":construction: You have disabled introspection without providing a catalog path. This will result in some features not working as expected."
-            )
         return func(*args, **kwargs)
 
     return wrapper
@@ -401,7 +393,7 @@ def refactor(
     with YamlRefactorContext(
         project=create_dbt_project_context(settings),
         settings=YamlRefactorSettings(
-            **{k: v for k, v in kwargs.items() if v is not None}, create_catalog_if_not_exists=False
+            **{k: v for k, v in kwargs.items() if v is not None}
         ),
     ) as context:
         typed_context: t.Any = context
@@ -482,7 +474,7 @@ def organize(
     with YamlRefactorContext(
         project=create_dbt_project_context(settings),
         settings=YamlRefactorSettings(
-            **{k: v for k, v in kwargs.items() if v is not None}, create_catalog_if_not_exists=False
+            **{k: v for k, v in kwargs.items() if v is not None}
         ),
     ) as context:
         typed_context: t.Any = context
@@ -612,7 +604,7 @@ def document(
     with YamlRefactorContext(
         project=create_dbt_project_context(settings),
         settings=YamlRefactorSettings(
-            **{k: v for k, v in kwargs.items() if v is not None}, create_catalog_if_not_exists=False
+            **{k: v for k, v in kwargs.items() if v is not None}
         ),
     ) as context:
         typed_context: t.Any = context
@@ -705,7 +697,7 @@ def doc_health(
     with YamlRefactorContext(
         project=create_dbt_project_context(settings),
         settings=YamlRefactorSettings(
-            **{k: v for k, v in kwargs.items() if v is not None}, create_catalog_if_not_exists=False
+            **{k: v for k, v in kwargs.items() if v is not None}
         ),
     ) as context:
         typed_context: t.Any = context
@@ -1628,7 +1620,6 @@ def schema(
                 for k, v in kwargs.items()
                 if v is not None and k not in {"check", "dry_run", "models"}
             },
-            create_catalog_if_not_exists=False,
             include_external=include_external,
         ),
     ) as context:

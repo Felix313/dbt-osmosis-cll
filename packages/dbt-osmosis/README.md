@@ -232,7 +232,6 @@ These can vary per model/source path via dbt config inheritance.
 | `include-external` | `false` | Include models/sources from dbt packages. |
 | `fusion-compat` | `null` | Fusion-compatible YAML output (`null` = auto-detect). |
 | `formatter` | `null` | External formatter command run after writing YAML. |
-| `catalog-path` | `null` | Read columns from `catalog.json` instead of the live DB. |
 
 ### Annotation format
 

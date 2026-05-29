@@ -28,7 +28,6 @@ from dbt_osmosis.core.transforms import (
     sort_columns_alphabetically,
     sort_columns_as_configured,
     sort_columns_as_in_database,
-    synchronize_data_types,
 )
 
 
@@ -233,23 +232,6 @@ def test_pipeline_idempotency(yaml_context: YamlRefactorContext, fresh_caches):
     # Assert: Both executions should complete successfully
     assert result1 is pipeline
     assert result2 is pipeline
-
-
-def test_pipeline_with_catalog(yaml_context: YamlRefactorContext, fresh_caches):
-    """Test that pipeline uses catalog when available instead of live introspection.
-
-    When catalog.json exists, transforms should use it for column metadata
-    instead of querying the database directly.
-    """
-    # Set catalog path to use the catalog from the test fixture
-    yaml_context.settings.catalog_path = str(yaml_context.project_root / "target" / "catalog.json")
-
-    # Execute pipeline
-    pipeline = inject_missing_columns >> synchronize_data_types
-    result = pipeline(yaml_context)
-
-    # Assert: Should complete using catalog data
-    assert result is pipeline
 
 
 def test_pipeline_error_handling(yaml_context: YamlRefactorContext, fresh_caches):

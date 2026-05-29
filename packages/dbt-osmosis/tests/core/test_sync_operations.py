@@ -479,7 +479,6 @@ def _make_empty_node_context():
     context.placeholders = set()
     context.project.runtime_cfg.credentials.type = "duckdb"
     context.project.is_dbt_v1_10_or_greater = False
-    context.read_catalog.return_value = None
 
     node = mock.MagicMock()
     node.unique_id = "source.test.my_source.my_table"
