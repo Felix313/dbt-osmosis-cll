@@ -80,8 +80,9 @@ class OsmosisConfig:
     annotation_window_in: str = "Window in:"
     """Prefix for window functions with no traceable value column (ROW_NUMBER, RANK, DENSE_RANK…)."""
 
-    annotation_union: str = "UNION ALL in:"
-    """Prefix for columns in a top-level UNION ALL / UNION / INTERSECT / EXCEPT model."""
+    annotation_union: str = "UNION in:"
+    """Prefix for columns in a top-level UNION / UNION ALL / INTERSECT / EXCEPT model.
+    CLL does not distinguish UNION from UNION ALL, so one label covers both."""
 
     annotation_literal: str = "Literal"
     """Prefix for hardcoded constant columns. Literal value follows."""

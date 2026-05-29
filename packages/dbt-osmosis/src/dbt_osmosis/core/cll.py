@@ -680,9 +680,13 @@ def format_derived_tag(schema: str, model: str, entry_col: str | None = None) ->
 
 
 def format_aggregate_from_tag(progenitor_col: str, progenitor_model: str) -> str:
-    """Return annotation for a single-source aggregate: ``Aggregated from COL in: MODEL``."""
+    """Return annotation for a single-source aggregate: ``Aggregated from MODEL.COL``.
+
+    Consistent with renamed/derived: ``from`` points to a column (MODEL.COL),
+    while ``in:`` (the *_in variants) points to a model (SCHEMA.MODEL).
+    """
     cfg = get_config()
-    return _wrap_annotation(f"{cfg.annotation_aggregate_from} {progenitor_col} in: {progenitor_model}")
+    return _wrap_annotation(f"{cfg.annotation_aggregate_from} {progenitor_model}.{progenitor_col}")
 
 
 def format_aggregate_in_tag(schema: str, model: str) -> str:
@@ -691,9 +695,9 @@ def format_aggregate_in_tag(schema: str, model: str) -> str:
 
 
 def format_window_from_tag(progenitor_col: str, progenitor_model: str) -> str:
-    """Return annotation for a window function with a traceable value column: ``Window from COL in: MODEL``."""
+    """Return annotation for a window function with a traceable value column: ``Window from MODEL.COL``."""
     cfg = get_config()
-    return _wrap_annotation(f"{cfg.annotation_window_from} {progenitor_col} in: {progenitor_model}")
+    return _wrap_annotation(f"{cfg.annotation_window_from} {progenitor_model}.{progenitor_col}")
 
 
 def format_window_in_tag(schema: str, model: str) -> str:
@@ -702,7 +706,10 @@ def format_window_in_tag(schema: str, model: str) -> str:
 
 
 def format_union_tag(schema: str, model: str) -> str:
-    """Return annotation for a top-level UNION ALL column: ``UNION ALL in: SCHEMA.MODEL``."""
+    """Return annotation for a top-level UNION / UNION ALL column: ``UNION in: SCHEMA.MODEL``.
+
+    CLL does not distinguish UNION from UNION ALL, so a single label covers both.
+    """
     return _wrap_annotation(f"{get_config().annotation_union} {schema}.{model}")
 
 

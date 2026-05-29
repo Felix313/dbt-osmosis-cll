@@ -150,6 +150,10 @@ def test_aggregate_annotation_appended_when_if_altered():
     desc = node.columns["CNT"].description
     assert cfg.annotation_separator in desc
     assert cfg.annotation_aggregate_from in desc
+    # "from" points to a column as MODEL.COL (consistent with renamed/derived),
+    # not "COL in: MODEL".
+    assert "SRC.AMOUNT" in desc
+    assert "in:" not in desc.split(cfg.annotation_aggregate_from, 1)[1]
 
 
 def test_union_annotation_appended():
