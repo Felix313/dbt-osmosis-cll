@@ -27,6 +27,12 @@ class ParserContext:
     cte_transformation_types: Dict[str, Dict[str, str]] = field(default_factory=dict)
     cte_sql_expressions: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)
     cte_base_tables: Dict[str, Set[str]] = field(default_factory=dict)
+    cte_union_branches: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)
+    """Per-branch source columns for CTEs defined as UNION/INTERSECT/EXCEPT.
+    cte_union_branches[cte_name][col_name] = ["model_a.col_x", "model_b.col_y", ...]
+    one entry per set-operation branch in declaration order. Populated only when
+    the CTE's body is a set operation; used downstream by consumers (dbt-osmosis
+    description inheritance) to apply agreement-aware description propagation."""
     column_definitions: Optional[Dict[str, Any]] = None
     ephemeral_cte_names: Set[str] = field(default_factory=set)
     """CTE names that represent injected ephemeral models (__dbt__cte__ prefix).
@@ -128,13 +134,19 @@ class StarExpressionHandler:
                             trans_type, sql_expr = self.get_cte_transformation_info(
                                 context, join_table, col_name
                             )
+                            branches = (
+                                list(context.cte_union_branches.get(join_table, {}).get(col_name, []))
+                                if trans_type == "union"
+                                else []
+                            )
                             columns[col_name.lower()] = [
                                 ColumnLineage(
-                                    source_columns={col_source},
+                                    source_columns={col_source} if col_source else set(),
                                     transformation_type=cast(
-                                        Literal["direct", "renamed", "derived"], trans_type
+                                        Literal["direct", "renamed", "derived", "union"], trans_type
                                     ),
                                     sql_expression=sql_expr,
+                                    union_branches=branches,
                                 )
                             ]
                 if join_table in context.cte_base_tables:
@@ -168,6 +180,11 @@ class StarExpressionHandler:
                             trans_type, sql_expr = self.get_cte_transformation_info(
                                 context, source_table, col_name
                             )
+                        branches: List[str] = (
+                            list(context.cte_union_branches.get(source_table, {}).get(col_name, []))
+                            if trans_type == "union"
+                            else []
+                        )
                         if not stop_at_boundary and effective_source == "":
                             # Multi-source / zero-source sentinel: emit empty source_columns so
                             # api.py gets no single traceable progenitor. Preserve the stored
@@ -177,6 +194,7 @@ class StarExpressionHandler:
                                     source_columns=set(),
                                     transformation_type=trans_type,  # type: ignore[arg-type]
                                     sql_expression=sql_expr,
+                                    union_branches=branches,
                                 )
                             ]
                         else:
@@ -185,6 +203,7 @@ class StarExpressionHandler:
                                     source_columns={effective_source},
                                     transformation_type=trans_type,  # type: ignore[arg-type]
                                     sql_expression=sql_expr,
+                                    union_branches=branches,
                                 )
                             ]
 
@@ -315,6 +334,7 @@ class SQLColumnParser:
         cte_transformation_types: Dict[str, Dict[str, str]] = {}
         cte_sql_expressions: Dict[str, Dict[str, Optional[str]]] = {}
         cte_base_tables: Dict[str, Set[str]] = {}
+        cte_union_branches: Dict[str, Dict[str, List[str]]] = {}
 
         # Detect injected ephemeral CTEs (dbt convention: __dbt__cte__<model_name>)
         ephemeral_cte_names: Set[str] = set()
@@ -334,6 +354,7 @@ class SQLColumnParser:
             cte_transformation_types,
             cte_sql_expressions,
             cte_base_tables,
+            cte_union_branches,
         )
 
         # Collect ephemeral CTE lineage — the fully-traced column sources for
@@ -426,6 +447,7 @@ class SQLColumnParser:
                 cte_transformation_types=cte_transformation_types,
                 cte_sql_expressions=cte_sql_expressions,
                 cte_base_tables=cte_base_tables,
+                cte_union_branches=cte_union_branches,
                 column_definitions=column_definitions,
                 ephemeral_cte_names=ephemeral_cte_names,
             )
@@ -520,14 +542,36 @@ class SQLColumnParser:
         cte_transformation_types: Dict[str, Dict[str, str]],
         cte_sql_expressions: Dict[str, Dict[str, Optional[str]]],
         cte_base_tables: Dict[str, Set[str]],
+        cte_union_branches: Optional[Dict[str, Dict[str, List[str]]]] = None,
     ) -> Dict[str, Dict[str, str]]:
         cte_sources: Dict[str, Dict[str, str]] = {}
+        if cte_union_branches is None:
+            cte_union_branches = {}
 
         for cte in ctes:
             cte_name = cte.alias.lower()
             cte_sources[cte_name] = {}
             cte_transformation_types[cte_name] = {}
             cte_sql_expressions[cte_name] = {}
+
+            # Set-op CTE detection: (SELECT ...) UNION ALL (SELECT ...) etc.
+            # Without this branch the parser silently picks the first SELECT and
+            # treats the column as a pure passthrough — losing the union semantics
+            # and causing non-deterministic description inheritance for downstream
+            # models that reference such a CTE.
+            cte_body = cte.this
+            if isinstance(cte_body, (exp.Union, exp.Intersect, exp.Except)):
+                self._process_union_cte(
+                    cte_name,
+                    cte_body,
+                    cte_sources,
+                    cte_transformation_types,
+                    cte_sql_expressions,
+                    cte_base_tables,
+                    cte_union_branches,
+                    cte_to_model,
+                )
+                continue
 
             select = cte.this.find(exp.Select)
             if select:
@@ -549,6 +593,7 @@ class SQLColumnParser:
                     cte_transformation_types=cte_transformation_types,
                     cte_sql_expressions=cte_sql_expressions,
                     cte_base_tables=cte_base_tables,
+                    cte_union_branches=cte_union_branches,
                     column_definitions=column_definitions,
                 )
 
@@ -593,6 +638,108 @@ class SQLColumnParser:
                             )
 
         return cte_sources
+
+    def _flatten_set_operation(self, node: Any) -> List[Any]:
+        """Flatten a nested set operation (UNION/INTERSECT/EXCEPT) into its branch SELECTs.
+
+        sqlglot represents ``A UNION B UNION C`` as a left-nested tree of Union
+        nodes (``Union(Union(A, B), C)``). Walking ``node.this`` and ``node.expression``
+        recursively yields all branch SELECTs in declaration order.
+        """
+        if isinstance(node, (exp.Union, exp.Intersect, exp.Except)):
+            return self._flatten_set_operation(node.this) + self._flatten_set_operation(node.expression)
+        return [node]
+
+    def _resolve_branch_source(
+        self,
+        branch_expr: Any,
+        branch_select: Any,
+        cte_sources: Dict[str, Dict[str, str]],
+        cte_to_model: Optional[Dict[str, str]],
+    ) -> str:
+        """Best-effort: return a ``model.column`` qualifier for this branch's column.
+
+        Used for the per-branch source list attached to union CTEs. We don't run
+        the full ExpressionAnalyzer here because branches don't have all the
+        ParserContext plumbing built up yet at CTE-build time. A best-effort
+        resolution covers the common cases (passthrough/aliased ColumnRef from a
+        single FROM table); branches that can't be resolved get an empty string.
+        """
+        # Unwrap aliases — UNION arms are usually `SELECT col FROM t` or `SELECT col AS x FROM t`.
+        inner = branch_expr.this if isinstance(branch_expr, exp.Alias) else branch_expr
+        if not isinstance(inner, exp.Column):
+            return ""
+        col_name = str(inner.name).lower()
+        # Find the FROM table for this branch.
+        from_clause = branch_select.find(exp.From)
+        if from_clause is None:
+            return ""
+        table_node = from_clause.find(exp.Table)
+        if table_node is None:
+            return ""
+        table_name = str(table_node.name).lower()
+        # If the FROM references another CTE, resolve through to the underlying source.
+        if table_name in cte_sources and col_name in cte_sources[table_name]:
+            resolved = cte_sources[table_name][col_name]
+            if resolved:
+                return resolved
+        if cte_to_model and table_name in cte_to_model:
+            return f"{cte_to_model[table_name]}.{col_name}"
+        return f"{table_name}.{col_name}"
+
+    def _process_union_cte(
+        self,
+        cte_name: str,
+        union_body: Any,
+        cte_sources: Dict[str, Dict[str, str]],
+        cte_transformation_types: Dict[str, Dict[str, str]],
+        cte_sql_expressions: Dict[str, Dict[str, Optional[str]]],
+        cte_base_tables: Dict[str, Set[str]],
+        cte_union_branches: Dict[str, Dict[str, List[str]]],
+        cte_to_model: Optional[Dict[str, str]],
+    ) -> None:
+        """Populate CTE state for a set-op CTE.
+
+        For each output column (matched by position across branches), records
+        transformation_type="union" plus a per-branch source list keyed by the
+        CTE's column name. Downstream lookups in get_cte_transformation_info /
+        expand_from_cte then see the union flag and surface the branches via
+        ColumnLineage.union_branches.
+        """
+        branch_selects = [
+            b for b in self._flatten_set_operation(union_body) if isinstance(b, exp.Select)
+        ]
+        if not branch_selects:
+            return
+        first_select = branch_selects[0]
+        # SQL semantics: UNION columns match by ordinal position, output names
+        # come from the FIRST branch.
+        for col_idx, expr in enumerate(first_select.expressions):
+            col_name = strip_sql_comments(expr.alias_or_name).lower()
+            if not col_name or col_name == "*":
+                continue
+            branches: List[str] = []
+            for branch_select in branch_selects:
+                if col_idx >= len(branch_select.expressions):
+                    continue
+                branch_expr = branch_select.expressions[col_idx]
+                source = self._resolve_branch_source(
+                    branch_expr, branch_select, cte_sources, cte_to_model
+                )
+                if source:
+                    branches.append(source)
+                # Also record base table for star_sources tracking.
+                from_clause = branch_select.find(exp.From)
+                if from_clause is not None:
+                    tbl = from_clause.find(exp.Table)
+                    if tbl is not None:
+                        cte_base_tables.setdefault(cte_name, set()).add(
+                            str(tbl.name).lower()
+                        )
+            cte_sources[cte_name][col_name] = ""  # multi-source sentinel
+            cte_transformation_types[cte_name][col_name] = "union"
+            cte_sql_expressions[cte_name][col_name] = None
+            cte_union_branches.setdefault(cte_name, {})[col_name] = branches
 
     def _resolve_star_from_table_in_cte(
         self,
@@ -766,6 +913,7 @@ class SQLColumnParser:
 
         trans_type = "direct"
         sql_expr = None
+        union_branches: List[str] = []
         if table in context.cte_sources and col_name in context.cte_sources[table]:
             cte_trans_type = context.cte_transformation_types.get(table, {}).get(col_name, "direct")
             sql_expr = context.cte_sql_expressions.get(table, {}).get(col_name)
@@ -775,6 +923,10 @@ class SQLColumnParser:
                 trans_type = "renamed"
             else:
                 trans_type = cte_trans_type
+            if cte_trans_type == "union":
+                union_branches = list(
+                    context.cte_union_branches.get(table, {}).get(col_name, [])
+                )
         elif is_aliased:
             trans_type = "renamed"
 
@@ -788,6 +940,7 @@ class SQLColumnParser:
                     source_columns=set(),
                     transformation_type=trans_type if trans_type != "direct" else "derived",
                     sql_expression=sql_expr,
+                    union_branches=union_branches,
                 )
             ]
 
@@ -802,6 +955,7 @@ class SQLColumnParser:
                 source_columns={resolved_source},
                 transformation_type=trans_type,  # type: ignore[arg-type]
                 sql_expression=sql_expr,
+                union_branches=union_branches,
             )
         ]
 

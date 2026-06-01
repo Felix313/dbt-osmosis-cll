@@ -8,8 +8,8 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
-from dataclasses import dataclass
-from typing import List, Literal, Optional
+from dataclasses import dataclass, field
+from typing import List, Literal, Optional, Tuple
 
 from dbt_column_lineage.artifacts.exceptions import CompiledSqlMissingError
 
@@ -91,6 +91,17 @@ class ColumnLineageResult:
     A column is first-in-chain when ``progenitor_model is None`` and ``is_computed`` is
     False (pure unknowns from parse failures also land here, so treat as a soft signal).
     """
+
+    union_branches: List[Tuple[str, str]] = field(default_factory=list)
+    """When ``is_union`` is True: one ``(progenitor_model, progenitor_column)`` tuple per
+    UNION / INTERSECT / EXCEPT branch in declaration order. Empty when the column is
+    not produced by a set operation.
+
+    Consumers that need to make a decision about which upstream description to inherit
+    (dbt-osmosis: agreement-based propagation) iterate this list and apply their own
+    conflict-resolution policy. The single-progenitor fields (``progenitor_model``,
+    ``progenitor_column``) are intentionally left as ``None`` for union columns since
+    no single branch can claim canonical status."""
 
 
 def get_column_lineage(
@@ -244,6 +255,14 @@ def get_column_lineage(
             # Multiple source columns → no single traceable progenitor
             if len(lin.source_columns) > 1:
                 progenitor_model, progenitor_column = None, None
+            # Union branches: split each "table.column" into a (model, col) tuple
+            # so downstream consumers can iterate without re-parsing strings.
+            union_branches: List[Tuple[str, str]] = []
+            if is_union:
+                for branch in lin.union_branches:
+                    if "." in branch:
+                        m, c = branch.rsplit(".", 1)
+                        union_branches.append((m.lower(), c.lower()))
             # first-in-chain: only for pure passthroughs (direct/renamed) that reach a terminal node
             is_passthrough = ttype in ("direct", "renamed")
             is_first = (
@@ -267,6 +286,7 @@ def get_column_lineage(
                     literal_value=literal_value,
                     generated_value=generated_value,
                     is_first_in_chain=is_first,
+                    union_branches=union_branches,
                 )
             )
 

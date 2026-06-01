@@ -7,6 +7,12 @@ class ColumnLineage(BaseModel):
     transformation_type: Literal["direct", "renamed", "derived", "aggregate", "window", "union", "literal", "generated"]
     sql_expression: Optional[str] = None
     description: Optional[str] = None
+    union_branches: List[str] = Field(default_factory=list)
+    """When transformation_type=="union", contains one qualified ``table.column``
+    string per UNION/INTERSECT/EXCEPT branch in declaration order. Empty when
+    the column is not produced by a top-level set operation. Used by downstream
+    consumers (e.g. dbt-osmosis description inheritance) to look up each
+    branch's upstream description and apply agreement-based dedup."""
 
     @property
     def is_rename(self) -> bool:
