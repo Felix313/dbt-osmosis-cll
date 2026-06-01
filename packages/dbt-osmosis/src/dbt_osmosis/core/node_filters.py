@@ -15,7 +15,87 @@ __all__ = [
     "_is_fqn_match",
     "_iter_candidate_nodes",
     "_topological_sort",
+    "_topological_waves",
 ]
+
+
+# project_dir → {unique_id: depth}.  Computed once per process per project — the
+# manifest's dependency graph is immutable during a run, so this is safe to memoize.
+_DEPTH_CACHE: dict[str, dict[str, int]] = {}
+
+
+def _topological_depths(context: t.Any) -> dict[str, int]:
+    """Longest-path-from-source depth for every node + source in the manifest.
+
+    Sources / seeds with no upstream dependencies sit at depth 0; every other node
+    has depth = 1 + max(depth of its direct upstream dependencies).
+
+    Used by ``_topological_waves`` so the inherit / annotate passes can process
+    upstream layers before downstream ones — without this, downstream walkers
+    read pre-pipeline YAML buffer state for upstreams that this run is about
+    to populate, breaking single-run idempotency.
+    """
+    project_dir = str(context.project.runtime_cfg.project_root)
+    cached = _DEPTH_CACHE.get(project_dir)
+    if cached is not None:
+        return cached
+
+    manifest = context.project.manifest
+    all_nodes: dict[str, t.Any] = {}
+    all_nodes.update(getattr(manifest, "nodes", {}) or {})
+    all_nodes.update(getattr(manifest, "sources", {}) or {})
+
+    depths: dict[str, int] = {}
+
+    def _resolve(uid: str, visiting: set[str]) -> int:
+        if uid in depths:
+            return depths[uid]
+        if uid in visiting:
+            # Cycle — defensive: dbt rejects these at parse time, but {{ this }}
+            # self-refs already don't appear in depends_on.nodes so this guard
+            # is purely a backstop. Returning 0 breaks the recursion harmlessly.
+            return 0
+        node = all_nodes.get(uid)
+        if node is None:
+            return 0
+        upstream: list[str] = []
+        depends_on = getattr(node, "depends_on", None)
+        if depends_on is not None:
+            upstream = [
+                u for u in (getattr(depends_on, "nodes", []) or []) if u in all_nodes
+            ]
+        if not upstream:
+            depths[uid] = 0
+            return 0
+        visiting.add(uid)
+        d = 1 + max(_resolve(u, visiting) for u in upstream)
+        visiting.discard(uid)
+        depths[uid] = d
+        return d
+
+    for uid in all_nodes:
+        _resolve(uid, set())
+
+    _DEPTH_CACHE[project_dir] = depths
+    return depths
+
+
+def _topological_waves(
+    context: t.Any, candidates: list[ResultNode]
+) -> list[list[ResultNode]]:
+    """Group *candidates* into waves sorted by ascending dependency depth.
+
+    Each wave can run in parallel internally; the pipeline op must wait for
+    wave N to complete before starting wave N+1. This guarantees every
+    node sees the fully-enriched in-memory state of all its upstreams when
+    it runs, eliminating the "downstream sees stale YAML buffer" class of
+    non-idempotency bugs.
+    """
+    depths = _topological_depths(context)
+    waves: dict[int, list[ResultNode]] = {}
+    for node in candidates:
+        waves.setdefault(depths.get(node.unique_id, 0), []).append(node)
+    return [waves[d] for d in sorted(waves)]
 
 
 def _is_fqn_match(node: ResultNode, fqns: list[str]) -> bool:

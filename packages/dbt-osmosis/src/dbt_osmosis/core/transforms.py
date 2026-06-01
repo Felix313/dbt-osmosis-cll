@@ -433,15 +433,10 @@ def _find_cll_description(
     if upstream_node is None:
         return None
 
-    # 3. Prefer the stable YAML buffer description (reflects pre-run enrichment, parallel-safe).
-    variants = [parent_col_name, parent_col_name.upper(), parent_col_name.lower()]
-    yaml_desc = _read_ancestor_yaml_description(context, upstream_node, variants)
-    if yaml_desc:
-        cleaned = strip_annotation_tags(yaml_desc).strip()
-        if cleaned and cleaned not in context.placeholders:
-            return cleaned
-
-    # 4. Fall back to the in-memory manifest description.
+    # 3. In-memory manifest first — captures THIS run's progressive enrichment
+    # (upstream waves write here before downstream waves read it). The YAML
+    # buffer is a frozen pre-pipeline snapshot and would hide updates made by
+    # earlier waves in the same run.
     cols = getattr(upstream_node, "columns", {})
     col_info = next(
         (v for k, v in cols.items() if k.lower() == parent_col_name.lower()), None
@@ -449,6 +444,15 @@ def _find_cll_description(
     if col_info:
         raw = getattr(col_info, "description", None) or ""
         cleaned = strip_annotation_tags(raw).strip()
+        if cleaned and cleaned not in context.placeholders:
+            return cleaned
+
+    # 4. Fall back to the stable YAML buffer description (pre-run state on disk).
+    # Useful for sources / nodes that aren't in this run's candidate set.
+    variants = [parent_col_name, parent_col_name.upper(), parent_col_name.lower()]
+    yaml_desc = _read_ancestor_yaml_description(context, upstream_node, variants)
+    if yaml_desc:
+        cleaned = strip_annotation_tags(yaml_desc).strip()
         if cleaned and cleaned not in context.placeholders:
             return cleaned
 
@@ -559,19 +563,31 @@ def inherit_upstream_column_knowledge_cll(
         # Build the index dicts once, up front, so the parallel pool only reads them.
         _ensure_manifest_index(context)
 
-        from dbt_osmosis.core.node_filters import _iter_candidate_nodes
+        from dbt_osmosis.core.node_filters import (
+            _iter_candidate_nodes,
+            _topological_waves,
+        )
 
-        nodes = list(_iter_candidate_nodes(context))
+        nodes = [n for _, n in _iter_candidate_nodes(context)]
+        waves = _topological_waves(context, nodes)
         total = len(nodes)
-        for i, _ in enumerate(
-            context.pool.map(
+        # Topological waves: every node sees the fully-enriched in-memory state
+        # of all its upstream dependencies before its own walker runs. Without
+        # this, downstream nodes processed early read pre-pipeline YAML buffer
+        # state for upstreams this run is about to populate — and the enrichment
+        # cascade requires N additional runs for an N-deep DAG.
+        processed = 0
+        for wave_idx, wave in enumerate(waves):
+            for _ in context.pool.map(
                 partial(inherit_upstream_column_knowledge_cll, context),
-                (n for _, n in nodes),
-            ),
-            start=1,
-        ):
-            if i % 25 == 0 or i == total:
-                logger.info(":hourglass: CLL Inherit progress => %d / %d", i, total)
+                wave,
+            ):
+                processed += 1
+                if processed % 25 == 0 or processed == total:
+                    logger.info(
+                        ":hourglass: CLL Inherit progress => %d / %d (wave %d/%d)",
+                        processed, total, wave_idx + 1, len(waves),
+                    )
         return
 
     logger.info(":dna: CLL-driven inheritance for => %s", node.unique_id)
@@ -1294,14 +1310,26 @@ def annotate_column_origins(
 
     if node is None:
         logger.info(":wave: Enriching column origins across all matched nodes.")
-        nodes = list(_iter_candidate_nodes(context))
+        from dbt_osmosis.core.node_filters import _topological_waves
+
+        nodes = [n for _, n in _iter_candidate_nodes(context)]
+        waves = _topological_waves(context, nodes)
         total = len(nodes)
-        for i, _ in enumerate(context.pool.map(
-            partial(annotate_column_origins, context),
-            (n for _, n in nodes),
-        ), start=1):
-            if i % 25 == 0 or i == total:
-                logger.info(":hourglass: Annotate Column Origins progress => %d / %d", i, total)
+        # Same topological-wave reasoning as the inherit pass: annotate's deep
+        # tracer reads upstream descriptions; running upstream before downstream
+        # within a single pass keeps that read consistent run-to-run.
+        processed = 0
+        for wave_idx, wave in enumerate(waves):
+            for _ in context.pool.map(
+                partial(annotate_column_origins, context),
+                wave,
+            ):
+                processed += 1
+                if processed % 25 == 0 or processed == total:
+                    logger.info(
+                        ":hourglass: Annotate Column Origins progress => %d / %d (wave %d/%d)",
+                        processed, total, wave_idx + 1, len(waves),
+                    )
         return
 
     if node.resource_type == NodeType.Source:

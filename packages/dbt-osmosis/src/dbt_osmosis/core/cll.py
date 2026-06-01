@@ -656,26 +656,30 @@ def _node_has_real_description(
     Reads the YAML buffer first (parallel-safe, reflects pre-pipeline state)
     then falls back to the in-memory manifest (live during the run).
     """
+    # In-memory manifest first — see comment in `_find_cll_description` for
+    # the topological-waves rationale.
+    cols = getattr(node, "columns", {})
+    col_info = next(
+        (v for k, v in cols.items() if k.lower() == column_name.lower()), None
+    )
+    if col_info is not None:
+        raw = getattr(col_info, "description", None) or ""
+        cleaned = strip_annotation_tags(raw).strip()
+        if cleaned and cleaned not in context.placeholders:
+            return True
+
+    # YAML buffer fallback — covers nodes outside this run's candidate set.
     try:
         from dbt_osmosis.core.inheritance import _read_ancestor_yaml_description
     except Exception:  # noqa: BLE001 — defensive: missing dep means treat as no description
         return False
-
     variants = [column_name, column_name.upper(), column_name.lower()]
     yaml_desc = _read_ancestor_yaml_description(context, node, variants)
     if yaml_desc:
         cleaned = strip_annotation_tags(yaml_desc).strip()
         if cleaned and cleaned not in context.placeholders:
             return True
-    cols = getattr(node, "columns", {})
-    col_info = next(
-        (v for k, v in cols.items() if k.lower() == column_name.lower()), None
-    )
-    if col_info is None:
-        return False
-    raw = getattr(col_info, "description", None) or ""
-    cleaned = strip_annotation_tags(raw).strip()
-    return bool(cleaned) and cleaned not in context.placeholders
+    return False
 
 
 def get_origin_source_description(
