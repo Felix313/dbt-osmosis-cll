@@ -33,13 +33,13 @@ def _release_duckdb_connections() -> None:
         from dbt.adapters.duckdb.connections import DuckDBConnectionManager
 
         DuckDBConnectionManager.close_all_connections()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 — best-effort: connection release must not raise
         pass
     try:
         from dbt.adapters.factory import reset_adapters
 
         reset_adapters()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 — best-effort: adapter reset must not raise
         pass
     gc.collect()
 
@@ -183,7 +183,7 @@ def built_duckdb_template() -> Iterator[Path]:
         try:
             shutil.rmtree(template_temp_dir)
             print("✓ Removed template directory")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort cleanup of a temp dir
             print(f"Warning: Error removing template directory: {e}")
         print("=" * 60 + "\n")
 
@@ -256,27 +256,30 @@ def yaml_context(built_duckdb_template: Path) -> Iterator[YamlRefactorContext]:
         # Restore the working directory changed during setup.
         try:
             os.chdir(_fixture_old_cwd)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort cwd restore
             print(f"Warning: Error restoring cwd: {e}")
 
         # Teardown: Clean up temp directory
         print(f"\n=== Cleaning up temp directory {temp_dir} ===")
         try:
             # Close connections first
-            if "project_context" in locals():
-                if hasattr(project_context, "_project") and project_context._project is not None:
-                    if hasattr(project_context._project, "adapter"):
-                        adapter = project_context._project.adapter
-                        if hasattr(adapter, "connections") and hasattr(
-                            adapter.connections,
-                            "close",
-                        ):
-                            try:
-                                adapter.connections.close()
-                                print("✓ Adapter connections closed")
-                            except Exception as e:
-                                print(f"Warning: Error closing connections: {e}")
-        except Exception as e:
+            if (
+                "project_context" in locals()
+                and hasattr(project_context, "_project")
+                and project_context._project is not None
+                and hasattr(project_context._project, "adapter")
+            ):
+                adapter = project_context._project.adapter
+                if hasattr(adapter, "connections") and hasattr(
+                    adapter.connections,
+                    "close",
+                ):
+                    try:
+                        adapter.connections.close()
+                        print("✓ Adapter connections closed")
+                    except Exception as e:  # noqa: BLE001 — best-effort connection close
+                        print(f"Warning: Error closing connections: {e}")
+        except Exception as e:  # noqa: BLE001 — best-effort teardown wrapper
             print(f"Warning: Error during connection cleanup: {e}")
 
         # Delete the DbtProject reference and trigger GC
@@ -285,7 +288,7 @@ def yaml_context(built_duckdb_template: Path) -> Iterator[YamlRefactorContext]:
                 del project_context._project
                 gc.collect()
                 print("✓ DbtProject reference deleted and garbage collected")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort cleanup of cached project
             print(f"Warning: Error deleting DbtProject reference: {e}")
 
         # Forcefully release any remaining dbt-duckdb connection held on the global
@@ -298,7 +301,7 @@ def yaml_context(built_duckdb_template: Path) -> Iterator[YamlRefactorContext]:
         try:
             shutil.rmtree(temp_dir)
             print(f"✓ Removed temp directory {temp_dir}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort cleanup of a temp dir
             print(f"Warning: Error removing temp directory: {e}")
 
         print("=== Teardown complete ===\n")

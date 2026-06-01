@@ -11,7 +11,8 @@ from pathlib import Path
 import click
 import yaml as yaml_handler
 
-import dbt_osmosis.core.logger as logger
+from dbt_osmosis.core import logger
+from dbt_osmosis.core.cll import maybe_bulk_compile
 from dbt_osmosis.core.config import (
     DbtConfiguration,
     create_dbt_project_context,
@@ -29,7 +30,6 @@ from dbt_osmosis.core.restructuring import (
     apply_restructure_plan,
     draft_restructure_delta_plan,
 )
-from dbt_osmosis.core.cll import maybe_bulk_compile
 from dbt_osmosis.core.settings import YamlRefactorContext, YamlRefactorSettings
 from dbt_osmosis.core.sql_lint import SQLLinter, lint_sql_code
 from dbt_osmosis.core.sql_operations import compile_sql_code, execute_sql_code
@@ -45,12 +45,7 @@ from dbt_osmosis.core.transforms import (
 )
 
 T = t.TypeVar("T")
-if sys.version_info >= (3, 10):
-    P = t.ParamSpec("P")
-else:
-    import typing_extensions as te
-
-    P = te.ParamSpec("P")
+P = t.ParamSpec("P")
 
 _CONTEXT = {"max_content_width": 800}
 
@@ -60,7 +55,6 @@ _CONTEXT = {"max_content_width": 800}
 def cli() -> None:
     """dbt-osmosis is a CLI tool for dbt that helps you manage, document, and organize your dbt yaml files"""
 
-    pass
 
 
 def test_llm_connection(llm_client=None) -> None:
@@ -426,7 +420,7 @@ def refactor(
         _run_formatter_if_configured(context)
 
         if check and context.mutated:
-            exit(1)
+            sys.exit(1)
 
 
 
@@ -488,7 +482,7 @@ def organize(
         _run_formatter_if_configured(context)
 
         if check and context.mutated:
-            exit(1)
+            sys.exit(1)
 
 
 @yaml.command(context_settings=_CONTEXT)
@@ -628,7 +622,7 @@ def document(
         _run_formatter_if_configured(context)
 
         if check and context.mutated:
-            exit(1)
+            sys.exit(1)
 
 
 @yaml.command(context_settings=_CONTEXT)
@@ -719,7 +713,7 @@ def doc_health(
                 report.coverage,
                 min_coverage,
             )
-            exit(1)
+            sys.exit(1)
 
 
 @cli.group()
@@ -787,7 +781,7 @@ def model(
 
     available_sources: list[dict[str, t.Any]] = []
 
-    for node_id, node in project.manifest.nodes.items():
+    for node in project.manifest.nodes.values():
         if hasattr(node, "resource_type") and node.resource_type == "model":
             columns = list(node.columns.keys()) if hasattr(node, "columns") else []
             available_sources.append({
@@ -797,7 +791,7 @@ def model(
                 "columns": columns,
             })
 
-    for source_id, source in project.manifest.sources.items():
+    for source in project.manifest.sources.values():
         if hasattr(source, "resource_type") and source.resource_type == "source":
             columns = list(source.columns.keys()) if hasattr(source, "columns") else []
             available_sources.append({
@@ -1098,7 +1092,7 @@ def generate_query(
 
     available_sources: list[dict[str, t.Any]] = []
 
-    for node_id, node in project.manifest.nodes.items():
+    for node in project.manifest.nodes.values():
         if hasattr(node, "resource_type") and node.resource_type == "model":
             columns = list(node.columns.keys()) if hasattr(node, "columns") else []
             available_sources.append({
@@ -1108,7 +1102,7 @@ def generate_query(
                 "columns": columns,
             })
 
-    for source_id, source in project.manifest.sources.items():
+    for source in project.manifest.sources.values():
         if hasattr(source, "resource_type") and source.resource_type == "source":
             columns = list(source.columns.keys()) if hasattr(source, "columns") else []
             available_sources.append({
@@ -1137,7 +1131,7 @@ def generate_query(
         click.echo("=" * 80)
         _, table = execute_sql_code(project, sql)
 
-        getattr(table, "print_table")(
+        table.print_table(
             max_rows=50,
             max_columns=6,
             output=sys.stdout,
@@ -1210,7 +1204,7 @@ def nl_generate_deprecated(
     available_sources: list[dict[str, t.Any]] = []
 
     # Add models from manifest
-    for node_id, node in project.manifest.nodes.items():
+    for node in project.manifest.nodes.values():
         if hasattr(node, "resource_type") and node.resource_type == "model":
             columns = list(node.columns.keys()) if hasattr(node, "columns") else []
             available_sources.append({
@@ -1221,7 +1215,7 @@ def nl_generate_deprecated(
             })
 
     # Add sources from manifest
-    for source_id, source in project.manifest.sources.items():
+    for source in project.manifest.sources.values():
         if hasattr(source, "resource_type") and source.resource_type == "source":
             columns = list(source.columns.keys()) if hasattr(source, "columns") else []
             available_sources.append({
@@ -1339,7 +1333,7 @@ def query(
     # Gather available sources and models from the manifest
     available_sources: list[dict[str, t.Any]] = []
 
-    for node_id, node in project.manifest.nodes.items():
+    for node in project.manifest.nodes.values():
         if hasattr(node, "resource_type") and node.resource_type == "model":
             columns = list(node.columns.keys()) if hasattr(node, "columns") else []
             available_sources.append({
@@ -1349,7 +1343,7 @@ def query(
                 "columns": columns,
             })
 
-    for source_id, source in project.manifest.sources.items():
+    for source in project.manifest.sources.values():
         if hasattr(source, "resource_type") and source.resource_type == "source":
             columns = list(source.columns.keys()) if hasattr(source, "columns") else []
             available_sources.append({
@@ -1379,7 +1373,7 @@ def query(
         click.echo("=" * 80)
         _, table = execute_sql_code(project, sql)
 
-        getattr(table, "print_table")(
+        table.print_table(
             max_rows=50,
             max_columns=6,
             output=sys.stdout,
@@ -1390,10 +1384,10 @@ def query(
 
 
 @cli.command(
-    context_settings=dict(
-        ignore_unknown_options=True,
-        allow_extra_args=True,
-    )
+    context_settings={
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+    }
 )
 @logging_opts
 @click.option(
@@ -1437,7 +1431,7 @@ def workbench(
     logger.info(":water_wave: Executing dbt-osmosis\n")
 
     if "--options" in ctx.args:
-        proc = subprocess.run(["streamlit", "run", "--help"])
+        proc = subprocess.run(["streamlit", "run", "--help"], check=False)
         ctx.exit(proc.returncode)
 
     import os
@@ -1447,6 +1441,7 @@ def workbench(
             ["streamlit", "config", "show"],
             env=os.environ,
             cwd=Path.cwd(),
+            check=False,
         )
         ctx.exit(proc.returncode)
 
@@ -1471,6 +1466,7 @@ def workbench(
         ],
         env=os.environ,
         cwd=Path.cwd(),
+        check=False,
     )
 
     ctx.exit(proc.returncode)
@@ -1497,7 +1493,7 @@ def run(
     project = create_dbt_project_context(settings)
     _, table = execute_sql_code(project, sql)
 
-    getattr(table, "print_table")(
+    table.print_table(
         max_rows=50,
         max_columns=6,
         output=sys.stdout,
@@ -1667,7 +1663,7 @@ def _output_diff_text(results: dict[str, t.Any], severity_filter: str) -> None:
     click.echo(f":warning: Detected {total_changes} schema changes across {len(results)} node(s)\n")
 
     # Group changes by node
-    for node_id, result in results.items():
+    for result in results.values():
         # Filter by severity if needed
         changes = result.changes
         if severity_filter != "all":
@@ -1728,11 +1724,11 @@ def _output_diff_text(results: dict[str, t.Any], severity_filter: str) -> None:
 def _output_diff_json(results: dict[str, t.Any], severity_filter: str) -> None:
     """Output diff results in JSON format."""
     import json
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     nodes: list[dict[str, object]] = []
     output: dict[str, object] = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         "total_nodes": len(results),
         "total_changes": sum(len(r.changes) for r in results.values()),
         "nodes": nodes,
@@ -1785,7 +1781,7 @@ def _output_diff_markdown(results: dict[str, t.Any], severity_filter: str) -> No
         f"# Schema Diff Results\n\n**Detected {total_changes} changes across {len(results)} node(s)**\n"
     )
 
-    for node_id, result in results.items():
+    for result in results.values():
         # Filter by severity if needed
         changes = result.changes
         if severity_filter != "all":
@@ -1956,7 +1952,7 @@ def suggest(
                     temperature=temperature,
                 )
                 results[model_name] = analysis
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — per-model failure should not abort the loop
                 logger.error(f":x: Failed to suggest tests for {model_name}: {e}")
     else:
         # Suggest tests for all models
@@ -2177,7 +2173,7 @@ def lint_file(
 
         # Exit with error code if there are errors or warnings
         if errors or warnings:
-            exit(1)
+            sys.exit(1)
     else:
         click.echo(":white_check_mark: No issues found!")
 
@@ -2275,7 +2271,7 @@ def lint_model_command(
 
         # Exit with error code if there are errors or warnings
         if errors or warnings:
-            exit(1)
+            sys.exit(1)
     else:
         click.echo(":white_check_mark: No issues found!")
 
@@ -2384,7 +2380,7 @@ def lint_project_command(
 
         # Exit with error code if there are errors or warnings
         if total_errors or total_warnings:
-            exit(1)
+            sys.exit(1)
     else:
         click.echo(":white_check_mark: No issues found across all models!")
 

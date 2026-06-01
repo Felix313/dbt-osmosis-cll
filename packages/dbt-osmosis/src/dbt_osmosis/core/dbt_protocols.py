@@ -19,6 +19,7 @@ import ruamel.yaml
 
 if t.TYPE_CHECKING:
     from dbt.artifacts.resources.types import NodeType
+
     from dbt_osmosis.core.config import DbtProjectContext
 
 
@@ -103,7 +104,7 @@ class YamlRefactorContextProtocol(t.Protocol):
     """
 
     @property
-    def project(self) -> "DbtProjectContext": ...
+    def project(self) -> DbtProjectContext: ...
 
     settings: t.Any  # YamlRefactorSettings
     pool: ThreadPoolExecutor

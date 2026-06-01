@@ -30,9 +30,15 @@ def _sync_doc_section(
     logger.debug(":arrows_counterclockwise: Syncing doc_section with node => %s", node.unique_id)
     if "description" in doc_section and doc_section["description"] is not None:
         doc_section["description"] = str(doc_section["description"])
-    if node.description and not doc_section.get("description"):
-        if context.settings.scaffold_empty_configs or node.description not in context.placeholders:
-            doc_section["description"] = str(node.description)
+    if (
+        node.description
+        and not doc_section.get("description")
+        and (
+            context.settings.scaffold_empty_configs
+            or node.description not in context.placeholders
+        )
+    ):
+        doc_section["description"] = str(node.description)
 
     current_columns: list[dict[str, t.Any]] = doc_section.setdefault("columns", [])
     incoming_columns: list[dict[str, t.Any]] = []
@@ -100,10 +106,13 @@ def _sync_doc_section(
             fallback=context.settings.prefer_yaml_values,
         )
         preserve_current_description = False
-        if use_unrendered and current_description:
-            # Check if current description contains unrendered doc blocks
-            if "{{ doc(" in current_description or "{% docs " in current_description:
-                preserve_current_description = True
+        if (
+            use_unrendered
+            and current_description
+            and ("{{ doc(" in current_description or "{% docs " in current_description)
+        ):
+            # Preserve the unrendered doc-block reference in the current description.
+            preserve_current_description = True
 
         # Fields to preserve from current YAML when prefer_yaml_values is enabled
         # This includes ANY field that has unrendered jinja templates

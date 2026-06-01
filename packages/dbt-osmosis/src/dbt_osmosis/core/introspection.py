@@ -21,25 +21,25 @@ from dbt_common.contracts.metadata import (
 from dbt_osmosis.core import logger
 
 __all__ = [
-    "_find_first",
-    "normalize_column_name",
-    "_maybe_use_precise_dtype",
-    "get_columns",
-    "prefetch_columns",
-    "SettingsResolver",
     "_COLUMN_LIST_CACHE",
-    # Foundational classes for unified config resolution
-    "ConfigurationError",
-    "ConfigSourceName",
-    "PropertySource",
-    "ConfigurationSource",
-    # Unified property access for US2
-    "PropertyAccessor",
     # New configuration sources for US1
     "ConfigMetaSource",
-    "UnrenderedConfigSource",
+    "ConfigSourceName",
+    # Foundational classes for unified config resolution
+    "ConfigurationError",
+    "ConfigurationSource",
     "ProjectVarsSource",
+    # Unified property access for US2
+    "PropertyAccessor",
+    "PropertySource",
+    "SettingsResolver",
     "SupplementaryFileSource",
+    "UnrenderedConfigSource",
+    "_find_first",
+    "_maybe_use_precise_dtype",
+    "get_columns",
+    "normalize_column_name",
+    "prefetch_columns",
 ]
 
 T = t.TypeVar("T")
@@ -1120,8 +1120,7 @@ def get_columns(
         columns = [c]
         flattener = getattr(t.cast(t.Any, c), "flatten", None)
         if callable(flattener):
-            for flattened in t.cast(t.Iterable[t.Any], flattener()):
-                columns.append(flattened)
+            columns.extend(t.cast(t.Iterable[t.Any], flattener()))
 
         for column in columns:
             if any(re.match(b, column.name) for b in context.ignore_patterns):
@@ -1202,7 +1201,7 @@ def get_columns(
                 for column in catalog_columns:
                     process_column(column)
                 return normalized_columns
-    except Exception as ex:
+    except Exception as ex:  # noqa: BLE001 — adapter may raise anything; fall back to DESCRIBE
         logger.debug(
             ":blue_book: catalog_by_relations not available or failed (%s), falling back to get_columns_in_relation.",
             ex,
@@ -1216,7 +1215,7 @@ def get_columns(
                 context.project.adapter.get_columns_in_relation(relation),
             ),
         )
-    except Exception as ex:
+    except Exception as ex:  # noqa: BLE001 — surface any adapter error and return empty
         logger.warning(":warning: Could not introspect columns for %s: %s", rendered_relation, ex)
         return normalized_columns
 
@@ -1253,7 +1252,8 @@ def prefetch_columns(context: t.Any, nodes: t.Iterable[t.Any]) -> int:
             relation = context.project.adapter.Relation.create_from(
                 context.project.adapter.config, node
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — skip un-relationable nodes; not fatal
+            logger.debug(":blue_book: Skipping node %s in prefetch: %s", getattr(node, "unique_id", node), exc)
             continue
 
         renderer = getattr(relation, "render", None)
@@ -1285,7 +1285,7 @@ def prefetch_columns(context: t.Any, nodes: t.Iterable[t.Any]) -> int:
         catalog_table, _ = context.project.adapter.get_catalog_by_relations(
             frozenset(used_schemas), all_relations
         )
-    except Exception as ex:
+    except Exception as ex:  # noqa: BLE001 — adapter may raise anything; per-node fallback handles it
         logger.debug(
             ":blue_book: Batch prefetch failed (%s), falling back to per-relation fetch.", ex
         )
@@ -1472,7 +1472,7 @@ class PropertyAccessor:
                 getattr(node, "unique_id", "unknown"),
             )
             return None
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001 — best-effort YAML read; fall through to manifest
             logger.warning(
                 ":warning: Error reading YAML for node %s: %s",
                 getattr(node, "unique_id", "unknown"),

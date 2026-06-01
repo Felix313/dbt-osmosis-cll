@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import ruamel.yaml
+from typing_extensions import Self
 
 from dbt_osmosis.core import logger
 
@@ -37,7 +38,7 @@ def _read_profile_threads(runtime_cfg: t.Any) -> int | None:
             return None
         threads = profiles.get(profile_name, {}).get("outputs", {}).get(target_name, {}).get("threads")
         return int(threads) if threads else None
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort profiles.yml read; fall back to dbt default
         return None
 
 
@@ -49,9 +50,9 @@ def _create_yaml_instance() -> ruamel.yaml.YAML:
 
 __all__ = [
     "EMPTY_STRING",
-    "get_managed_meta_keys",
     "YamlRefactorContext",
     "YamlRefactorSettings",
+    "get_managed_meta_keys",
 ]
 
 EMPTY_STRING = ""
@@ -197,7 +198,7 @@ class YamlRefactorContext:
     _closed: bool = field(default=False, init=False, repr=False)
     """Track whether the context has been closed to prevent double-cleanup."""
 
-    def __enter__(self) -> YamlRefactorContext:
+    def __enter__(self) -> Self:
         """Enter the context manager.
 
         Returns:
@@ -232,14 +233,14 @@ class YamlRefactorContext:
             if hasattr(self, "pool") and self.pool is not None:
                 logger.debug(":lock: Shutting down thread pool")
                 self.pool.shutdown(wait=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort: shutdown errors must not raise
             logger.warning(":warning: Error shutting down thread pool: %s", e)
 
         try:
             # Close the project context
             if hasattr(self, "project") and self.project is not None:
                 self.project.close()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort: cleanup errors must not raise
             logger.warning(":warning: Error closing project context: %s", e)
 
         self._closed = True
@@ -305,7 +306,7 @@ class YamlRefactorContext:
                 formatter = data.get("formatter")
                 if isinstance(formatter, str) and formatter.strip():
                     return formatter.strip()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — best-effort supplementary-config read
                 logger.warning(
                     ":warning: Failed to read formatter from %s: %s",
                     supp_file,
