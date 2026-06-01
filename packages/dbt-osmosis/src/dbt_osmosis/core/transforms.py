@@ -18,6 +18,7 @@ if t.TYPE_CHECKING:
     )
 
 from dbt_osmosis.core import logger
+from dbt_osmosis.core.inheritance import _safe_column_replace
 from dbt_osmosis.core.settings import get_managed_meta_keys
 from dbt_osmosis.config import get_config
 
@@ -351,8 +352,6 @@ def inherit_upstream_column_knowledge(
             updated_metadata,
             name,
         )
-        from dbt_osmosis.core.inheritance import _safe_column_replace
-
         node.columns[name] = _safe_column_replace(node_column, **updated_metadata)
 
 
@@ -678,8 +677,6 @@ def inherit_upstream_column_knowledge_cll(
                 col_name,
                 list(update_kwargs.keys()),
             )
-            from dbt_osmosis.core.inheritance import _safe_column_replace
-
             node.columns[col_name] = _safe_column_replace(node_col, **update_kwargs)
 
 
@@ -838,7 +835,7 @@ def inject_missing_columns(
                     incoming_name,
                     node.unique_id,
                 )
-                node.columns[existing_col.name] = existing_col.replace(description=incoming_meta.comment)
+                node.columns[existing_col.name] = _safe_column_replace(existing_col, description=incoming_meta.comment)
 
 
 @_transform_op("Remove Extra Columns")
@@ -1289,8 +1286,6 @@ def annotate_column_origins(
                 replace_kwargs: dict[str, t.Any] = {"meta": stale_meta, "description": stripped_desc}
                 if cleaned_config is not None:
                     replace_kwargs["config"] = cleaned_config
-                from dbt_osmosis.core.inheritance import _safe_column_replace
-
                 node.columns[col_name] = _safe_column_replace(node_col, **replace_kwargs)
             continue
 
@@ -1340,8 +1335,6 @@ def annotate_column_origins(
                     replace_kwargs["description"] = central_doc
 
             if replace_kwargs:
-                from dbt_osmosis.core.inheritance import _safe_column_replace
-
                 node.columns[col_name] = _safe_column_replace(node_col, **replace_kwargs)
             continue
 
@@ -1385,7 +1378,7 @@ def annotate_column_origins(
             central_doc = _col_docs.get(col_name.lower()) if _col_docs else None
 
             if central_doc and not has_real_desc:
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=central_doc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=central_doc, **_config_kwarg)
             elif _annotate_mode:
                 if _is_union:
                     tag = format_union_tag(node_schema, node.name.upper())
@@ -1409,7 +1402,7 @@ def annotate_column_origins(
                         tag = format_window_in_tag(node_schema, node.name.upper())
 
                 new_desc = f"{base_desc}\n\n{tag}".strip() if has_real_desc else tag
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
             else:
                 # Non-annotation mode: still propagate the immediate progenitor description.
                 # Without this, wrong descriptions written by a previous (buggy) CLL run
@@ -1427,7 +1420,7 @@ def annotate_column_origins(
                             _force_here = str(_desc_auth).lower() == "upstream"
                             if not has_real_desc or _force_here:
                                 base_desc = _prog_desc
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
             continue
 
         if is_multi_source:
@@ -1445,15 +1438,15 @@ def annotate_column_origins(
             # Use central docs as the description when the column has none.
             central_doc = _col_docs.get(col_name.lower()) if _col_docs else None
             if central_doc and not has_real_desc:
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=central_doc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=central_doc, **_config_kwarg)
             elif _annotate_mode:
                 # Multi-source: "computed in: SCHEMA.MODEL" — can't trace to a single column
                 derived_tag = format_derived_tag(node_schema, node.name.upper())
                 new_desc = f"{base_desc}\n\n{derived_tag}".strip() if has_real_desc else derived_tag
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
             else:
                 # No annotation mode: still write stripped description to remove any old tags.
-                node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
 
             logger.debug(":pencil: %s.%s => derived in %s", node.name, col_name, node_ref)
 
@@ -1471,7 +1464,7 @@ def annotate_column_origins(
                     base_desc = strip_annotation_tags((node_col.description or "").strip())
                     if not base_desc or base_desc in context.placeholders:
                         base_desc = ""
-                    node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
+                    node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
                     continue
                 origin = ("", imm_model.upper(), imm_col.upper(), imm_col.upper())
 
@@ -1495,9 +1488,9 @@ def annotate_column_origins(
                     renamed_entry = entry_col if entry_col and entry_col.upper() != col_name.upper() else None
                     derived_tag = format_derived_tag(schema, origin_model, entry_col=renamed_entry)
                     new_desc = f"{base_desc}\n\n{derived_tag}".strip() if base_desc else derived_tag
-                    node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
+                    node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
                 else:
-                    node.columns[col_name] = node_col.replace(meta=new_meta, description=base_desc, **_config_kwarg)
+                    node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
                 continue
 
             # Use CLL's is_rename (pure alias, no expression) rather than a name-comparison
@@ -1562,7 +1555,7 @@ def annotate_column_origins(
                 # No annotation: write stripped description so old tags are removed.
                 new_desc = base_desc
 
-            node.columns[col_name] = node_col.replace(meta=new_meta, description=new_desc, **_config_kwarg)
+            node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
 
             if is_name_changed:
                 logger.debug(":pencil: %s.%s => renamed from %s.%s", node.name, col_name, schema, origin_col)
