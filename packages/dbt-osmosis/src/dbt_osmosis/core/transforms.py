@@ -361,12 +361,14 @@ def _find_cll_description(
     parent_col_name: str,
     depth: int = 0,
     max_depth: int | None = None,
+    visited: set[tuple[str, str]] | None = None,
 ) -> str | None:
     """Walk the CLL progenitor chain to find the closest ancestor with a real description.
 
     Reads from stable YAML buffers (not in-memory manifest) — safe for parallel execution.
     Stops at: computed walls, aggregate/window/union/literal/generated columns, source nodes,
-    unresolvable nodes, depth limit.
+    unresolvable nodes, depth limit, or a self-referencing cycle (e.g. incremental models
+    that select from `{{ this }}` produce M.col → M.col in CLL).
     """
     from dbt_osmosis.core.cll import (
         _SOURCE_INDEX,
@@ -379,6 +381,16 @@ def _find_cll_description(
 
     if max_depth is None:
         max_depth = get_config().cll_max_origin_depth
+
+    if visited is None:
+        visited = set()
+    key = (parent_model_name.lower(), parent_col_name.lower())
+    # Cycle guard — incremental self-refs (M.col → M.col) would otherwise burn the
+    # whole depth budget. Stop silently; the depth limit still catches non-cyclic
+    # pathological chains below.
+    if key in visited:
+        return None
+    visited.add(key)
 
     # 1. Depth guard — protects against cyclic or pathological lineage chains.
     if depth > max_depth:
@@ -464,6 +476,7 @@ def _find_cll_description(
         progenitor_col,
         depth + 1,
         max_depth,
+        visited,
     )
 
 
