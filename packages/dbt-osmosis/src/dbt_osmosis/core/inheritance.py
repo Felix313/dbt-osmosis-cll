@@ -18,38 +18,45 @@ __all__ = [
     "_clean_graph_edge",
     "_collect_column_variants",
     "_column_to_dict",
+    "_ensure_column_config_attr",
     "_find_matching_column",
     "_get_node_yaml",
     "_get_unrendered",
     "_merge_graph_node_data",
     "_read_ancestor_yaml_description",
+    "_safe_column_replace",
 ]
 
 
-def _column_to_dict(column: t.Any, **kwargs: t.Any) -> dict[str, t.Any]:
-    """Convert a ColumnInfo to dict, handling missing config attribute in dbt-core 1.10+.
+def _ensure_column_config_attr(column: t.Any) -> None:
+    """Ensure ColumnInfo has a 'config' attribute set.
 
-    In dbt-core 1.10+, ColumnInfo objects may not have a 'config' attribute set,
-    which causes mashumaro serialization to fail. This helper ensures the attribute
-    exists before calling to_dict().
-
-    Args:
-        column: A ColumnInfo object from dbt.artifacts.resources
-        **kwargs: Additional arguments to pass to to_dict() (e.g., omit_none=True)
-
-    Returns:
-        Dictionary representation of the column
-
+    In dbt-core 1.10+, ColumnInfo objects may be missing the 'config' attribute,
+    which causes mashumaro serialization (to_dict / replace) to fail. This helper
+    sets a default ColumnConfig() on the instance when the attribute is absent.
+    Safe to call repeatedly.
     """
-    if not hasattr(column, "config"):
-        try:
-            module = import_module("dbt.artifacts.resources.v1.components")
-            column_config = getattr(module, "ColumnConfig", None)
-            if column_config is not None:
-                t.cast("t.Any", column).config = column_config()
-        except (ImportError, AttributeError):
-            pass  # Older dbt version, attribute should already exist
+    if hasattr(column, "config"):
+        return
+    try:
+        module = import_module("dbt.artifacts.resources.v1.components")
+        column_config = getattr(module, "ColumnConfig", None)
+        if column_config is not None:
+            t.cast("t.Any", column).config = column_config()
+    except (ImportError, AttributeError):
+        pass  # Older dbt version, attribute should already exist
+
+
+def _column_to_dict(column: t.Any, **kwargs: t.Any) -> dict[str, t.Any]:
+    """Convert a ColumnInfo to dict, handling missing config attribute in dbt-core 1.10+."""
+    _ensure_column_config_attr(column)
     return column.to_dict(**kwargs)
+
+
+def _safe_column_replace(column: t.Any, **kwargs: t.Any) -> t.Any:
+    """ColumnInfo.replace() guarded against the dbt 1.10+ missing-config crash."""
+    _ensure_column_config_attr(column)
+    return column.replace(**kwargs)
 
 
 def _initialize_column_knowledge(column: t.Any, node: ResultNode) -> dict[str, t.Any]:

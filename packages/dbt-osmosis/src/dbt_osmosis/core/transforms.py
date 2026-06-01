@@ -351,7 +351,9 @@ def inherit_upstream_column_knowledge(
             updated_metadata,
             name,
         )
-        node.columns[name] = node_column.replace(**updated_metadata)
+        from dbt_osmosis.core.inheritance import _safe_column_replace
+
+        node.columns[name] = _safe_column_replace(node_column, **updated_metadata)
 
 
 def _find_cll_description(
@@ -676,7 +678,9 @@ def inherit_upstream_column_knowledge_cll(
                 col_name,
                 list(update_kwargs.keys()),
             )
-            node.columns[col_name] = node_col.replace(**update_kwargs)
+            from dbt_osmosis.core.inheritance import _safe_column_replace
+
+            node.columns[col_name] = _safe_column_replace(node_col, **update_kwargs)
 
 
 @_transform_op("Inject Missing Columns")
@@ -1285,7 +1289,9 @@ def annotate_column_origins(
                 replace_kwargs: dict[str, t.Any] = {"meta": stale_meta, "description": stripped_desc}
                 if cleaned_config is not None:
                     replace_kwargs["config"] = cleaned_config
-                node.columns[col_name] = node_col.replace(**replace_kwargs)
+                from dbt_osmosis.core.inheritance import _safe_column_replace
+
+                node.columns[col_name] = _safe_column_replace(node_col, **replace_kwargs)
             continue
 
         result = result_by_col.get(col_name.lower())
@@ -1334,7 +1340,9 @@ def annotate_column_origins(
                     replace_kwargs["description"] = central_doc
 
             if replace_kwargs:
-                node.columns[col_name] = node_col.replace(**replace_kwargs)
+                from dbt_osmosis.core.inheritance import _safe_column_replace
+
+                node.columns[col_name] = _safe_column_replace(node_col, **replace_kwargs)
             continue
 
         new_meta = dict(node_col.meta or {})
