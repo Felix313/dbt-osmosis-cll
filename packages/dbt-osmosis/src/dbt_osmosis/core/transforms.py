@@ -842,8 +842,6 @@ def inject_missing_columns(
                 else:
                     gen_col["data_type"] = dtype
             node.columns[final_name] = ColumnInfo.from_dict(gen_col)
-            if hasattr(node.columns[final_name], "config"):
-                delattr(node.columns[final_name], "config")
         elif (
             node.resource_type == NodeType.Source
             and incoming_meta.comment
