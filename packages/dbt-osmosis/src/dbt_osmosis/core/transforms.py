@@ -759,7 +759,7 @@ def inject_missing_columns(
         logger.debug(":no_entry_sign: Skipping column injection (skip_add_source_columns=True).")
         return
 
-    from dbt_osmosis.core.cll import get_model_columns_from_cll
+    from dbt_osmosis.core.cll import descriptions_equivalent, get_model_columns_from_cll
     from dbt_osmosis.core.introspection import normalize_column_name
 
     incoming_columns: dict[str, t.Any] | None = None
@@ -862,7 +862,9 @@ def inject_missing_columns(
                  == compare_name.lower()),
                 None,
             )
-            if existing_col is not None and existing_col.description.strip() != incoming_meta.comment.strip():
+            if existing_col is not None and not descriptions_equivalent(
+                existing_col.description, incoming_meta.comment,
+            ):
                 logger.info(
                     ":pencil: Updating source column description from prod => %s in node => %s",
                     incoming_name,
@@ -1213,6 +1215,7 @@ def annotate_column_origins(
     """
     from dbt.artifacts.resources.types import NodeType
     from dbt_osmosis.core.cll import (
+        descriptions_equivalent,
         format_aggregate_from_tag,
         format_aggregate_in_tag,
         format_computed_origin_tag,
@@ -1571,7 +1574,11 @@ def annotate_column_origins(
             origin_annotation: str | None = None
             annotation_src_desc: str | None = None
             if _get_setting_for_node("annotation-include-source-description", node, fallback=True):
-                annotation_src_desc = source_desc if source_desc and source_desc.strip() != base_desc else None
+                annotation_src_desc = (
+                    source_desc
+                    if source_desc and not descriptions_equivalent(source_desc, base_desc)
+                    else None
+                )
             if is_name_changed:
                 # Renamed: always annotate (shows the original col name — not obvious from YAML).
                 if is_pure_rename:

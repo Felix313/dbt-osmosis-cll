@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import threading
 import types
 import typing as t
@@ -723,6 +724,26 @@ def format_generated_tag(generated_expr: str, schema: str, model: str) -> str:
     """Return annotation for a zero-arg system function: ``Generated CURRENT_DATE in: SCHEMA.MODEL``."""
     cfg = get_config()
     return _wrap_annotation(f"{cfg.annotation_generated} {generated_expr} in: {schema}.{model}")
+
+
+_WS_NORMALIZE_RE = re.compile(r"\s+")
+
+
+def descriptions_equivalent(a: str | None, b: str | None) -> bool:
+    """True when two descriptions differ only in whitespace / line-wrap.
+
+    Database comments come back as single-line strings while YAML stores them
+    wrapped at a fixed width — they describe the same content but are not
+    byte-equal. Collapsing internal whitespace before compare makes the
+    "is this a real change?" check robust to wrap differences and prevents
+    spurious source refresh updates that would in turn flap the annotation
+    layer on the very next run (idempotency bug).
+    """
+    if not a and not b:
+        return True
+    if not a or not b:
+        return False
+    return _WS_NORMALIZE_RE.sub(" ", a).strip() == _WS_NORMALIZE_RE.sub(" ", b).strip()
 
 
 def strip_annotation_tags(description: str) -> str:
