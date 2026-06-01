@@ -564,7 +564,21 @@ def _compute_column_origin(
     if result is None:
         return None
 
-    # Multi-source computed: column is born in this model (UNION ALL, multi-arg expression…).
+    # Union column: column is born in this model from multiple branches.
+    # Return the "computed in: SCHEMA.MODEL" sentinel so annotate writes the
+    # union-marker annotation rather than picking an arbitrary branch and
+    # silently inheriting its description. Description inheritance for unions
+    # is handled separately by the agreement-aware walker in
+    # ``inherit_upstream_column_knowledge_cll`` / ``_find_cll_description``.
+    if getattr(result, "is_union", False):
+        schema = (
+            getattr(getattr(node, "unrendered_config", None), "schema", None)
+            or getattr(node, "schema", None)
+            or ""
+        )
+        return (str(schema).upper(), node.name.upper(), "", column_name.upper())
+
+    # Multi-source computed: column is born in this model (multi-arg expression…).
     # Return (schema, model, "") as a sentinel so the caller can write the "computed in: SCHEMA.MODEL"
     # annotation rather than silently dropping it.
     if (result.progenitor_column is None or result.progenitor_column == "") and result.is_computed:
@@ -601,12 +615,67 @@ def _compute_column_origin(
         schema = (getattr(src_node, "schema", None) or "").upper()
         return (schema, progenitor_lower.upper(), progenitor_col.upper(), progenitor_col.upper())
 
-    # Recurse into the progenitor dbt model
+    # Walker semantics: if the progenitor already has a meaningful description
+    # (in either the YAML buffer or the in-memory manifest), stop there instead
+    # of recursing all the way to the source. This keeps annotate's "deep
+    # tracer" consistent with inherit's chain walker, eliminating a class of
+    # non-idempotency bugs where intermediate models populated during the run
+    # change which upstream gets credited as the origin.
     model_node = _NODE_INDEX[project_dir].get(progenitor_lower)
+    if model_node is not None and _node_has_real_description(
+        context, model_node, progenitor_col
+    ):
+        schema = (
+            getattr(getattr(model_node, "unrendered_config", None), "schema", None)
+            or getattr(model_node, "schema", None)
+            or ""
+        )
+        return (
+            str(schema).upper(),
+            progenitor_lower.upper(),
+            progenitor_col.upper(),
+            progenitor_col.upper(),
+        )
+
+    # Recurse into the progenitor dbt model
     if model_node is not None:
         return _compute_column_origin(context, model_node, progenitor_col, project_dir, _depth + 1)
 
     return None
+
+
+def _node_has_real_description(
+    context: YamlRefactorContextProtocol, node: t.Any, column_name: str
+) -> bool:
+    """True iff the column has a non-placeholder description after annotation strip.
+
+    Used by ``_compute_column_origin`` so its walking semantics match the
+    inherit walker (``_find_cll_description``): both stop at the first node in
+    the chain that carries a real description, instead of one consumer racing
+    to the leaf source while the other stops at the first populated ancestor.
+    Reads the YAML buffer first (parallel-safe, reflects pre-pipeline state)
+    then falls back to the in-memory manifest (live during the run).
+    """
+    try:
+        from dbt_osmosis.core.inheritance import _read_ancestor_yaml_description
+    except Exception:  # noqa: BLE001 — defensive: missing dep means treat as no description
+        return False
+
+    variants = [column_name, column_name.upper(), column_name.lower()]
+    yaml_desc = _read_ancestor_yaml_description(context, node, variants)
+    if yaml_desc:
+        cleaned = strip_annotation_tags(yaml_desc).strip()
+        if cleaned and cleaned not in context.placeholders:
+            return True
+    cols = getattr(node, "columns", {})
+    col_info = next(
+        (v for k, v in cols.items() if k.lower() == column_name.lower()), None
+    )
+    if col_info is None:
+        return False
+    raw = getattr(col_info, "description", None) or ""
+    cleaned = strip_annotation_tags(raw).strip()
+    return bool(cleaned) and cleaned not in context.placeholders
 
 
 def get_origin_source_description(

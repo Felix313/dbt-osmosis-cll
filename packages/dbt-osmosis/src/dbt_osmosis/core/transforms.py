@@ -470,16 +470,46 @@ def _find_cll_description(
     if parent_result is None:
         return None
 
-    # 7. Stop at computed walls — no single traceable upstream column.
+    # 7a. Union column — agreement-aware: recurse into every branch, then
+    # accept the description iff at most one distinct non-empty answer is
+    # found. Empty parents are silent (no opinion). Two or more genuinely
+    # different descriptions = real semantic conflict, stop here.
     _is_aggregate = getattr(parent_result, "is_aggregate", False)
     _is_window = getattr(parent_result, "is_window", False)
     _is_union = getattr(parent_result, "is_union", False)
     _is_literal = getattr(parent_result, "is_literal", False)
     _is_generated = getattr(parent_result, "is_generated", False)
+    if _is_union:
+        union_branches = getattr(parent_result, "union_branches", []) or []
+        if not union_branches:
+            return None
+        from dbt_osmosis.core.cll import descriptions_equivalent
+
+        branch_descs: list[str] = []
+        for branch_model, branch_col in union_branches:
+            branch_desc = _find_cll_description(
+                context,
+                branch_model,
+                branch_col,
+                depth + 1,
+                max_depth,
+                visited,
+            )
+            if branch_desc:
+                branch_descs.append(branch_desc)
+        if not branch_descs:
+            return None
+        first = branch_descs[0]
+        if all(descriptions_equivalent(first, other) for other in branch_descs[1:]):
+            return first
+        # Real conflict — silent stop. Description must be set manually at
+        # the union node itself.
+        return None
+
+    # 7b. Other computed walls — no single traceable upstream column.
     if (
         _is_aggregate
         or _is_window
-        or _is_union
         or _is_literal
         or _is_generated
         or (parent_result.is_computed and parent_result.progenitor_column is None)
@@ -587,7 +617,7 @@ def inherit_upstream_column_knowledge_cll(
             # CLL has no entry for this column in this model → skip.
             continue
 
-        # --- Skip columns with no single traceable upstream (annotate step handles them) ---
+        # --- Classify the column ---
         _is_aggregate = getattr(result, "is_aggregate", False)
         _is_window = getattr(result, "is_window", False)
         _is_union = getattr(result, "is_union", False)
@@ -598,44 +628,64 @@ def inherit_upstream_column_knowledge_cll(
         if (
             _is_aggregate
             or _is_window
-            or _is_union
             or _is_literal
             or _is_generated
             or _is_multi_src
         ):
             continue
 
-        if result.is_first_in_chain or result.progenitor_model is None:
+        if result.is_first_in_chain or (result.progenitor_model is None and not _is_union):
             # Column originates here; no upstream to inherit from.
             continue
 
-        # --- Rename check ---
-        # Strip adapter quote characters before comparing names — progenitor_column may carry
-        # SQL-quoted identifiers like '"COLUMN_NAME"' that are the same logical name.
-        _prog_col_stripped = (result.progenitor_column or "").strip('"').strip("'").lower()
-        is_rename = bool(result.is_rename) or (
-            result.progenitor_column is not None and col_name.lower() != _prog_col_stripped
-        )
+        if _is_union:
+            # Agreement-aware union resolution: every branch's description is
+            # collected via the walker; the result is accepted iff at most one
+            # distinct non-empty answer is found. Empty parents stay silent;
+            # only true semantic disagreement between two-or-more populated
+            # parents stops inheritance.
+            union_branches = getattr(result, "union_branches", []) or []
+            desc_to_apply: str | None = None
+            if union_branches:
+                from dbt_osmosis.core.cll import descriptions_equivalent
 
-        # Per-column override of inherit-through-renames is allowed.
-        inherit_renames = _get_setting_for_node(
-            "inherit-through-renames",
-            node,
-            col_name,
-            fallback=inherit_renames_node,
-        )
-
-        if is_rename and not inherit_renames:
-            # Rename detected and not configured to follow → skip description, still do tags/meta.
-            desc_to_apply = None
+                branch_descs: list[str] = []
+                for branch_model, branch_col in union_branches:
+                    bd = _find_cll_description(context, branch_model, branch_col)
+                    if bd:
+                        branch_descs.append(bd)
+                if branch_descs:
+                    first = branch_descs[0]
+                    if all(descriptions_equivalent(first, other) for other in branch_descs[1:]):
+                        desc_to_apply = first
         else:
-            # Walk the CLL progenitor chain for the closest ancestor with a real description.
-            progenitor_col = (result.progenitor_column or col_name).strip('"').strip("'")
-            desc_to_apply = _find_cll_description(
-                context,
-                result.progenitor_model.lower(),
-                progenitor_col,
+            # --- Rename check ---
+            # Strip adapter quote characters before comparing names — progenitor_column may carry
+            # SQL-quoted identifiers like '"COLUMN_NAME"' that are the same logical name.
+            _prog_col_stripped = (result.progenitor_column or "").strip('"').strip("'").lower()
+            is_rename = bool(result.is_rename) or (
+                result.progenitor_column is not None and col_name.lower() != _prog_col_stripped
             )
+
+            # Per-column override of inherit-through-renames is allowed.
+            inherit_renames = _get_setting_for_node(
+                "inherit-through-renames",
+                node,
+                col_name,
+                fallback=inherit_renames_node,
+            )
+
+            if is_rename and not inherit_renames:
+                # Rename detected and not configured to follow → skip description, still do tags/meta.
+                desc_to_apply = None
+            else:
+                # Walk the CLL progenitor chain for the closest ancestor with a real description.
+                progenitor_col = (result.progenitor_column or col_name).strip('"').strip("'")
+                desc_to_apply = _find_cll_description(
+                    context,
+                    result.progenitor_model.lower(),
+                    progenitor_col,
+                )
 
         # --- desc-owner: should we overwrite the existing description? ---
         desc_authority = _get_setting_for_node("desc-owner", node, col_name, fallback="this")
@@ -656,10 +706,18 @@ def inherit_upstream_column_knowledge_cll(
                     update_kwargs["description"] = clean_desc
 
         # --- Inherit tags and meta from the immediate CLL progenitor (not the full chain) ---
-        prog_lower = result.progenitor_model.lower()
-        progenitor_node = _SOURCE_INDEX[project_dir].get(prog_lower) or _NODE_INDEX[
-            project_dir
-        ].get(prog_lower)
+        # Unions have no single progenitor — skip tag/meta merge for them. Their
+        # branches' tags/meta would have to be unioned which has no clean
+        # interpretation (set semantics for tags would lose origin; meta keys
+        # could collide). Tags/meta at union nodes are expected to be authored
+        # locally, like the description itself when branches disagree.
+        if result.progenitor_model is None:
+            progenitor_node = None
+        else:
+            prog_lower = result.progenitor_model.lower()
+            progenitor_node = _SOURCE_INDEX[project_dir].get(prog_lower) or _NODE_INDEX[
+                project_dir
+            ].get(prog_lower)
         if progenitor_node is not None:
             prog_col_name = (result.progenitor_column or col_name).strip('"').strip("'")
             prog_cols = getattr(progenitor_node, "columns", {})
