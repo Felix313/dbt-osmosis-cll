@@ -686,6 +686,7 @@ def sync_node_to_yaml(
     node: ResultNode | None = None,
     *,
     commit: bool = True,
+    failures: list[tuple[str, str]] | None = None,
 ) -> None:
     """Synchronize a single node's columns, description, tags, meta, etc. from the manifest into its corresponding YAML file.
 
@@ -710,19 +711,32 @@ def sync_node_to_yaml(
     if node is None:
         logger.info(":wave: No single node specified; synchronizing all matched nodes.")
 
-        def _sync_group(group: list[ResultNode]) -> None:
-            if len(group) == 1:
-                sync_node_to_yaml(context, group[0], commit=commit)
-                return
+        def _sync_group(group: list[ResultNode]) -> tuple[list[ResultNode], BaseException | None]:
+            # Catch per-group so one bad node does not abort the whole batch commit.
+            try:
+                if len(group) == 1:
+                    sync_node_to_yaml(context, group[0], commit=commit)
+                else:
+                    versioned_group = t.cast("list[ModelNode]", group)
+                    _sync_versioned_model_group_to_yaml(
+                        context, versioned_group, commit=commit
+                    )
+            except Exception as e:  # noqa: BLE001 — collect & report, never abort the batch
+                return group, e
+            return group, None
 
-            versioned_group = t.cast("list[ModelNode]", group)
-            _sync_versioned_model_group_to_yaml(context, versioned_group, commit=commit)
-
-        for _ in context.pool.map(
+        for grp, err in context.pool.map(
             _sync_group,
             _group_sync_nodes(context),
         ):
-            ...
+            if err is not None:
+                for n in grp:
+                    msg = f"{type(err).__name__}: {err}"
+                    logger.error(
+                        ":boom: Commit failed for => %s: %s", n.unique_id, msg,
+                    )
+                    if failures is not None:
+                        failures.append((n.unique_id, msg))
         return
 
     # Sync the single node

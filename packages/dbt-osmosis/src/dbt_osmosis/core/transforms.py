@@ -161,21 +161,43 @@ class TransformPipeline:
         )
 
         def _commit() -> None:
-            """Commit changes to YAML files. Designed for use as an atexit handler."""
+            """Commit changes to YAML files. Designed for use as an atexit handler.
+
+            Per-node errors are collected (not raised) and surfaced as a single
+            run-end summary so the user does not have to scroll the log to find
+            them.
+            """
             logger.info(":hourglass: Committing all changes to YAML files in batch.")
             _commit_start = time.time()
+            failures: list[tuple[str, str]] = []
             try:
                 from dbt_osmosis.core.sync_operations import sync_node_to_yaml
 
-                sync_node_to_yaml(context, node, commit=True)
-                _commit_end = time.time()
-                logger.info(
-                    ":checkered_flag: YAML commits completed in => %.2fs",
-                    _commit_end - _commit_start,
-                )
+                sync_node_to_yaml(context, node, commit=True, failures=failures)
             except Exception as e:
-                # Log error but don't raise during atexit (prevents shutdown issues)
-                logger.error(":boom: Failed to commit YAML changes during shutdown: %s", e)
+                # Catch-all so atexit shutdown is never interrupted.
+                logger.error(":boom: Batch commit aborted: %s", e)
+                failures.append(("<batch>", f"{type(e).__name__}: {e}"))
+
+            _commit_end = time.time()
+            logger.info(
+                ":checkered_flag: YAML commits completed in => %.2fs (%d failure(s))",
+                _commit_end - _commit_start,
+                len(failures),
+            )
+            self._metadata["commit_failures"] = failures
+            if failures:
+                sep = "=" * 72
+                lines = [
+                    "",
+                    sep,
+                    f":boom: [bold red]YAML COMMIT FAILURES — {len(failures)} node(s) NOT written[/bold red]",
+                    sep,
+                ]
+                for unique_id, msg in failures:
+                    lines.append(f"  - {unique_id}: {msg}")
+                lines.append(sep)
+                logger.error("\n".join(lines))
 
         if self.commit_mode == "batch":
             _commit()
