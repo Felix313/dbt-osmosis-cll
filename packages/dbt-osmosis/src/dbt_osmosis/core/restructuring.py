@@ -13,6 +13,7 @@ if t.TYPE_CHECKING:
     from dbt_osmosis.core.dbt_protocols import YamlRefactorContextProtocol
 
 from dbt_osmosis.core import logger
+from dbt_osmosis.core.inheritance import _column_to_dict
 
 __all__ = [
     "PLAN_OUTPUT_TRUNCATION_LENGTH",
@@ -64,7 +65,7 @@ def _generate_minimal_model_yaml(
     logger.debug(":baby: Generating minimal yaml for Model/Seed => %s", node.name)
     columns = []
     for col_name, col_info in node.columns.items():
-        col_dict = col_info.to_dict(omit_none=True)
+        col_dict = _column_to_dict(col_info, omit_none=True)
         # In fusion_compat mode, preserve 'config' (meta/tags nested inside it).
         # In classic mode, strip 'config' (meta/tags stay at top level).
         if fusion_compat:
@@ -88,7 +89,7 @@ def _generate_minimal_source_yaml(
     logger.debug(":baby: Generating minimal yaml for Source => %s", node.name)
     columns = []
     for col_name, col_info in node.columns.items():
-        col_dict = col_info.to_dict(omit_none=True)
+        col_dict = _column_to_dict(col_info, omit_none=True)
         # In fusion_compat mode, preserve 'config' (meta/tags nested inside it).
         # In classic mode, strip 'config' (meta/tags stay at top level).
         if fusion_compat:

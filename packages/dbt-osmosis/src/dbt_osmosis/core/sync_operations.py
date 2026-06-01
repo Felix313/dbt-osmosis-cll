@@ -59,7 +59,9 @@ def _sync_doc_section(
                 node.unique_id,
             )
             continue
-        cdict = meta.to_dict(omit_none=True)
+        from dbt_osmosis.core.inheritance import _column_to_dict
+
+        cdict = _column_to_dict(meta, omit_none=True)
         # Filter out fields added in dbt-core >= 1.9.6.
         # In fusion_compat mode, preserve 'config' (meta/tags will be nested inside it).
         # In classic mode, strip 'config' (meta/tags stay at top level).
