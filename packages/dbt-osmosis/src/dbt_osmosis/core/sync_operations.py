@@ -164,7 +164,7 @@ def _sync_doc_section(
 
             # Rebuild config.meta — strip osmosis-internal protection markers from
             # existing config.meta when they are no longer in the node's meta.  This
-            # prevents stale flags (e.g. "anchor-description" propagated from staging)
+            # prevents stale flags (e.g. "desc-owner" propagated from staging)
             # from accumulating in dp-layer YAML across successive osmosis runs.
             existing_config_meta: dict = config_value.get("meta", {}) if isinstance(config_value, dict) else {}
             preserved_existing = {k: v for k, v in existing_config_meta.items() if k not in get_managed_meta_keys()}

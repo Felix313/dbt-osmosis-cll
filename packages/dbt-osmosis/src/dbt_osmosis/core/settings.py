@@ -66,14 +66,13 @@ def get_managed_meta_keys() -> frozenset[str]:
     ``get_config()`` after the first read).  Keys in this set:
 
     - Must NOT propagate downstream into child-layer YAML via inheritance.
-    - ARE re-applied when the column locally owns them (e.g. ``anchor-description``
+    - ARE re-applied when the column locally owns them (e.g. ``desc-owner: aml``
       set by AML enrichment survives on the STG node that owns it).
     """
     from dbt_osmosis.config import get_config
     cfg = get_config()
     return frozenset({
-        "desc-owner",       # new unified ownership key (replaces anchor-description)
-        cfg.anchor_meta_key,    # legacy "anchor-description" key — kept for backward compat
+        "desc-owner",       # unified ownership key (upstream = force-inherit; any other value = anchored)
         cfg.meta_key_renamed_from,
         cfg.meta_key_derived_from,
         cfg.meta_key_computed_in,

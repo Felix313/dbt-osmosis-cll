@@ -14,7 +14,6 @@ Place ``.osmosis`` in your dbt project root, next to ``dbt_project.yml``:
     annotation-computed  = Computed in:
     annotation-namespace = MY-ORG
     annotation-separator = __________
-    anchor-meta-key      = anchor-description
     cll-cache-path       = target/cll_cache.json
     cll-max-origin-depth = 100
     column-docs-path     = docs/osmosis_column_references.yml
@@ -101,10 +100,6 @@ class OsmosisConfig:
     """Project-specific legacy tag prefixes to strip from descriptions (e.g. old pre-CLL osmosis
     tags). Configured via ``legacy-strip-markers`` in .osmosis as a comma-separated list.
     Example: ``legacy-strip-markers = OLD_ORIGIN:, OLD_DERIVED_IN:``"""
-
-    # ── Enrichment ───────────────────────────────────────────────────────────
-    anchor_meta_key: str = "anchor-description"
-    """``meta`` key set on enriched columns to protect them from osmosis overwrite."""
 
     # ── CLL cache ────────────────────────────────────────────────────────────
     cll_cache_path: str = "target/cll_cache.json"
@@ -336,7 +331,6 @@ def _load_config(start: Path) -> OsmosisConfig:
             annotation_generated               = _str("annotation-generated",        OsmosisConfig.annotation_generated),
             annotation_namespace               = _str("annotation-namespace",        OsmosisConfig.annotation_namespace),
             annotation_separator               = _str("annotation-separator",        OsmosisConfig.annotation_separator),
-            anchor_meta_key                    = _str("anchor-meta-key",      OsmosisConfig.anchor_meta_key),
             cll_cache_path                     = _str("cll-cache-path",       OsmosisConfig.cll_cache_path),
             cll_max_origin_depth               = _int("cll-max-origin-depth", OsmosisConfig.cll_max_origin_depth),
             column_docs_path                   = _str("column-docs-path",     OsmosisConfig.column_docs_path),

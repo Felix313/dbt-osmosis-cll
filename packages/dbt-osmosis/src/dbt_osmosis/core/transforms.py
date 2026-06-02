@@ -344,16 +344,16 @@ def inherit_upstream_column_knowledge(
             updated_metadata = {**updated_metadata, "description": _clean_desc}
 
         # Strip osmosis-internal protection markers from inherited meta.
-        # MANAGED keys (anchor_meta_key, meta_key_renamed_from, meta_key_derived_from,
+        # MANAGED keys (desc-owner, meta_key_renamed_from, meta_key_derived_from,
         # meta_key_computed_in) must not
         # propagate downstream, but ARE re-applied when the column locally owns them.
         # Both top-level meta AND config.meta are filtered (fusion_compat stores
-        # anchor-description in config.meta).
+        # desc-owner in config.meta).
         _managed = get_managed_meta_keys()
         if "meta" in updated_metadata and isinstance(updated_metadata["meta"], dict):
             local_meta = dict(node_column.meta or {})
             filtered_meta = {k: v for k, v in updated_metadata["meta"].items() if k not in _managed}
-            # Re-apply managed keys the column itself owns (e.g. anchor-description set by AML injection)
+            # Re-apply managed keys the column itself owns (e.g. desc-owner: aml set by AML injection)
             for key in _managed:
                 if key in local_meta:
                     filtered_meta[key] = local_meta[key]
@@ -598,7 +598,7 @@ def inherit_upstream_column_knowledge_cll(
     - Otherwise: walks the CLL progenitor chain to find the closest ancestor with a description.
     - Applies desc-owner logic: "upstream" always overwrites; any other value only fills gaps.
     - Tags and meta from the immediate CLL progenitor are inherited (not from the full chain).
-    - Managed meta keys (desc-owner, anchor-description, etc.) are filtered from inherited meta
+    - Managed meta keys (desc-owner, CLL origin tags, etc.) are filtered from inherited meta
       and re-applied only from the local column's own meta.
     - No name-matching fallback. CLL failure = column skipped, existing description preserved.
     """
@@ -1637,6 +1637,15 @@ def annotate_column_origins(
                 origin = ("", imm_model.upper(), imm_col.upper(), imm_col.upper())
 
             schema, origin_model, origin_col, entry_col = origin
+
+            # Self-referencing origin: the deep trace looped back to this node
+            # (e.g. an incremental model joined with {{ this }}, or a within-model
+            # rename that CLL cannot resolve past). Treat as unresolvable — strip
+            # stale tags and keep the column's own description unchanged.
+            if origin_model.upper() == node.name.upper():
+                base_desc = strip_annotation_tags((node_col.description or "").strip())
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
+                continue
 
             if not origin_col:
                 # Computed column found upstream — origin_model is where it was computed.

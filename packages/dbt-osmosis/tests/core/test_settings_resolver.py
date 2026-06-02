@@ -183,3 +183,44 @@ def test_column_not_found(resolver: SettingsResolver, sample_node: MockNode) -> 
     )
     # Should fall back to node-level settings (prefixed variant takes precedence)
     assert result is False
+
+
+class _ColumnConfig:
+    """Mock column-level config carrying a meta dict (dbt 1.10+)."""
+
+    def __init__(self, meta: dict | None = None) -> None:
+        self.meta = meta or {}
+
+
+class MockColumnWithConfig(MockColumn):
+    """Column whose settings live under config.meta (dbt 1.10+ / fusion-compat)."""
+
+    def __init__(self, name: str, meta: dict | None = None, config_meta: dict | None = None) -> None:
+        super().__init__(name, meta)
+        self.config = _ColumnConfig(config_meta)
+
+
+def test_resolve_column_level_config_meta(resolver: SettingsResolver) -> None:
+    """Column-level config.meta is honored (e.g. desc-owner: aml anchor written by AML enrichment).
+
+    dbt 1.10+ / fusion-compat YAML nests column meta under config.meta; the resolver
+    must read it so a column-level anchor actually overrides the layer default.
+    """
+    node = MockNode(
+        config_extra={"dbt-osmosis-options": {"desc-owner": "upstream"}},  # layer default
+        columns={"col1": MockColumnWithConfig("col1", config_meta={"desc-owner": "aml"})},
+    )
+    # Column-level config.meta must win over the layer-level upstream default.
+    assert resolver.resolve("desc-owner", node, column_name="col1", fallback="this") == "aml"
+
+
+def test_resolve_column_config_meta_dbt_osmosis_options(resolver: SettingsResolver) -> None:
+    """Column-level config.meta.dbt-osmosis-options.<key> is also honored."""
+    node = MockNode(
+        columns={
+            "col1": MockColumnWithConfig(
+                "col1", config_meta={"dbt-osmosis-options": {"desc-owner": "psa"}}
+            )
+        },
+    )
+    assert resolver.resolve("desc-owner", node, column_name="col1", fallback="this") == "psa"

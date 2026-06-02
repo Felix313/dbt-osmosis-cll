@@ -18,9 +18,10 @@ Quickstart::
     enrich_yaml_files(
         yml_paths=[Path("models/staging/my_model.yml")],
         fetcher=MyFetcher(),
-        # Mark enriched columns so osmosis propagation won't overwrite them.
-        # Must match the key you list in osmosis's protected-meta-keys config.
-        anchor_meta_key="anchor-description",
+        # Mark enriched columns as anchored so osmosis propagation won't overwrite
+        # them. desc-owner is the unified ownership key: any value other than
+        # "upstream" anchors the description at this model.
+        anchor_meta_key="desc-owner",
         # Optional: regex matching osmosis-propagated descriptions that are
         # safe to replace (fullmatch against existing description text).
         replaceable_pattern=re.compile(r"See parent:.*", re.DOTALL),

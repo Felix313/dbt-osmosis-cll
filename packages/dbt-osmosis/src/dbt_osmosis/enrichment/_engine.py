@@ -18,11 +18,62 @@ from ._merge import DescriptionFetcher, merge_description
 from ._yaml import render_model_yml, _DEFAULT_MAX_LINE_WIDTH
 
 
+# ── Anchor meta helpers (dbt >= 1.10: column/model meta lives under config.meta) ──
+# Writes always target config.meta; reads also accept legacy top-level meta so YAMLs
+# written by older runs still resolve. This keeps output dbt-1.10-correct and avoids
+# the churn of osmosis later relocating a top-level meta key into config.meta.
+
+def _read_anchor(entry: dict[str, t.Any], anchor_meta_key: str) -> t.Any:
+    """Read the anchor value from config.meta, falling back to legacy top-level meta."""
+    config = entry.get("config")
+    if isinstance(config, dict):
+        config_meta = config.get("meta")
+        if isinstance(config_meta, dict) and anchor_meta_key in config_meta:
+            return config_meta[anchor_meta_key]
+    meta = entry.get("meta")
+    if isinstance(meta, dict):
+        return meta.get(anchor_meta_key)
+    return None
+
+
+def _set_anchor(entry: dict[str, t.Any], anchor_meta_key: str, anchor_value: t.Any) -> None:
+    """Write the anchor under config.meta (dbt 1.10+); drop any stale legacy top-level copy."""
+    config = entry.setdefault("config", {})
+    config.setdefault("meta", {})[anchor_meta_key] = anchor_value
+    legacy = entry.get("meta")
+    if isinstance(legacy, dict) and anchor_meta_key in legacy:
+        legacy.pop(anchor_meta_key)
+        if not legacy:
+            entry.pop("meta", None)
+
+
+def _strip_anchor(entry: dict[str, t.Any], anchor_meta_key: str) -> bool:
+    """Remove the anchor from both config.meta and legacy meta. True if anything changed."""
+    changed = False
+    config = entry.get("config")
+    if isinstance(config, dict):
+        config_meta = config.get("meta")
+        if isinstance(config_meta, dict) and anchor_meta_key in config_meta:
+            config_meta.pop(anchor_meta_key)
+            changed = True
+            if not config_meta:
+                config.pop("meta", None)
+            if not config:
+                entry.pop("config", None)
+    legacy = entry.get("meta")
+    if isinstance(legacy, dict) and anchor_meta_key in legacy:
+        legacy.pop(anchor_meta_key)
+        changed = True
+        if not legacy:
+            entry.pop("meta", None)
+    return changed
+
+
 def enrich_yaml_files(
     yml_paths: list[Path],
     fetcher: DescriptionFetcher,
     *,
-    anchor_meta_key: str = "anchor-description",
+    anchor_meta_key: str = "desc-owner",
     anchor_value: bool | str = True,
     frozen_values: frozenset[bool | str] = frozenset({True}),
     replaceable_pattern: re.Pattern[str] | None = None,
@@ -46,18 +97,20 @@ def enrich_yaml_files(
        (batching is the fetcher's responsibility).
     3. **Merge** — apply :func:`merge_description` idempotency rules per column.
     4. **Write** — update YAML files.  For models matching ``model_anchor_globs``,
-       set ``meta.<anchor_meta_key>: true`` once at model level (not per column).
-       For all other enriched columns, set the anchor on the column entry.
+       set ``config.meta.<anchor_meta_key>: <anchor_value>`` once at model level
+       (not per column). For all other enriched columns, set the anchor on the
+       column entry.  Anchors are written under ``config.meta`` (dbt >= 1.10);
+       legacy top-level ``meta`` copies are read for back-compat and removed.
 
     Args:
         yml_paths: List of YAML file paths to process.
         fetcher: Provider of external descriptions.
-        anchor_meta_key: ``meta`` key set on enriched columns to protect them
-            from osmosis overwrite.
-        anchor_value: Value written to ``meta.<anchor_meta_key>`` for columns
+        anchor_meta_key: ``config.meta`` key set on enriched columns to protect
+            them from osmosis overwrite (e.g. ``desc-owner``).
+        anchor_value: Value written to ``config.meta.<anchor_meta_key>`` for columns
             enriched by this script (e.g. ``"aml"`` or ``"psa"``).  Default
             ``True`` preserves backward-compatible behaviour.
-        frozen_values: Set of ``meta.<anchor_meta_key>`` values that cause a
+        frozen_values: Set of ``config.meta.<anchor_meta_key>`` values that cause a
             column (or model) to be skipped entirely.  Defaults to
             ``frozenset({True})`` — only developer-frozen columns are skipped.
             Pass e.g. ``frozenset({True, "aml"})`` from a PSA script so it
@@ -71,9 +124,9 @@ def enrich_yaml_files(
         verbose: Print per-column detail.
         max_line_width: Total line width for description word-wrapping.
         model_anchor_globs: Shell-style glob patterns (e.g. ``["STG_MY_SOURCE__*"]``).
-            Matching models get ``meta.<anchor_meta_key>: <anchor_value>`` written
-            once at model level instead of per column — keeps YAML clean while
-            blocking osmosis downstream propagation equally effectively.
+            Matching models get ``config.meta.<anchor_meta_key>: <anchor_value>``
+            written once at model level instead of per column — keeps YAML clean
+            while blocking osmosis downstream propagation equally effectively.
         skip_columns: Uppercase column names to skip entirely — no enrichment and
             no anchor tag written.  Intended for columns managed centrally by
             osmosis (e.g. ``osmosis_column_references.yml`` entries such as
@@ -109,7 +162,7 @@ def enrich_yaml_files(
                 model_anchor_files.setdefault(yml_path, set()).add(model_name)
             # Skip column collection if model-level anchor is in frozen_values —
             # e.g. True (developer-frozen) or a peer system's anchor ("aml").
-            if (model_entry.get("meta") or {}).get(anchor_meta_key) in frozen_values:
+            if _read_anchor(model_entry, anchor_meta_key) in frozen_values:
                 if verbose:
                     print(f"  [SKIP] {model_name}: model-level anchor set, skipping all columns")
                 continue
@@ -121,7 +174,7 @@ def enrich_yaml_files(
                 if skip_columns and col_name in skip_columns:
                     continue
                 # Skip columns whose anchor is in frozen_values (developer-frozen or peer-system-owned).
-                if col_entry.get("meta", {}).get(anchor_meta_key) in frozen_values:
+                if _read_anchor(col_entry, anchor_meta_key) in frozen_values:
                     continue
                 # In default mode: only enrich empty / auto-generated descriptions.
                 # In force mode: enrich all non-anchored columns (external source is leading).
@@ -215,7 +268,10 @@ def enrich_yaml_files(
                 if new_desc is not None:
                     if dry_run:
                         old = col_entry.get("description", "<none>")
-                        anchor_note = "model-level" if use_model_anchor else f"column meta.{anchor_meta_key}"
+                        anchor_note = (
+                            "model-level" if use_model_anchor
+                            else f"column config.meta.{anchor_meta_key}"
+                        )
                         print(f"\n[DRY RUN] {yml_path.name}  ->  {col_name}")
                         print(f"  OLD: {old!r}")
                         print(f"  NEW: {new_desc!r}")
@@ -224,21 +280,17 @@ def enrich_yaml_files(
                         col_entry["description"] = new_desc
                         if not use_model_anchor:
                             # Per-column anchor — marks this column as owned by the enrichment source
-                            col_entry.setdefault("meta", {})[anchor_meta_key] = anchor_value
+                            _set_anchor(col_entry, anchor_meta_key, anchor_value)
 
                 # When the model gets a model-level anchor, strip per-column anchor
                 # from ALL columns (not just ones updated this run) — keeps YAML clean
                 # and avoids stale per-column anchors from previous runs accumulating.
                 if use_model_anchor and not dry_run:
-                    col_meta = col_entry.get("meta")
-                    if isinstance(col_meta, dict) and anchor_meta_key in col_meta:
-                        col_meta.pop(anchor_meta_key)
-                        if not col_meta:
-                            col_entry.pop("meta", None)
+                    _strip_anchor(col_entry, anchor_meta_key)
 
             # Write model-level ownership anchor once for models that warrant it
             if use_model_anchor and not dry_run:
-                model_entry.setdefault("meta", {})[anchor_meta_key] = anchor_value
+                _set_anchor(model_entry, anchor_meta_key, anchor_value)
 
         if not dry_run:
             yml_path.write_text(
@@ -266,16 +318,12 @@ def enrich_yaml_files(
             if model_entry.get("name", "") not in anchored_model_names:
                 continue
             # Ensure model-level ownership anchor is present (also upgrades legacy True → anchor_value)
-            if (model_entry.get("meta") or {}).get(anchor_meta_key) != anchor_value:
-                model_entry.setdefault("meta", {})[anchor_meta_key] = anchor_value
+            if _read_anchor(model_entry, anchor_meta_key) != anchor_value:
+                _set_anchor(model_entry, anchor_meta_key, anchor_value)
                 changed = True
             # Strip stale per-column anchors — model-level anchor supersedes them
             for col_entry in model_entry.get("columns", []):
-                col_meta = col_entry.get("meta")
-                if isinstance(col_meta, dict) and anchor_meta_key in col_meta:
-                    col_meta.pop(anchor_meta_key)
-                    if not col_meta:
-                        col_entry.pop("meta", None)
+                if _strip_anchor(col_entry, anchor_meta_key):
                     changed = True
         if changed and not dry_run:
             yml_path.write_text(

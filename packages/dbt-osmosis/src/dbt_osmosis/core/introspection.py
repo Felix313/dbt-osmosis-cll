@@ -677,10 +677,22 @@ class SettingsResolver:
 
         # Column-level sources (if column specified) - HIGHEST precedence
         if column_name and (column := node.columns.get(column_name)):
+            # dbt 1.10+ nests column meta under config.meta (and fusion-compat YAML
+            # output writes it there). Read both column.meta and column.config.meta so
+            # a column-level setting (e.g. desc-owner: aml) is honored wherever it lands.
+            col_config_meta: dict[str, t.Any] = {}
+            col_config = getattr(column, "config", None)
+            if col_config is not None:
+                _cm = getattr(col_config, "meta", None)
+                if isinstance(_cm, dict):
+                    col_config_meta = _cm
             sources = [
                 column.meta,
                 column.meta.get("dbt-osmosis-options", {}),
                 column.meta.get("dbt_osmosis_options", {}),
+                col_config_meta,
+                col_config_meta.get("dbt-osmosis-options", {}),
+                col_config_meta.get("dbt_osmosis_options", {}),
             ]
             # Add node-level sources after column sources
             sources.extend([
