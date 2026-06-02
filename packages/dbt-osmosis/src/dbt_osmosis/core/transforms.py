@@ -377,6 +377,31 @@ def inherit_upstream_column_knowledge(
         node.columns[name] = _safe_column_replace(node_column, **updated_metadata)
 
 
+def _owns_description(
+    context: YamlRefactorContextProtocol, node: t.Any, column_name: str
+) -> bool:
+    """True if *column_name* on *node* OWNS its description rather than inheriting it.
+
+    ``desc-owner`` is the single ownership key: ``upstream`` means force-inherit
+    (the column holds a *copy* of its upstream description); any other value
+    (``this``, ``aml``, …) anchors the description at this model. An owning column
+    defines the authoritative "new truth" from here downstream and walls off
+    force-inheritance.
+
+    A non-owning column (``desc-owner: upstream``) merely holds a copy of its
+    upstream's description; the walker must resolve it transitively instead of
+    trusting the stored copy, otherwise a stale/incorrect copy gets laundered
+    downstream and propagation stops being idempotent.
+    """
+    from dbt_osmosis.core.introspection import _get_setting_for_node
+
+    cols = getattr(node, "columns", {})
+    actual = next((k for k in cols if k.lower() == column_name.lower()), column_name)
+
+    authority = _get_setting_for_node("desc-owner", node, actual, fallback="this")
+    return str(authority).lower() != "upstream"
+
+
 def _find_cll_description(
     context: YamlRefactorContextProtocol,
     parent_model_name: str,
@@ -385,12 +410,21 @@ def _find_cll_description(
     max_depth: int | None = None,
     visited: set[tuple[str, str]] | None = None,
 ) -> str | None:
-    """Walk the CLL progenitor chain to find the closest ancestor with a real description.
+    """Resolve the authoritative description for an upstream column via CLL lineage.
 
-    Reads from stable YAML buffers (not in-memory manifest) — safe for parallel execution.
-    Stops at: computed walls, aggregate/window/union/literal/generated columns, source nodes,
-    unresolvable nodes, depth limit, or a self-referencing cycle (e.g. incremental models
-    that select from `{{ this }}` produce M.col → M.col in CLL).
+    The walk returns a node's *own stored* description only when that node OWNS it —
+    i.e. it is a source, an anchored column (``desc-owner`` != ``upstream``),
+    a column that originates in the model (``is_first_in_chain`` / no progenitor), or a
+    computed wall (aggregate/window/literal/generated/multi-source) where the value is
+    born. For a non-anchored pure passthrough/rename the stored description is just a
+    force-inherited *copy* of the upstream, so the walk recurses through it instead of
+    returning it. This keeps propagation a pure function of {origins, anchors, config}
+    and therefore idempotent in a single pass — a stale copy on an intermediate node is
+    never laundered downstream.
+
+    Stops at: anchors, computed walls, source nodes, origins, unresolvable nodes, depth
+    limit, or a self-referencing cycle (e.g. incremental models that select from
+    `{{ this }}` produce M.col → M.col in CLL).
     """
     from dbt_osmosis.core.cll import (
         _SOURCE_INDEX,
@@ -433,34 +467,33 @@ def _find_cll_description(
     if upstream_node is None:
         return None
 
-    # 3. In-memory manifest first — captures THIS run's progressive enrichment
-    # (upstream waves write here before downstream waves read it). The YAML
-    # buffer is a frozen pre-pipeline snapshot and would hide updates made by
-    # earlier waves in the same run.
-    cols = getattr(upstream_node, "columns", {})
-    col_info = next(
-        (v for k, v in cols.items() if k.lower() == parent_col_name.lower()), None
-    )
-    if col_info:
-        raw = getattr(col_info, "description", None) or ""
-        cleaned = strip_annotation_tags(raw).strip()
-        if cleaned and cleaned not in context.placeholders:
-            return cleaned
-
-    # 4. Fall back to the stable YAML buffer description (pre-run state on disk).
-    # Useful for sources / nodes that aren't in this run's candidate set.
-    variants = [parent_col_name, parent_col_name.upper(), parent_col_name.lower()]
-    yaml_desc = _read_ancestor_yaml_description(context, upstream_node, variants)
-    if yaml_desc:
-        cleaned = strip_annotation_tags(yaml_desc).strip()
-        if cleaned and cleaned not in context.placeholders:
-            return cleaned
-
-    # 5. Sources are terminal — CLL cannot recurse further (no compiled SQL).
-    if src_node is not None:
+    # Read this node's OWN stored description (in-memory first — surfaces anchors/origins
+    # enriched earlier in THIS run — then the stable YAML buffer for nodes outside the
+    # candidate set). Only returned for nodes that OWN their description; never for a
+    # non-anchored passthrough (whose stored value is just a force-inherited copy).
+    def _own_description() -> str | None:
+        cols = getattr(upstream_node, "columns", {})
+        col_info = next(
+            (v for k, v in cols.items() if k.lower() == parent_col_name.lower()), None
+        )
+        if col_info:
+            raw = getattr(col_info, "description", None) or ""
+            cleaned = strip_annotation_tags(raw).strip()
+            if cleaned and cleaned not in context.placeholders:
+                return cleaned
+        variants = [parent_col_name, parent_col_name.upper(), parent_col_name.lower()]
+        yaml_desc = _read_ancestor_yaml_description(context, upstream_node, variants)
+        if yaml_desc:
+            cleaned = strip_annotation_tags(yaml_desc).strip()
+            if cleaned and cleaned not in context.placeholders:
+                return cleaned
         return None
 
-    # 6. Ask CLL for this upstream column's own progenitor to continue the walk.
+    # 3. Sources are terminal origins — their DB/authored description is authoritative.
+    if src_node is not None:
+        return _own_description()
+
+    # 4. Ask CLL how this column is produced.
     parent_results = get_cll_results(context, model_node)
     parent_result = next(
         (
@@ -472,21 +505,31 @@ def _find_cll_description(
         None,
     )
     if parent_result is None:
-        return None
+        # No lineage for this column — best effort: trust whatever it stores.
+        return _own_description()
 
-    # 7a. Union column — agreement-aware: recurse into every branch, then
-    # accept the description iff at most one distinct non-empty answer is
-    # found. Empty parents are silent (no opinion). Two or more genuinely
-    # different descriptions = real semantic conflict, stop here.
+    # 5. Anchor = wall. A column that OWNS its description (desc-owner != upstream)
+    # defines the new truth from here downstream and overrules force-inheritance.
+    # Return it and stop walking — in either direction.
+    if _owns_description(context, model_node, parent_col_name):
+        own = _own_description()
+        if own is not None:
+            return own
+
     _is_aggregate = getattr(parent_result, "is_aggregate", False)
     _is_window = getattr(parent_result, "is_window", False)
     _is_union = getattr(parent_result, "is_union", False)
     _is_literal = getattr(parent_result, "is_literal", False)
     _is_generated = getattr(parent_result, "is_generated", False)
+
+    # 6. Union column — agreement-aware: recurse into every branch, then accept the
+    # description iff at most one distinct non-empty answer is found (single populated
+    # branch, or all branches agree). Two or more different descriptions = real semantic
+    # conflict; fall back to a locally authored description at the union node.
     if _is_union:
         union_branches = getattr(parent_result, "union_branches", []) or []
         if not union_branches:
-            return None
+            return _own_description()
         from dbt_osmosis.core.cll import descriptions_equivalent
 
         branch_descs: list[str] = []
@@ -502,15 +545,16 @@ def _find_cll_description(
             if branch_desc:
                 branch_descs.append(branch_desc)
         if not branch_descs:
-            return None
+            return _own_description()
         first = branch_descs[0]
         if all(descriptions_equivalent(first, other) for other in branch_descs[1:]):
             return first
-        # Real conflict — silent stop. Description must be set manually at
-        # the union node itself.
-        return None
+        # Real conflict — must be authored at the union node itself.
+        return _own_description()
 
-    # 7b. Other computed walls — no single traceable upstream column.
+    # 7. Computed wall — the value is BORN here (aggregate / window / literal / generated
+    # / multi-source expression). No single upstream column's description transfers, so
+    # return only a description authored HERE; never recurse into the computation inputs.
     if (
         _is_aggregate
         or _is_window
@@ -518,13 +562,15 @@ def _find_cll_description(
         or _is_generated
         or (parent_result.is_computed and parent_result.progenitor_column is None)
     ):
-        return None
+        return _own_description()
 
-    # 8. Stop if there is no progenitor to recurse into.
-    if parent_result.progenitor_model is None:
-        return None
+    # 8. Column originates in this model — nothing upstream to inherit from.
+    if parent_result.is_first_in_chain or parent_result.progenitor_model is None:
+        return _own_description()
 
-    # 9. Recurse into the grandparent (always follow the chain past intermediate renames).
+    # 9. Pure passthrough / rename and NOT anchored: this node's stored description is just
+    # a force-inherited copy of its upstream. Skip it and resolve transitively so a stale
+    # copy is never laundered downstream. Always follow the chain past intermediate renames.
     progenitor_col = (parent_result.progenitor_column or parent_col_name).strip('"').strip("'")
     return _find_cll_description(
         context,

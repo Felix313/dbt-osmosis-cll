@@ -415,3 +415,109 @@ def test_find_cll_description_returns_none_for_unresolvable_node():
     with patched(results={}, node_index={}):
         result = _find_cll_description(ctx, "missing", "col")
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Idempotency: stale inherited copies must not be laundered downstream
+# ---------------------------------------------------------------------------
+
+
+def test_find_cll_description_skips_inherited_copy_on_forced_passthrough():
+    """A non-anchored force-inherit passthrough holds only a *copy* of its upstream.
+
+    The walk must resolve transitively (recurse past it) instead of returning the
+    stored copy, so a stale value sitting below a computed wall is never laundered
+    downstream. Regression for the one-hop-per-run idempotency bug.
+    """
+    ctx = make_context()
+    # mid: force-inherit passthrough of an aggregate, carrying a STALE copy of the
+    # aggregate input's description (written by older tool code before the wall existed).
+    mid = FakeNode(
+        "mid",
+        {"COL": FakeColumn("COL", "Stale source desc")},
+        settings={("desc-owner", None): "upstream"},
+    )
+    agg = FakeNode("agg", {"COL": FakeColumn("COL", "")})  # aggregate, no own description
+    with patched(
+        results={
+            "mid": [cll("mid", "col", progenitor_model="agg", progenitor_column="col")],
+            "agg": [
+                cll(
+                    "agg",
+                    "col",
+                    progenitor_model="src",
+                    progenitor_column="src_col",
+                    is_aggregate=True,
+                )
+            ],
+        },
+        node_index={"mid": mid, "agg": agg},
+    ):
+        result = _find_cll_description(ctx, "mid", "col")
+    # The aggregate wall yields no inheritable description; the stale copy on `mid`
+    # must NOT be returned.
+    assert result is None
+
+
+def test_forced_child_below_aggregate_keeps_local_description():
+    """REPORTING scenario: a force-inherit child below an aggregate wall, whose parent
+    holds a stale inherited copy, must keep its own authored description (idempotent)."""
+    child = FakeNode(
+        "child",
+        {"COL": FakeColumn("COL", "letztes Auszugsdatum des Vertragskontos")},
+        settings={("desc-owner", None): "upstream"},
+    )
+    mid = FakeNode(
+        "mid",
+        {"COL": FakeColumn("COL", "Stale source desc")},
+        settings={("desc-owner", None): "upstream"},
+    )
+    agg = FakeNode("agg", {"COL": FakeColumn("COL", "")})
+    ctx = make_context()
+    with patched(
+        results={
+            "child": [cll("child", "col", progenitor_model="mid", progenitor_column="col")],
+            "mid": [cll("mid", "col", progenitor_model="agg", progenitor_column="col")],
+            "agg": [
+                cll(
+                    "agg",
+                    "col",
+                    progenitor_model="src",
+                    progenitor_column="src_col",
+                    is_aggregate=True,
+                )
+            ],
+        },
+        node_index={"mid": mid, "agg": agg},
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    assert child.columns["COL"].description == "letztes Auszugsdatum des Vertragskontos"
+
+
+def test_anchor_acts_as_wall_for_downstream_inheritance():
+    """An anchored (desc-owner: this) intermediate defines the new truth: downstream
+    force-inherit takes the anchor's description and the walk stops there, even though
+    the anchor is itself a passthrough of a deeper origin."""
+    child = FakeNode(
+        "child",
+        {"COL": FakeColumn("COL", "")},
+        settings={("desc-owner", None): "upstream"},
+    )
+    # mid is anchored (desc-owner: this) with its own authored description.
+    mid = FakeNode(
+        "mid",
+        {"COL": FakeColumn("COL", "Anchored truth")},
+        settings={("desc-owner", None): "this"},
+    )
+    deep = FakeNode("deep", {"COL": FakeColumn("COL", "Deep origin desc")})
+    ctx = make_context()
+    with patched(
+        results={
+            "child": [cll("child", "col", progenitor_model="mid", progenitor_column="col")],
+            "mid": [cll("mid", "col", progenitor_model="deep", progenitor_column="col")],
+        },
+        yaml_descs={("deep", "col"): "Deep origin desc"},
+        node_index={"mid": mid, "deep": deep},
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    assert child.columns["COL"].description == "Anchored truth"
