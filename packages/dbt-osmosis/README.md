@@ -182,15 +182,14 @@ These apply globally across the project.
 | `annotation-computed` | `Computed in:` | Multi-source / opaque expression (no single source). |
 | `annotation-aggregate-from` | `Aggregated from` | Single-source aggregate (followed by `MODEL.COL`). |
 | `annotation-aggregate-in` | `Aggregated in:` | Aggregate with no single source (`COUNT(*)`, `SUM(a+b)`). |
-| `annotation-window-from` | `Window from` | Window over one traceable column (followed by `MODEL.COL`). |
-| `annotation-window-in` | `Window in:` | Window with no traceable column (`ROW_NUMBER()`…). |
+| `annotation-window-from` | `Windowed from:` | Window over one traceable column (followed by `MODEL.COL`). |
+| `annotation-window-in` | `Windowed in:` | Window with no traceable column (`ROW_NUMBER()`…). |
 | `annotation-union` | `UNION in:` | Top-level UNION / UNION ALL / INTERSECT / EXCEPT column. |
 | `annotation-literal` | `Literal` | Hard-coded constant column. |
 | `annotation-generated` | `Generated` | Zero-arg system function (`CURRENT_DATE`, `UUID_STRING`…). |
 | `annotation-namespace` | `OSMOSIS` | Namespace label in the annotation block header. |
 | `annotation-separator` | `__________` | Visual separator line above the annotation block. |
 | `legacy-strip-markers` | _(empty)_ | Comma-separated legacy tag prefixes to strip from descriptions. |
-| `anchor-meta-key` | `anchor-description` | Meta key that pins a column description (skip propagation). |
 | `cll-cache-path` | `target/cll_cache.json` | On-disk CLL cache, relative to the project root. |
 | `cll-max-origin-depth` | `60` | Max model hops when tracing a column to its origin (cycle guard). |
 | `column-docs-path` | _(empty)_ | Flat YAML mapping `COLUMN → description`, auto-ignored by CLL (see below). |

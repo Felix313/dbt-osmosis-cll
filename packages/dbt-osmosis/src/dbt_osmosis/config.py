@@ -73,10 +73,10 @@ class OsmosisConfig:
     annotation_aggregate_in: str = "Aggregated in:"
     """Prefix for aggregate functions with no traceable source column (COUNT(*), multi-source SUM)."""
 
-    annotation_window_from: str = "Window from"
+    annotation_window_from: str = "Windowed from:"
     """Prefix for window functions with a traceable value column (SUM OVER, AVG OVER…). Column name follows."""
 
-    annotation_window_in: str = "Window in:"
+    annotation_window_in: str = "Windowed in:"
     """Prefix for window functions with no traceable value column (ROW_NUMBER, RANK, DENSE_RANK…)."""
 
     annotation_union: str = "UNION in:"

@@ -766,19 +766,19 @@ def format_aggregate_from_tag(progenitor_col: str, progenitor_model: str) -> str
 def format_aggregate_in_tag(schema: str, model: str) -> str:
     """Return annotation for an aggregate with no traceable source: ``Aggregated here``."""
     cfg = get_config()
-    return _wrap_annotation(f"{cfg.annotation_aggregate_in.rstrip(': ')} here")
+    return _wrap_annotation(f"{cfg.annotation_aggregate_in.removesuffix('in:').rstrip()} here")
 
 
 def format_window_from_tag(progenitor_col: str, progenitor_model: str) -> str:
-    """Return annotation for a window function with a traceable value column: ``Window from MODEL.COL``."""
+    """Return annotation for a window function with a traceable value column: ``Windowed from: MODEL.COL``."""
     cfg = get_config()
     return _wrap_annotation(f"{cfg.annotation_window_from} {progenitor_model}.{progenitor_col}")
 
 
 def format_window_in_tag(schema: str, model: str) -> str:
-    """Return annotation for a window function with no traceable source: ``Window here``."""
+    """Return annotation for a window function with no traceable source: ``Windowed here``."""
     cfg = get_config()
-    return _wrap_annotation(f"{cfg.annotation_window_in.rstrip(': ')} here")
+    return _wrap_annotation(f"{cfg.annotation_window_in.removesuffix('in:').rstrip()} here")
 
 
 def format_union_tag(schema: str, model: str) -> str:
@@ -787,7 +787,7 @@ def format_union_tag(schema: str, model: str) -> str:
     CLL does not distinguish UNION from UNION ALL, so a single label covers both.
     """
     cfg = get_config()
-    return _wrap_annotation(f"{cfg.annotation_union.rstrip(': ')} here")
+    return _wrap_annotation(f"{cfg.annotation_union.removesuffix('in:').rstrip()} here")
 
 
 def format_literal_tag(literal_value: str, schema: str, model: str) -> str:
@@ -805,7 +805,7 @@ def format_generated_tag(generated_expr: str, schema: str, model: str) -> str:
 def format_computed_here_tag() -> str:
     """Return annotation for a multi-source computed column born in this model: ``Computed here``."""
     cfg = get_config()
-    return _wrap_annotation(f"{cfg.annotation_computed.rstrip(': ')} here")
+    return _wrap_annotation(f"{cfg.annotation_computed.removesuffix('in:').rstrip()} here")
 
 
 _WS_NORMALIZE_RE = re.compile(r"\s+")
