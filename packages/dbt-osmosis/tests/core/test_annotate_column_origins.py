@@ -156,9 +156,8 @@ def test_aggregate_annotation_appended_when_if_altered():
     assert "in:" not in desc.split(cfg.annotation_aggregate_from, 1)[1]
 
 
-def test_union_no_self_annotation():
-    """UNION columns born in this model emit no annotation — 'UNION in: self' is self-evident."""
-    cfg = get_config()
+def test_union_annotation_here():
+    """UNION columns born in this model use the short 'here' form."""
     node = FakeNode("m", {"C": FakeColumn("C", "existing desc")})
     _annotate(
         node,
@@ -166,28 +165,26 @@ def test_union_no_self_annotation():
         settings={"annotate-column-origin-infos": "always"},
     )
     desc = node.columns["C"].description
-    assert cfg.annotation_union not in desc
-    assert cfg.annotation_separator not in desc
-    assert desc == "existing desc"
+    assert "here" in desc
+    assert "DC_STG.M" not in desc
 
 
-def test_literal_no_self_annotation():
-    """Literal columns emit no annotation — the value is in the SQL, not the YAML."""
-    cfg = get_config()
-    node = FakeNode("m", {"SRC": FakeColumn("SRC", "System source")})
+def test_literal_annotation_here():
+    """Literal columns use the short 'here' form, keeping the literal value."""
+    node = FakeNode("m", {"SRC": FakeColumn("SRC", "")})
     _annotate(
         node,
         results={"m": [cll("m", "src", is_literal=True, literal_value="'SAP'")]},
         settings={"annotate-column-origin-infos": "if_altered"},
     )
     desc = node.columns["SRC"].description
-    assert cfg.annotation_literal not in desc
-    assert desc == "System source"
+    assert "here" in desc
+    assert "'SAP'" in desc
+    assert "DC_STG.M" not in desc
 
 
-def test_multi_source_computed_no_self_annotation():
-    """Multi-source computed columns emit no annotation — 'computed in: self' is self-evident."""
-    cfg = get_config()
+def test_multi_source_computed_annotation_here():
+    """Multi-source computed columns use the short 'Computed here' form."""
     node = FakeNode("m", {"KPI": FakeColumn("KPI", "Business KPI")})
     _annotate(
         node,
@@ -195,8 +192,9 @@ def test_multi_source_computed_no_self_annotation():
         settings={"annotate-column-origin-infos": "if_altered"},
     )
     desc = node.columns["KPI"].description
-    assert cfg.annotation_computed not in desc
-    assert desc == "Business KPI"
+    assert "here" in desc
+    assert "DC_STG.M" not in desc
+    assert "Business KPI" in desc
 
 
 def test_never_mode_strips_stale_tags_without_annotating():

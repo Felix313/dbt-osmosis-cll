@@ -1338,6 +1338,7 @@ def annotate_column_origins(
         descriptions_equivalent,
         format_aggregate_from_tag,
         format_aggregate_in_tag,
+        format_computed_here_tag,
         format_computed_origin_tag,
         format_derived_tag,
         format_generated_tag,
@@ -1548,30 +1549,29 @@ def annotate_column_origins(
             if central_doc and not has_real_desc:
                 node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=central_doc, **_config_kwarg)
             elif _annotate_mode:
-                # Resolve tag — only "from:" variants that point to OTHER models are emitted.
-                # "in: THIS_MODEL" annotations (generated/literal/union/aggregate-in/window-in)
-                # are self-evident and add no value to a reader of this YAML, so they are
-                # suppressed. The column's own description is kept unchanged.
-                tag: str | None = None
-                if _is_aggregate:
+                if _is_union:
+                    tag = format_union_tag(node_schema, node.name.upper())
+                elif _is_literal:
+                    tag = format_literal_tag(_literal_val or "", node_schema, node.name.upper())
+                elif _is_generated:
+                    tag = format_generated_tag(_generated_val or "", node_schema, node.name.upper())
+                elif _is_aggregate:
                     if result.progenitor_column is not None and result.progenitor_model is not None:
                         tag = format_aggregate_from_tag(
                             result.progenitor_column.upper(), result.progenitor_model.upper()
                         )
-                    # else: aggregate with no traceable source — "in: self" → no tag
-                elif _is_window:
+                    else:
+                        tag = format_aggregate_in_tag(node_schema, node.name.upper())
+                else:  # _is_window
                     if result.progenitor_column is not None and result.progenitor_model is not None:
                         tag = format_window_from_tag(
                             result.progenitor_column.upper(), result.progenitor_model.upper()
                         )
-                    # else: window with no traceable source — "in: self" → no tag
-                # union / literal / generated always reference self → no tag
+                    else:
+                        tag = format_window_in_tag(node_schema, node.name.upper())
 
-                if tag is not None:
-                    new_desc = f"{base_desc}\n\n{tag}".strip() if has_real_desc else tag
-                    node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
-                else:
-                    node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
+                new_desc = f"{base_desc}\n\n{tag}".strip() if has_real_desc else tag
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
             else:
                 # Non-annotation mode: still propagate the immediate progenitor description.
                 # Without this, wrong descriptions written by a previous (buggy) CLL run
@@ -1609,9 +1609,10 @@ def annotate_column_origins(
             if central_doc and not has_real_desc:
                 node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=central_doc, **_config_kwarg)
             elif _annotate_mode:
-                # Multi-source computed in THIS model — "computed in: self" adds no value.
-                # Keep the column's own description; just strip stale tags.
-                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
+                # Multi-source: born in this model — use short "Computed here" form.
+                computed_tag = format_computed_here_tag()
+                new_desc = f"{base_desc}\n\n{computed_tag}".strip() if has_real_desc else computed_tag
+                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
             else:
                 # No annotation mode: still write stripped description to remove any old tags.
                 node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
