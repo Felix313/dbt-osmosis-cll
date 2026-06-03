@@ -83,8 +83,8 @@ def set_log_level(level: int | str) -> None:
         level = getattr(logging, level, logging.INFO)
     LOGGER.setLevel(level)
     for handler in LOGGER.handlers:
-        # NOTE: RotatingFileHandler is fixed at WARNING level.
-        if isinstance(handler, RichHandler):
+        # RotatingFileHandler is fixed at WARNING — only update StreamHandlers.
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, RotatingFileHandler):
             handler.setLevel(level)
 
 
