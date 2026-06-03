@@ -424,6 +424,17 @@ class SQLColumnParser:
                             if table_name not in ephemeral_cte_names:
                                 for cte in ctes:
                                     if cte.alias.lower() == table_name:
+                                        # Don't unwrap a set-op CTE: descending into
+                                        # cte.this.find(exp.Select) returns only the FIRST
+                                        # UNION branch, which silently drops union semantics
+                                        # (the column would be classified by the first
+                                        # branch's expression — e.g. a literal). Leave the
+                                        # final SELECT * intact so expand_from_cte resolves
+                                        # against the union columns already built for this CTE.
+                                        if isinstance(
+                                            cte.this, (exp.Union, exp.Intersect, exp.Except)
+                                        ):
+                                            break
                                         cte_select = cte.this.find(exp.Select)
                                         if cte_select:
                                             selects_to_process = [cte_select]
@@ -678,7 +689,23 @@ class SQLColumnParser:
         if table_node is None:
             return ""
         table_name = str(table_node.name).lower()
-        # If the FROM references another CTE, resolve through to the underlying source.
+        return self._qualify_branch_column(col_name, table_name, cte_sources, cte_to_model)
+
+    def _qualify_branch_column(
+        self,
+        col_name: str,
+        table_name: str,
+        cte_sources: Dict[str, Dict[str, str]],
+        cte_to_model: Optional[Dict[str, str]],
+    ) -> str:
+        """Resolve ``col_name`` coming FROM ``table_name`` to a ``model.column`` qualifier.
+
+        If the FROM references another CTE, trace through to the underlying source
+        column the CTE recorded; otherwise qualify against the CTE-to-model
+        mapping or fall back to the literal table name. An empty source recorded
+        for the upstream column (literal/computed/union sentinel) is preserved as
+        ``table.column`` so the branch still names the producing node.
+        """
         if table_name in cte_sources and col_name in cte_sources[table_name]:
             resolved = cte_sources[table_name][col_name]
             if resolved:
@@ -686,6 +713,58 @@ class SQLColumnParser:
         if cte_to_model and table_name in cte_to_model:
             return f"{cte_to_model[table_name]}.{col_name}"
         return f"{table_name}.{col_name}"
+
+    def _branch_from_table(self, branch_select: Any) -> Optional[str]:
+        """Return the lowercased name of the single FROM table for a set-op branch."""
+        from_clause = branch_select.find(exp.From)
+        if from_clause is None:
+            return None
+        table_node = from_clause.find(exp.Table)
+        if table_node is None:
+            return None
+        return str(table_node.name).lower()
+
+    def _expand_branch_columns(
+        self,
+        branch_select: Any,
+        cte_sources: Dict[str, Dict[str, str]],
+        cte_to_model: Optional[Dict[str, str]],
+    ) -> List[tuple[str, str]]:
+        """Return ordered ``(output_col_name, branch_source_qualifier)`` for a branch.
+
+        Expands ``SELECT *`` / ``SELECT t.*`` against the columns of the
+        referenced upstream CTE so that set-op branches written as ``SELECT *
+        FROM some_cte`` contribute their real column names and per-branch sources
+        — not an opaque star that the position-matching loop would skip.
+        Branch CTEs are declared before the consuming set-op CTE, so their
+        ``cte_sources`` entries are already populated at this point.
+        """
+        result: List[tuple[str, str]] = []
+        from_table = self._branch_from_table(branch_select)
+        for expr in branch_select.expressions:
+            if self._star_handler.is_star_expression(expr):
+                # Expand the star using the upstream CTE's recorded columns, in
+                # the order they were stored (insertion order == declaration order).
+                if from_table and from_table in cte_sources:
+                    for up_col in cte_sources[from_table].keys():
+                        result.append(
+                            (
+                                up_col.lower(),
+                                self._qualify_branch_column(
+                                    up_col.lower(), from_table, cte_sources, cte_to_model
+                                ),
+                            )
+                        )
+                # A star on a non-CTE table can't be expanded to names here; skip.
+                continue
+            col_name = strip_sql_comments(expr.alias_or_name).lower()
+            if not col_name or col_name == "*":
+                continue
+            source = self._resolve_branch_source(
+                expr, branch_select, cte_sources, cte_to_model
+            )
+            result.append((col_name, source))
+        return result
 
     def _process_union_cte(
         self,
@@ -711,31 +790,43 @@ class SQLColumnParser:
         ]
         if not branch_selects:
             return
-        first_select = branch_selects[0]
-        # SQL semantics: UNION columns match by ordinal position, output names
-        # come from the FIRST branch.
-        for col_idx, expr in enumerate(first_select.expressions):
-            col_name = strip_sql_comments(expr.alias_or_name).lower()
+        # Expand each branch into ordered (col_name, source) pairs, resolving any
+        # `SELECT *` branch against its upstream CTE's columns. SQL semantics:
+        # UNION columns match by ordinal position; output names come from the
+        # FIRST branch.
+        expanded_branches = [
+            self._expand_branch_columns(bs, cte_sources, cte_to_model)
+            for bs in branch_selects
+        ]
+
+        # Record each branch's underlying base table for star_sources tracking.
+        # Mirror the non-union path: cte_base_tables holds real source tables, not
+        # CTE names — when a branch reads from another CTE, propagate that CTE's
+        # recorded base tables instead of leaking the CTE name itself.
+        for branch_select in branch_selects:
+            tbl_name = self._branch_from_table(branch_select)
+            if tbl_name is None:
+                continue
+            if tbl_name in cte_sources:
+                cte_base_tables.setdefault(cte_name, set()).update(
+                    cte_base_tables.get(tbl_name, set())
+                )
+                if cte_to_model and tbl_name in cte_to_model:
+                    cte_base_tables.setdefault(cte_name, set()).add(cte_to_model[tbl_name])
+            else:
+                cte_base_tables.setdefault(cte_name, set()).add(tbl_name)
+
+        first_branch_cols = expanded_branches[0]
+        for col_idx, (col_name, _) in enumerate(first_branch_cols):
             if not col_name or col_name == "*":
                 continue
             branches: List[str] = []
-            for branch_select in branch_selects:
-                if col_idx >= len(branch_select.expressions):
+            for branch in expanded_branches:
+                if col_idx >= len(branch):
                     continue
-                branch_expr = branch_select.expressions[col_idx]
-                source = self._resolve_branch_source(
-                    branch_expr, branch_select, cte_sources, cte_to_model
-                )
+                source = branch[col_idx][1]
                 if source:
                     branches.append(source)
-                # Also record base table for star_sources tracking.
-                from_clause = branch_select.find(exp.From)
-                if from_clause is not None:
-                    tbl = from_clause.find(exp.Table)
-                    if tbl is not None:
-                        cte_base_tables.setdefault(cte_name, set()).add(
-                            str(tbl.name).lower()
-                        )
             cte_sources[cte_name][col_name] = ""  # multi-source sentinel
             cte_transformation_types[cte_name][col_name] = "union"
             cte_sql_expressions[cte_name][col_name] = None

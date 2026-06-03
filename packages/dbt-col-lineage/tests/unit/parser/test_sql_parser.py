@@ -267,12 +267,17 @@ def test_union_all_simple():
 
     assert "id" in lineage
     assert "name" in lineage
-    id_sources = {src for lineage_item in lineage["id"] for src in lineage_item.source_columns}
-    name_sources = {src for lineage_item in lineage["name"] for src in lineage_item.source_columns}
-    assert any("table1" in src for src in id_sources) or any("table2" in src for src in id_sources)
-    assert any("table1" in src for src in name_sources) or any(
-        "table2" in src for src in name_sources
-    )
+    # SELECT * from a UNION ALL CTE: every output column is a union column with an
+    # empty source set (multi-source sentinel) and per-branch sources in
+    # union_branches, one entry per branch in declaration order.
+    id_lin = lineage["id"][0]
+    name_lin = lineage["name"][0]
+    assert id_lin.transformation_type == "union"
+    assert name_lin.transformation_type == "union"
+    assert id_lin.source_columns == set()
+    assert name_lin.source_columns == set()
+    assert id_lin.union_branches == ["table1.id", "table2.id"]
+    assert name_lin.union_branches == ["table1.name", "table2.name"]
 
 
 def test_union_all_multiple_branches():
@@ -299,8 +304,164 @@ def test_union_all_multiple_branches():
 
     assert "col1" in lineage
     assert "col2" in lineage
-    col1_sources = {src for lineage_item in lineage["col1"] for src in lineage_item.source_columns}
-    assert len(col1_sources) > 0
+    # A 4-branch UNION ALL: each output column is a union column whose branches
+    # list carries one source per branch, in declaration order.
+    col1_lin = lineage["col1"][0]
+    col2_lin = lineage["col2"][0]
+    assert col1_lin.transformation_type == "union"
+    assert col2_lin.transformation_type == "union"
+    assert col1_lin.source_columns == set()
+    assert col1_lin.union_branches == [
+        "source1.col1",
+        "source2.col1",
+        "source3.col1",
+        "source4.col1",
+    ]
+    assert col2_lin.union_branches == [
+        "source1.col2",
+        "source2.col2",
+        "source3.col2",
+        "source4.col2",
+    ]
+
+
+def test_union_all_of_star_branch_ctes():
+    """UNION ALL CTE whose branches are `SELECT *` from other CTEs.
+
+    Regression test for the confirmed bug: the parser traced into the first
+    branch CTE, found the literal, and stopped — classifying source_sys as
+    `literal` instead of `union`. The star branches must be expanded against
+    the branch CTEs' columns so every output column is `union`.
+    """
+    sql = """
+    with _sap_base as (
+        select 'ER2S' as source_sys, contract_id from some_stg_model
+    ),
+    _dsp_base as (
+        select 'DSP' as source_sys, contract_id from another_stg_model
+    ),
+    _consolidated as (
+        select * from _sap_base
+        union all
+        select * from _dsp_base
+    )
+    select * from _consolidated
+    """
+    parser = SQLColumnParser(dialect="snowflake")
+    result = parser.parse_column_lineage(sql)
+    lineage = result.column_lineage
+
+    assert "source_sys" in lineage
+    assert "contract_id" in lineage
+
+    src_lin = lineage["source_sys"][0]
+    cid_lin = lineage["contract_id"][0]
+
+    # source_sys is a literal inside each branch CTE, but the column itself is a
+    # union output — union classification wins, and it is NOT a literal.
+    assert src_lin.transformation_type == "union"
+    assert src_lin.source_columns == set()
+    assert src_lin.sql_expression is None
+    assert src_lin.union_branches == [
+        "some_stg_model.source_sys",
+        "another_stg_model.source_sys",
+    ]
+
+    assert cid_lin.transformation_type == "union"
+    assert cid_lin.source_columns == set()
+    assert cid_lin.union_branches == [
+        "some_stg_model.contract_id",
+        "another_stg_model.contract_id",
+    ]
+
+    # CTE names must not leak into star_sources — only real base tables.
+    assert result.star_sources == {"some_stg_model", "another_stg_model"}
+
+
+def test_union_all_branches_derived_from_other_ctes():
+    """UNION ALL whose branches read through an extra layer of CTE indirection.
+
+    final SELECT -> union CTE -> branch CTEs -> (deeper CTE) -> external refs.
+    Every output column must still be classified as union.
+    """
+    sql = """
+    with a as (select id, name from raw_a),
+    a_view as (select * from a),
+    b as (select id, name from raw_b),
+    b_view as (select * from b),
+    u as (
+        select * from a_view
+        union all
+        select * from b_view
+    )
+    select * from u
+    """
+    parser = SQLColumnParser(dialect="snowflake")
+    result = parser.parse_column_lineage(sql)
+    lineage = result.column_lineage
+
+    for col in ("id", "name"):
+        lin = lineage[col][0]
+        assert lin.transformation_type == "union", col
+        assert lin.source_columns == set(), col
+        # Two branches, one source each, traced back through the view CTEs.
+        assert len(lin.union_branches) == 2, col
+        assert any("raw_a" in b for b in lin.union_branches), col
+        assert any("raw_b" in b for b in lin.union_branches), col
+
+
+def test_select_star_from_union_cte_direct():
+    """`SELECT *` directly off a UNION CTE (no wrapping CTE in between)."""
+    sql = """
+    with a as (select id, name from t1),
+    b as (select id, name from t2),
+    u as (select * from a union all select * from b)
+    select * from u
+    """
+    parser = SQLColumnParser(dialect="snowflake")
+    result = parser.parse_column_lineage(sql)
+    lineage = result.column_lineage
+
+    assert lineage["id"][0].transformation_type == "union"
+    assert lineage["name"][0].transformation_type == "union"
+    assert lineage["id"][0].union_branches == ["t1.id", "t2.id"]
+    assert lineage["name"][0].union_branches == ["t1.name", "t2.name"]
+
+
+def test_union_all_mixed_literal_and_real_branch():
+    """One branch supplies a literal, the other a real column — both are union.
+
+    The output column must be `union` (not `literal`), and the branch that
+    resolves to a real source column is recorded; the literal branch contributes
+    no traceable source so it is simply absent from the branch list, but the
+    column is still union.
+    """
+    sql = """
+    with a as (select cid from t1),
+    b as (select flag2 as flag, cid from t2),
+    u as (
+        select 'LIT' as flag, cid from a
+        union all
+        select flag, cid from b
+    )
+    select * from u
+    """
+    parser = SQLColumnParser(dialect="snowflake")
+    result = parser.parse_column_lineage(sql)
+    lineage = result.column_lineage
+
+    flag_lin = lineage["flag"][0]
+    cid_lin = lineage["cid"][0]
+
+    # The literal branch must NOT cause the column to be classified as literal.
+    assert flag_lin.transformation_type == "union"
+    assert flag_lin.source_columns == set()
+    assert flag_lin.sql_expression is None
+    # Only the real-column branch resolves to a source; the literal branch is empty.
+    assert flag_lin.union_branches == ["t2.flag2"]
+
+    assert cid_lin.transformation_type == "union"
+    assert cid_lin.union_branches == ["t1.cid", "t2.cid"]
 
 
 def test_exclude_single_column():
@@ -728,14 +889,19 @@ def test_complex_query_structure():
     assert "event_id" in lineage
     assert "event_type" in lineage
 
-    # event_id is a multi-source concatenation (account_id || '_' || last_quarter_day),
-    # so it is classified as "derived" with no single traceable source column. The
-    # empty source set is the intended multi-source sentinel, not a trace failure.
-    assert lineage["event_id"][0].transformation_type == "derived"
-    event_id_sources = {
-        src for lineage_item in lineage["event_id"] for src in lineage_item.source_columns
-    }
-    assert event_id_sources == set()
+    # The final CTE is `SELECT * FROM card_events UNION ALL SELECT * FROM account_events`,
+    # so every output column of `final` is a union column — including event_id, even
+    # though within each branch it is a multi-source concatenation. The union
+    # classification takes precedence: the column has two parents (one per branch).
+    # source_columns is the empty multi-source sentinel; the per-branch producing
+    # columns are surfaced via union_branches.
+    event_id_lin = lineage["event_id"][0]
+    assert event_id_lin.transformation_type == "union"
+    assert event_id_lin.source_columns == set()
+    assert event_id_lin.union_branches == [
+        "cards_scope_cross_quarters.event_id",
+        "account_holders_scope_cross_quarters.event_id",
+    ]
 
 
 def test_table_names_normalized_from_sql() -> None:
