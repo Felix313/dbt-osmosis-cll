@@ -402,28 +402,40 @@ def _owns_description(
     return str(authority).lower() != "upstream"
 
 
-def _find_cll_description(
+def _resolve_cll_description(
     context: YamlRefactorContextProtocol,
     parent_model_name: str,
     parent_col_name: str,
     depth: int = 0,
     max_depth: int | None = None,
     visited: set[tuple[str, str]] | None = None,
-) -> str | None:
-    """Resolve the authoritative description for an upstream column via CLL lineage.
+) -> tuple[str | None, str | None]:
+    """Resolve a column's authoritative description AND its true origin via CLL lineage.
 
-    The walk returns a node's *own stored* description only when that node OWNS it —
-    i.e. it is a source, an anchored column (``desc-owner`` != ``upstream``),
-    a column that originates in the model (``is_first_in_chain`` / no progenitor), or a
-    computed wall (aggregate/window/literal/generated/multi-source) where the value is
-    born. For a non-anchored pure passthrough/rename the stored description is just a
-    force-inherited *copy* of the upstream, so the walk recurses through it instead of
-    returning it. This keeps propagation a pure function of {origins, anchors, config}
-    and therefore idempotent in a single pass — a stale copy on an intermediate node is
-    never laundered downstream.
+    Returns ``(description, origin_ref)``:
 
-    Stops at: anchors, computed walls, source nodes, origins, unresolvable nodes, depth
-    limit, or a self-referencing cycle (e.g. incremental models that select from
+    - ``description`` — the authoritative text to inherit. A node's *own stored* description
+      is used only when that node OWNS the value: a source, an anchored column that
+      **re-defines** the text (``desc-owner`` != ``upstream`` *and* its text differs from
+      upstream), a column originating here (no progenitor), or a computed wall
+      (aggregate/window/literal/generated/multi-source) where the value is born. A
+      non-anchored force-inherit *copy* is never returned — the walk recurses past it so a
+      stale copy is never laundered downstream.
+
+    - ``origin_ref`` — ``MODEL.COLUMN`` (uppercase; source table name for sources) of the
+      node where that text was **first defined**, i.e. the single place to edit it to change
+      every downstream copy. The walk passes *through* same-text copies (force-inherit or
+      gap-filled) and stops only where the text changes (a re-definition / anchor), at a
+      source, computed wall, union, or chain end. ``origin_ref`` is ``None`` when no
+      description resolves, and for unions (no single origin).
+
+    Because the walk resolves from origins/anchors via the stable buffer rather than from
+    intermediate copies, propagation is a pure function of {origins, anchors, config} and
+    idempotent in a single pass. The owner the walk stops at IS the origin, so the inherited
+    text and its ``desc-source`` pointer always agree.
+
+    Stops at: anchors that re-define, computed walls, source nodes, origins, unresolvable
+    nodes, depth limit, or a self-referencing cycle (e.g. incremental models that select from
     `{{ this }}` produce M.col → M.col in CLL).
     """
     from dbt_osmosis.core.cll import (
@@ -445,7 +457,7 @@ def _find_cll_description(
     # whole depth budget. Stop silently; the depth limit still catches non-cyclic
     # pathological chains below.
     if key in visited:
-        return None
+        return None, None
     visited.add(key)
 
     # 1. Depth guard — protects against cyclic or pathological lineage chains.
@@ -456,7 +468,7 @@ def _find_cll_description(
             parent_model_name,
             parent_col_name,
         )
-        return None
+        return None, None
 
     # 2. Resolve the parent model name to a manifest node (source or model).
     _ensure_manifest_index(context)
@@ -465,12 +477,11 @@ def _find_cll_description(
     model_node = _NODE_INDEX[project_dir].get(parent_model_name.lower())
     upstream_node = src_node or model_node
     if upstream_node is None:
-        return None
+        return None, None
 
     # Read this node's OWN stored description (in-memory first — surfaces anchors/origins
     # enriched earlier in THIS run — then the stable YAML buffer for nodes outside the
-    # candidate set). Only returned for nodes that OWN their description; never for a
-    # non-anchored passthrough (whose stored value is just a force-inherited copy).
+    # candidate set).
     def _own_description() -> str | None:
         cols = getattr(upstream_node, "columns", {})
         col_info = next(
@@ -489,9 +500,16 @@ def _find_cll_description(
                 return cleaned
         return None
 
+    here_ref = f"{parent_model_name.upper()}.{parent_col_name.upper()}"
+
+    # This node IS the origin of its own description (terminal: source/computed/origin).
+    def _own() -> tuple[str | None, str | None]:
+        own = _own_description()
+        return (own, here_ref) if own is not None else (None, None)
+
     # 3. Sources are terminal origins — their DB/authored description is authoritative.
     if src_node is not None:
-        return _own_description()
+        return _own()
 
     # 4. Ask CLL how this column is produced.
     parent_results = get_cll_results(context, model_node)
@@ -506,15 +524,7 @@ def _find_cll_description(
     )
     if parent_result is None:
         # No lineage for this column — best effort: trust whatever it stores.
-        return _own_description()
-
-    # 5. Anchor = wall. A column that OWNS its description (desc-owner != upstream)
-    # defines the new truth from here downstream and overrules force-inheritance.
-    # Return it and stop walking — in either direction.
-    if _owns_description(context, model_node, parent_col_name):
-        own = _own_description()
-        if own is not None:
-            return own
+        return _own()
 
     _is_aggregate = getattr(parent_result, "is_aggregate", False)
     _is_window = getattr(parent_result, "is_window", False)
@@ -522,19 +532,20 @@ def _find_cll_description(
     _is_literal = getattr(parent_result, "is_literal", False)
     _is_generated = getattr(parent_result, "is_generated", False)
 
-    # 6. Union column — agreement-aware: recurse into every branch, then accept the
+    # 5. Union column — agreement-aware: recurse into every branch, then accept the
     # description iff at most one distinct non-empty answer is found (single populated
     # branch, or all branches agree). Two or more different descriptions = real semantic
-    # conflict; fall back to a locally authored description at the union node.
+    # conflict; fall back to a locally authored description at the union node. A union has
+    # no single origin, so origin_ref is None whenever the text comes from the branches.
     if _is_union:
         union_branches = getattr(parent_result, "union_branches", []) or []
         if not union_branches:
-            return _own_description()
+            return _own()
         from dbt_osmosis.core.cll import descriptions_equivalent
 
         branch_descs: list[str] = []
         for branch_model, branch_col in union_branches:
-            branch_desc = _find_cll_description(
+            branch_desc, _ = _resolve_cll_description(
                 context,
                 branch_model,
                 branch_col,
@@ -545,14 +556,14 @@ def _find_cll_description(
             if branch_desc:
                 branch_descs.append(branch_desc)
         if not branch_descs:
-            return _own_description()
+            return _own()
         first = branch_descs[0]
         if all(descriptions_equivalent(first, other) for other in branch_descs[1:]):
-            return first
+            return first, None
         # Real conflict — must be authored at the union node itself.
-        return _own_description()
+        return _own()
 
-    # 7. Computed wall — the value is BORN here (aggregate / window / literal / generated
+    # 6. Computed wall — the value is BORN here (aggregate / window / literal / generated
     # / multi-source expression). No single upstream column's description transfers, so
     # return only a description authored HERE; never recurse into the computation inputs.
     if (
@@ -562,20 +573,27 @@ def _find_cll_description(
         or _is_generated
         or (parent_result.is_computed and parent_result.progenitor_column is None)
     ):
-        return _own_description()
+        return _own()
 
-    # 8. Column originates in this model with no upstream — nothing to inherit from.
+    # 7. Column originates in this model with no upstream — nothing to inherit from.
     # Note: is_first_in_chain=True with progenitor_model set means "first dbt model
     # in the chain, source is the progenitor" (e.g. staging referencing a source).
     # In that case we DO want to recurse to the source, so only skip when progenitor is None.
     if parent_result.progenitor_model is None:
-        return _own_description()
+        return _own()
 
-    # 9. Pure passthrough / rename and NOT anchored: this node's stored description is just
-    # a force-inherited copy of its upstream. Skip it and resolve transitively so a stale
-    # copy is never laundered downstream. Always follow the chain past intermediate renames.
+    # 8. Single-progenitor column. Resolve the upstream FIRST, then decide whether THIS
+    # node re-defines the text or merely carries a copy of it:
+    #   • anchor that re-defines (owns it AND its text differs from upstream) → wall: the
+    #     text and the origin are HERE; the walk stops (new truth from here downstream).
+    #   • otherwise, if the upstream resolved a description → pass through: take the upstream
+    #     text AND its (deeper) origin. This walks transitively through same-text copies —
+    #     force-inherited or gap-filled — to the node where the text was first defined, so a
+    #     stale intermediate copy is never laundered and the origin is the true source.
+    #   • upstream resolved nothing → an owner with its own text is the origin here; a
+    #     non-anchored copy with no resolvable upstream yields nothing (never laundered).
     progenitor_col = (parent_result.progenitor_column or parent_col_name).strip('"').strip("'")
-    return _find_cll_description(
+    parent_text, parent_origin = _resolve_cll_description(
         context,
         parent_result.progenitor_model.lower(),
         progenitor_col,
@@ -583,6 +601,37 @@ def _find_cll_description(
         max_depth,
         visited,
     )
+    owns = _owns_description(context, model_node, parent_col_name)
+    own = _own_description()
+    if owns and own is not None and own != parent_text:
+        # Anchored re-definition — the new truth begins here (origin = here), even if the
+        # upstream is empty/different. An anchor re-authoring text identical to upstream is
+        # NOT a re-definition; it falls through and the deeper origin is kept.
+        return own, here_ref
+    if parent_text is not None:
+        return parent_text, parent_origin
+    if owns and own is not None:
+        # Owner with its own text and an empty upstream → the text originates here.
+        return own, here_ref
+    # Non-anchored copy with no resolvable upstream → do not launder the copy.
+    return None, None
+
+
+def _find_cll_description(
+    context: YamlRefactorContextProtocol,
+    parent_model_name: str,
+    parent_col_name: str,
+    depth: int = 0,
+    max_depth: int | None = None,
+    visited: set[tuple[str, str]] | None = None,
+) -> str | None:
+    """Resolved description only — back-compat wrapper around :func:`_resolve_cll_description`.
+
+    Use ``_resolve_cll_description`` directly when the origin (``desc-source``) is also needed.
+    """
+    return _resolve_cll_description(
+        context, parent_model_name, parent_col_name, depth, max_depth, visited
+    )[0]
 
 
 def _read_column_config_meta(node_col: t.Any) -> dict[str, t.Any]:
@@ -611,6 +660,25 @@ def _build_column_config_with_meta(node_col: t.Any, new_meta: dict[str, t.Any]) 
     col_as_dict = _column_to_dict(node_col, omit_none=True)
     config_base = col_as_dict.get("config") or {}
     return {**config_base, "meta": new_meta}
+
+
+def _drop_stale_desc_source(node: t.Any, col_name: str, node_col: t.Any, key: str) -> None:
+    """Remove a ``desc-source`` provenance tag from a column that is no longer CLL-inherited.
+
+    Used on the early-skip paths (aggregate / window / literal / generated / multi-source /
+    originates-here) where a column that previously inherited a description — and so carries a
+    provenance tag — has since become non-inheritable.  Keeping the old tag there would make it
+    stale, so it is dropped.  No-op when the key is disabled or the tag is absent.
+    """
+    if not key:
+        return
+    meta = _read_column_config_meta(node_col)
+    if key not in meta:
+        return
+    new_meta = {k: v for k, v in meta.items() if k != key}
+    node.columns[col_name] = _safe_column_replace(
+        node_col, config=_build_column_config_with_meta(node_col, new_meta)
+    )
 
 
 @_transform_op("Inherit Upstream Column Knowledge (CLL)")
@@ -725,17 +793,20 @@ def inherit_upstream_column_knowledge_cll(
             or _is_generated
             or _is_multi_src
         ):
+            # No single traceable progenitor → drop any stale provenance tag, then skip.
+            _drop_stale_desc_source(node, col_name, node_col, _cfg.desc_source_key)
             continue
 
         if result.progenitor_model is None and not _is_union:
             # Column originates here with no traceable upstream — nothing to inherit from.
             # Note: is_first_in_chain=True with progenitor_model set means "first dbt model
             # in chain, source is progenitor" (staging→source). Allow inheritance in that case.
+            _drop_stale_desc_source(node, col_name, node_col, _cfg.desc_source_key)
             continue
 
-        # Immediate CLL progenitor reference for the desc-source provenance tag.
-        # Set only on the single-progenitor (non-union) path; unions have no single
-        # source so they never receive a desc-source value.
+        # True-origin reference for the desc-source provenance tag — the node where the
+        # description was first defined (resolved by _resolve_cll_description on the
+        # single-progenitor path). Unions have no single origin, so they never get one.
         desc_source_ref: str | None = None
 
         if _is_union:
@@ -779,16 +850,16 @@ def inherit_upstream_column_knowledge_cll(
                 # Rename detected and not configured to follow → skip description, still do tags/meta.
                 desc_to_apply = None
             else:
-                # Walk the CLL progenitor chain for the closest ancestor with a real description.
+                # Walk the CLL progenitor chain for the authoritative description AND the
+                # node where it was first defined. desc-source points at that true origin —
+                # the single place to edit for downstream consistency — which the walk reaches
+                # by passing through same-text copies and stopping where the text is re-defined.
                 progenitor_col = (result.progenitor_column or col_name).strip('"').strip("'")
-                desc_to_apply = _find_cll_description(
+                desc_to_apply, desc_source_ref = _resolve_cll_description(
                     context,
                     result.progenitor_model.lower(),
                     progenitor_col,
                 )
-                # Trace provenance to the IMMEDIATE progenitor (direct parent in the CLL
-                # result), matching how tags/meta are inherited — not the deepest origin.
-                desc_source_ref = f"{result.progenitor_model.upper()}.{progenitor_col.upper()}"
 
         # --- desc-owner: should we overwrite the existing description? ---
         desc_authority = _get_setting_for_node("desc-owner", node, col_name, fallback="this")
@@ -875,30 +946,54 @@ def inherit_upstream_column_knowledge_cll(
                         update_kwargs["meta"] = merged_meta
 
         # --- desc-source provenance (config.meta) ---
-        # Write the immediate CLL progenitor reference when this run gap-filled an
-        # empty description. Strip a stale tag when the column now owns its own
-        # authored description (transitioned from inherited to anchored).
+        # Recomputed from current CLL state on EVERY run rather than written once and left in
+        # place, so the tag can never go stale: it always equals the column's CURRENT immediate
+        # progenitor, or is absent when the column is no longer CLL-inherited. This makes the
+        # pass idempotent (a second run with no upstream change is a no-op) and self-correcting
+        # (if the lineage moves to a different progenitor the pointer updates; if the column
+        # stops being inherited the tag is dropped).
+        #
+        # A column counts as CLL-inherited — and therefore carries the tag, pointing at
+        # ``desc_source_ref`` — when it is not owned upstream (force_inherit), has a single
+        # resolvable progenitor, has a non-empty final description, AND any of:
+        #   • it was gap-filled this run; or
+        #   • its description still matches the resolved upstream text — covers the idempotent
+        #     re-match on later runs and backfills descriptions that were inherited before this
+        #     feature existed (no tag yet, but content proves the inheritance); or
+        #   • it already carried the tag — keeps provenance alive when ``desc-owner: this``
+        #     freezes the child while the upstream description text later drifts. The frozen
+        #     text no longer matches upstream, but the column is still sourced from the same
+        #     progenitor, so the pointer is correct, not stale.
+        # Everything else — owned upstream, unions, the early-skipped computed/aggregate kinds
+        # (handled above), an unresolved/empty description, or a genuinely locally authored
+        # description that was never inherited — carries no tag, and any existing tag is dropped.
+        # To claim local ownership of a previously inherited description, remove its desc-source
+        # tag; while the tag is present the column is treated as inherited.
         _desc_source_key = _cfg.desc_source_key
         if _desc_source_key:
             _cfg_meta = _read_column_config_meta(node_col)
+            _had_tag = _desc_source_key in _cfg_meta
+
+            _final_desc_raw = update_kwargs.get("description", existing_desc)
+            _final_desc = (
+                strip_annotation_tags(_final_desc_raw).strip() if _final_desc_raw else ""
+            )
+            _resolved_upstream = (
+                strip_annotation_tags(desc_to_apply).strip() if desc_to_apply else ""
+            )
+
+            _is_inherited = (
+                not force_inherit
+                and desc_source_ref is not None
+                and bool(_final_desc)
+                and (_gap_filled or _final_desc == _resolved_upstream or _had_tag)
+            )
+
             _new_cfg_meta = dict(_cfg_meta)
-            if _gap_filled and desc_source_ref is not None:
+            if _is_inherited:
                 _new_cfg_meta[_desc_source_key] = desc_source_ref
-            elif _desc_source_key in _new_cfg_meta:
-                # The tag is present but no gap-fill happened. Strip it only when the
-                # column now owns real content of its own and is NOT force-inherited
-                # (force_inherit columns stay "owned upstream" and keep no provenance,
-                # so there is nothing to strip there either — they never had it written).
-                _final_desc = (
-                    update_kwargs.get("description")
-                    if "description" in update_kwargs
-                    else existing_desc
-                )
-                _has_own_content = bool(
-                    _final_desc and strip_annotation_tags(_final_desc).strip()
-                )
-                if _has_own_content and not force_inherit:
-                    _new_cfg_meta.pop(_desc_source_key, None)
+            else:
+                _new_cfg_meta.pop(_desc_source_key, None)
             if _new_cfg_meta != _cfg_meta:
                 update_kwargs["config"] = _build_column_config_with_meta(node_col, _new_cfg_meta)
 
