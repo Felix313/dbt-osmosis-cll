@@ -88,10 +88,13 @@ def _load_disk_cache(project_dir: str) -> dict[str, t.Any]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("schema_version") == _CACHE_SCHEMA_VERSION:
-                _DISK_CACHE[project_dir] = data.get("entries", {})
+                entries = data.get("entries", {})
+                _DISK_CACHE[project_dir] = entries
+                logger.info(":rocket: CLL cache — warm (%d entries)", len(entries))
                 return _DISK_CACHE[project_dir]
         except Exception as exc:
             logger.debug("CLL disk cache load failed (will rebuild): %s", exc)
+    logger.info(":snowflake: CLL cache — cold (no cache found, first run will be slow)")
     _DISK_CACHE[project_dir] = {}
     return _DISK_CACHE[project_dir]
 

@@ -181,7 +181,7 @@ def build_yaml_file_mapping(
     create_missing_sources: bool = False,
 ) -> dict[str, SchemaFileLocation]:
     """Build a mapping of dbt model and source nodes to their current and target yaml paths."""
-    logger.info(":globe_with_meridians: Building YAML file mapping...")
+    logger.debug(":globe_with_meridians: Building YAML file mapping...")
 
     if create_missing_sources:
         create_missing_source_yamls(context)
@@ -220,7 +220,7 @@ def create_missing_source_yamls(context: t.Any) -> None:
     if context.project.config.disable_introspection:
         logger.warning(":warning: Introspection is disabled, cannot create missing source YAMLs.")
         return
-    logger.info(":factory: Creating missing source YAMLs and updating existing sources (if any).")
+    logger.debug(":factory: Creating missing source YAMLs and updating existing sources (if any).")
     default_database: str = context.project.runtime_cfg.credentials.database
     lowercase: bool = context.settings.output_to_lower
     uppercase: bool = context.settings.output_to_upper

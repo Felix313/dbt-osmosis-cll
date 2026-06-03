@@ -373,7 +373,6 @@ def refactor(
     This command will conform your project as outlined in `dbt_project.yml`, bootstrap undocumented
     dbt models, and propagate column level documentation downwards once all yamls are accounted for
     """
-    logger.info(":water_wave: Executing dbt-osmosis\n")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -402,7 +401,9 @@ def refactor(
 
         from dbt_osmosis.core.node_filters import _iter_candidate_nodes
         _n_nodes = sum(1 for _ in _iter_candidate_nodes(typed_context))
-        logger.info(":gear: Running column propagation pipeline for %d node(s)...", _n_nodes)
+        _proj = settings.project_dir.split("\\")[-1].split("/")[-1] if settings.project_dir else "project"
+        _tgt = settings.target or "dev"
+        logger.info(":gear: Propagating docs — project: %s, target: %s, nodes: %d", _proj, _tgt, _n_nodes)
 
         transform = (
             inject_missing_columns
@@ -454,7 +455,7 @@ def organize(
     This command will conform schema ymls in your project as outlined in `dbt_project.yml` &
     bootstrap undocumented dbt models
     """
-    logger.info(":water_wave: Executing dbt-osmosis\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -584,7 +585,7 @@ def document(
     This command will conform schema ymls in your project as outlined in `dbt_project.yml` &
     bootstrap undocumented dbt models
     """
-    logger.info(":water_wave: Executing dbt-osmosis\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -677,7 +678,7 @@ def doc_health(
     """
     import json as _json
 
-    logger.info(":water_wave: Executing dbt-osmosis\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -770,7 +771,7 @@ def model(
     The AI will analyze your query, understand your available models and sources,
     and generate a complete dbt model with SQL and documentation.
     """
-    logger.info(":water_wave: Executing dbt-osmosis natural language generation\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -930,7 +931,7 @@ def sources(
 
     This command discovers tables in your database and generates dbt source YAML definitions.
     """
-    logger.info(":water_wave: Executing dbt-osmosis source generation\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1006,7 +1007,7 @@ def staging(
     intelligent staging with AI-powered business logic, or omit for deterministic
     generation via dbt-core-interface.
     """
-    logger.info(":water_wave: Executing dbt-osmosis staging generation\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1081,7 +1082,7 @@ def generate_query(
 
     The AI will translate your natural language query into SQL using dbt's ref() syntax.
     """
-    logger.info(":water_wave: Executing dbt-osmosis natural language SQL generation\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1191,7 +1192,7 @@ def nl_generate_deprecated(
         ":warning: The `nl generate` command is deprecated. "
         "Use `dbt-osmosis generate model` instead."
     )
-    logger.info(":water_wave: Executing dbt-osmosis natural language generation\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1321,7 +1322,7 @@ def query(
 
     The AI will translate your natural language query into SQL using dbt's ref() syntax.
     """
-    logger.info(":water_wave: Executing dbt-osmosis natural language SQL generation\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1428,7 +1429,7 @@ def workbench(
     Pass the --options command to see streamlit specific options that can be passed to the app,
     pass --config to see the output of streamlit config show
     """
-    logger.info(":water_wave: Executing dbt-osmosis\n")
+    logger.debug(":debug: osmosis command invoked")
 
     if "--options" in ctx.args:
         proc = subprocess.run(["streamlit", "run", "--help"], check=False)
@@ -1596,7 +1597,7 @@ def schema(
         dbt-osmosis diff schema --severity breaking
         dbt-osmosis diff schema -f my_project.my_model --output-format json
     """
-    logger.info(":mag: Executing dbt-osmosis schema diff\n")
+    logger.debug(":debug: osmosis command invoked")
 
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
@@ -1900,7 +1901,7 @@ def suggest(
         dbt-osmosis test suggest --pattern-only --format json
         dbt-osmosis test suggest --output suggestions.json
     """
-    logger.info(":water_wave: Executing dbt-osmosis test suggestions\n")
+    logger.debug(":debug: osmosis command invoked")
 
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
@@ -2121,7 +2122,7 @@ def lint_file(
 
     This command analyzes SQL code for style issues, anti-patterns, and potential bugs.
     """
-    logger.info(":water_wave: Executing dbt-osmosis SQL linting\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -2218,7 +2219,7 @@ def lint_model_command(
 
     This command analyzes a dbt model's SQL for style issues, anti-patterns, and potential bugs.
     """
-    logger.info(":water_wave: Executing dbt-osmosis SQL linting\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -2323,7 +2324,7 @@ def lint_project_command(
 
     This command analyzes all dbt models' SQL for style issues, anti-patterns, and potential bugs.
     """
-    logger.info(":water_wave: Executing dbt-osmosis SQL linting\n")
+    logger.debug(":debug: osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),

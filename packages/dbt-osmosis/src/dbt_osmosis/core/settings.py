@@ -436,12 +436,12 @@ class YamlRefactorContext:
         )
         if resolved_threads and resolved_threads > 1:
             self.pool._max_workers = resolved_threads
-            logger.info(
-                ":notebook: Osmosis ThreadPoolExecutor max_workers using dbt threads => %s",
+            logger.debug(
+                ":notebook: ThreadPoolExecutor max_workers => %s (from dbt profile threads)",
                 self.pool._max_workers,
             )
         else:
-            logger.info(
-                ":notebook: Osmosis ThreadPoolExecutor max_workers using default => %s",
+            logger.debug(
+                ":notebook: ThreadPoolExecutor max_workers => %s (default)",
                 self.pool._max_workers,
             )

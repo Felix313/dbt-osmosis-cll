@@ -141,15 +141,15 @@ def discover_project_dir() -> str:
     if "DBT_PROJECT_DIR" in os.environ:
         project_dir = Path(os.environ["DBT_PROJECT_DIR"])
         if project_dir.is_dir():
-            logger.info(":mag: DBT_PROJECT_DIR detected => %s", project_dir)
+            logger.debug(":mag: DBT_PROJECT_DIR detected => %s", project_dir)
             return str(project_dir.resolve())
         logger.warning(":warning: DBT_PROJECT_DIR %s is not a valid directory.", project_dir)
     cwd = Path.cwd()
     for p in [cwd] + list(cwd.parents):
         if (p / "dbt_project.yml").exists():
-            logger.info(":mag: Found dbt_project.yml at => %s", p)
+            logger.debug(":mag: Found dbt_project.yml at => %s", p)
             return str(p.resolve())
-    logger.info(":mag: Defaulting to current directory => %s", cwd)
+    logger.debug(":mag: Defaulting to current directory => %s", cwd)
     return str(cwd.resolve())
 
 
@@ -165,21 +165,21 @@ def discover_profiles_dir(project_dir: str | os.PathLike[str] | None = None) -> 
     if "DBT_PROFILES_DIR" in os.environ:
         profiles_dir = Path(os.environ["DBT_PROFILES_DIR"])
         if profiles_dir.is_dir():
-            logger.info(":mag: DBT_PROFILES_DIR detected => %s", profiles_dir)
+            logger.debug(":mag: DBT_PROFILES_DIR detected => %s", profiles_dir)
             return str(profiles_dir.resolve())
         logger.warning(":warning: DBT_PROFILES_DIR %s is not a valid directory.", profiles_dir)
     cwd = Path.cwd().resolve()
     if (cwd / "profiles.yml").exists():
-        logger.info(":mag: Found profiles.yml in current directory.")
+        logger.debug(":mag: Found profiles.yml in current directory.")
         return str(cwd)
     resolved_project_dir = (
         Path(project_dir).resolve() if project_dir is not None else Path(discover_project_dir())
     )
     if resolved_project_dir != cwd and (resolved_project_dir / "profiles.yml").exists():
-        logger.info(":mag: Found profiles.yml in project root => %s", resolved_project_dir)
+        logger.debug(":mag: Found profiles.yml in project root => %s", resolved_project_dir)
         return str(resolved_project_dir)
     home_profiles = str(Path.home() / ".dbt")
-    logger.info(":mag: Defaulting to => %s", home_profiles)
+    logger.debug(":mag: Defaulting to => %s", home_profiles)
     return home_profiles
 
 
@@ -600,7 +600,7 @@ def create_dbt_project_context(config: DbtConfiguration) -> DbtProjectContext:
         A DbtProjectContext with initialized manifest, adapter, and parsers
 
     """
-    logger.info(":wave: Creating DBT project context using config => %s", config)
+    logger.debug(":debug: Creating project context => %s", config)
 
     # Check for a Fusion-generated manifest BEFORE parsing, since dbt-core's
     # parser will overwrite it with a v12 manifest. This allows teams running
@@ -633,7 +633,7 @@ def create_dbt_project_context(config: DbtConfiguration) -> DbtProjectContext:
         except Exception as e:
             logger.warning(":warning: Failed to add cross-project references from dbt_loom: %s", e)
 
-    logger.info(":sparkles: DbtProjectContext successfully created!")
+    logger.debug(":debug: DbtProjectContext created")
 
     # Create the context wrapper with the existing project
     return DbtProjectContext.from_project(
@@ -651,12 +651,12 @@ def _reload_manifest(context: DbtProjectContext) -> None:
         context: The DbtProjectContext to reload the manifest for
 
     """
-    logger.info(":arrows_counterclockwise: Reloading the dbt project manifest!")
+    logger.debug(":arrows_counterclockwise: Reloading manifest")
     with context.manifest_mutex:
         assert context._project is not None, "DbtProjectContext not initialized"
         # Use DbtProject's parse_project to reload
         context._project.parse_project(write_manifest=False)
-        logger.info(":white_check_mark: Manifest reloaded => %s", context.manifest.metadata)
+        logger.debug(":white_check_mark: Manifest reloaded")
 
 
 def config_to_namespace(config: DbtConfiguration) -> argparse.Namespace:

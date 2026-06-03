@@ -175,7 +175,7 @@ def _create_operations_for_node(
 
 def draft_restructure_delta_plan(context: YamlRefactorContextProtocol) -> RestructureDeltaPlan:
     """Draft a restructure plan for the dbt project."""
-    logger.info(":bulb: Drafting restructure delta plan for the project.")
+    logger.debug(":bulb: Drafting restructure delta plan...")
     plan = RestructureDeltaPlan()
     lock = threading.Lock()
 
@@ -235,7 +235,7 @@ def draft_restructure_delta_plan(context: YamlRefactorContextProtocol) -> Restru
 
     plan.operations = list(deduplicated_ops.values())
 
-    logger.info(":star2: Draft plan creation complete => %s operations", len(plan.operations))
+    logger.debug(":star2: Restructure plan => %s operations", len(plan.operations))
     return plan
 
 
@@ -300,7 +300,7 @@ def apply_restructure_plan(
 ) -> None:
     """Apply the restructure plan for the dbt project."""
     if not plan.operations:
-        logger.info(":white_check_mark: No changes needed in the restructure plan.")
+        logger.debug(":white_check_mark: YAML routing: up to date")
         return
 
     if confirm:
@@ -398,7 +398,7 @@ def apply_restructure_plan(
                         op.file_path,
                     )
 
-    logger.info(":arrows_counterclockwise: Committing any buffered restructure changes.")
+    logger.debug(":arrows_counterclockwise: Committing restructure changes")
     from dbt_osmosis.core.schema.writer import commit_yamls
 
     commit_yamls(
@@ -410,5 +410,5 @@ def apply_restructure_plan(
         written_file_tracker=written_file_tracker,
     )
     if getattr(context, "disk_mutation_count", starting_disk_mutations) > starting_disk_mutations:
-        logger.info(":arrows_counterclockwise: Reloading the dbt project manifest.")
+        logger.debug(":arrows_counterclockwise: Reloading manifest after restructure")
         _reload_manifest(context.project)
