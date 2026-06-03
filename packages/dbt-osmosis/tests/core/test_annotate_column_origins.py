@@ -170,7 +170,7 @@ def test_union_annotation_here():
 
 
 def test_literal_annotation_here():
-    """Literal columns use the short 'here' form, keeping the literal value."""
+    """Literal columns use 'Literal set here' — value omitted (avoids leaking wrong values from misclassified UNION branches)."""
     node = FakeNode("m", {"SRC": FakeColumn("SRC", "")})
     _annotate(
         node,
@@ -179,7 +179,7 @@ def test_literal_annotation_here():
     )
     desc = node.columns["SRC"].description
     assert "here" in desc
-    assert "'SAP'" in desc
+    assert "'SAP'" not in desc
     assert "DC_STG.M" not in desc
 
 

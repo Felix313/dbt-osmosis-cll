@@ -791,9 +791,9 @@ def format_union_tag(schema: str, model: str) -> str:
 
 
 def format_literal_tag(literal_value: str, schema: str, model: str) -> str:
-    """Return annotation for a hardcoded constant: ``Literal 'SAP' set here``."""
+    """Return annotation for a hardcoded constant: ``Literal set here``."""
     cfg = get_config()
-    return _wrap_annotation(f"{cfg.annotation_literal} {literal_value} set here")
+    return _wrap_annotation(f"{cfg.annotation_literal} set here")
 
 
 def format_generated_tag(generated_expr: str, schema: str, model: str) -> str:
