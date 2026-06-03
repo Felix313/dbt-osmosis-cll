@@ -106,9 +106,11 @@ def test_derived_columns_lineage(registry):
     models = registry.get_models()
 
     derived_column_tests = [
-        ("int_monthly_account_metrics", "transaction_count", "derived"),
-        ("int_monthly_account_metrics", "total_amount", "derived"),
-        ("int_monthly_account_metrics", "avg_amount", "derived"),
+        # transaction_count / total_amount / avg_amount are aggregates (COUNT, SUM, AVG) —
+        # correctly classified as "aggregate" after parser improvement.
+        ("int_monthly_account_metrics", "transaction_count", "aggregate"),
+        ("int_monthly_account_metrics", "total_amount", "aggregate"),
+        ("int_monthly_account_metrics", "avg_amount", "aggregate"),
         ("accounts_tiering", "account_tier", "derived"),
         ("int_transactions_enriched", "amount_category", "derived"),
     ]
@@ -296,8 +298,9 @@ def test_model_resource_paths(registry):
 
     for model_name, expected_path in path_tests:
         model = models[model_name]
+        normalised = model.resource_path.replace("\\", "/")
         assert (
-            model.resource_path == expected_path
+            normalised == expected_path
         ), f"{model_name} should have resource path {expected_path}, got {model.resource_path}"
 
 
@@ -398,7 +401,10 @@ def test_impact_analysis(registry, dbt_artifacts):
         assert "transformation_type" in col
         assert "severity" in col
         assert col["severity"] in ["critical", "low_impact"]
-        assert col["transformation_type"] in ["direct", "renamed", "derived"]
+        assert col["transformation_type"] in [
+            "direct", "renamed", "derived",
+            "aggregate", "window", "union", "literal", "generated",
+        ]
 
     # Test impact analysis for a column with no downstream dependencies
     # accounts_tiering is a mart model, so its columns might not have downstream dependencies
