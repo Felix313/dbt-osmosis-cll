@@ -23,12 +23,12 @@ _LOG_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LOG_PATH = Path.home().absolute() / ".dbt-osmosis" / "logs"
 _LOGGING_LEVEL = logging.INFO
 
-# Strip Rich markup emoji codes (e.g. ":rocket:", ":gear:") and leftover whitespace.
-_RICH_MARKUP_RE = re.compile(r":\w+:")
+# Strip Rich markup: emoji codes (:rocket:) and tags ([b], [/green], [yellow], etc.)
+_RICH_MARKUP_RE = re.compile(r":\w+:|(\[/?[^\[\]]+\])")
 
 
 class _CleanFormatter(logging.Formatter):
-    """Plain formatter that strips Rich emoji markup codes from log messages."""
+    """Plain formatter that strips all Rich markup from log messages."""
 
     def format(self, record: logging.LogRecord) -> str:
         record.msg = _RICH_MARKUP_RE.sub("", str(record.msg)).strip()
