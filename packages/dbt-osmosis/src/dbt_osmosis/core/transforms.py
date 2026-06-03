@@ -564,8 +564,11 @@ def _find_cll_description(
     ):
         return _own_description()
 
-    # 8. Column originates in this model — nothing upstream to inherit from.
-    if parent_result.is_first_in_chain or parent_result.progenitor_model is None:
+    # 8. Column originates in this model with no upstream — nothing to inherit from.
+    # Note: is_first_in_chain=True with progenitor_model set means "first dbt model
+    # in the chain, source is the progenitor" (e.g. staging referencing a source).
+    # In that case we DO want to recurse to the source, so only skip when progenitor is None.
+    if parent_result.progenitor_model is None:
         return _own_description()
 
     # 9. Pure passthrough / rename and NOT anchored: this node's stored description is just
@@ -696,8 +699,10 @@ def inherit_upstream_column_knowledge_cll(
         ):
             continue
 
-        if result.is_first_in_chain or (result.progenitor_model is None and not _is_union):
-            # Column originates here; no upstream to inherit from.
+        if result.progenitor_model is None and not _is_union:
+            # Column originates here with no traceable upstream — nothing to inherit from.
+            # Note: is_first_in_chain=True with progenitor_model set means "first dbt model
+            # in chain, source is progenitor" (staging→source). Allow inheritance in that case.
             continue
 
         if _is_union:
