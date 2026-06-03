@@ -585,6 +585,34 @@ def _find_cll_description(
     )
 
 
+def _read_column_config_meta(node_col: t.Any) -> dict[str, t.Any]:
+    """Return a copy of a column's ``config.meta`` dict (empty if absent).
+
+    ``config`` may be a plain dict or a ColumnConfig object depending on dbt version;
+    this normalizes both to a dict copy that is safe to mutate.
+    """
+    node_config = getattr(node_col, "config", None)
+    if node_config is None:
+        return {}
+    raw = (
+        node_config.get("meta", {}) if isinstance(node_config, dict)
+        else getattr(node_config, "meta", None) or {}
+    )
+    return dict(raw or {})
+
+
+def _build_column_config_with_meta(node_col: t.Any, new_meta: dict[str, t.Any]) -> dict[str, t.Any]:
+    """Build a ``config`` dict for ``_safe_column_replace`` carrying *new_meta*.
+
+    Preserves any other keys already on the column's config block.
+    """
+    from dbt_osmosis.core.inheritance import _column_to_dict
+
+    col_as_dict = _column_to_dict(node_col, omit_none=True)
+    config_base = col_as_dict.get("config") or {}
+    return {**config_base, "meta": new_meta}
+
+
 @_transform_op("Inherit Upstream Column Knowledge (CLL)")
 def inherit_upstream_column_knowledge_cll(
     context: YamlRefactorContextProtocol,
@@ -705,6 +733,11 @@ def inherit_upstream_column_knowledge_cll(
             # in chain, source is progenitor" (staging→source). Allow inheritance in that case.
             continue
 
+        # Immediate CLL progenitor reference for the desc-source provenance tag.
+        # Set only on the single-progenitor (non-union) path; unions have no single
+        # source so they never receive a desc-source value.
+        desc_source_ref: str | None = None
+
         if _is_union:
             # Agreement-aware union resolution: every branch's description is
             # collected via the walker; the result is accepted iff at most one
@@ -753,6 +786,9 @@ def inherit_upstream_column_knowledge_cll(
                     result.progenitor_model.lower(),
                     progenitor_col,
                 )
+                # Trace provenance to the IMMEDIATE progenitor (direct parent in the CLL
+                # result), matching how tags/meta are inherited — not the deepest origin.
+                desc_source_ref = f"{result.progenitor_model.upper()}.{progenitor_col.upper()}"
 
         # --- desc-owner: should we overwrite the existing description? ---
         desc_authority = _get_setting_for_node("desc-owner", node, col_name, fallback="this")
@@ -765,12 +801,20 @@ def inherit_upstream_column_knowledge_cll(
 
         update_kwargs: dict[str, t.Any] = {}
 
+        # Track whether THIS column's description was gap-filled (was empty before and a
+        # CLL description is now applied). Force-inherit overwrites of an existing,
+        # already-populated description are NOT gap-fills — those columns are owned
+        # upstream and must not receive a desc-source provenance tag.
+        _gap_filled = False
+
         if desc_to_apply is not None:
             # Only write the description if allowed (force_inherit or the column is empty).
             if force_inherit or not existing_desc:
                 clean_desc = strip_annotation_tags(desc_to_apply).strip()
                 if clean_desc and clean_desc not in context.placeholders:
                     update_kwargs["description"] = clean_desc
+                    if not existing_desc:
+                        _gap_filled = True
 
         # --- Inherit tags and meta from the immediate CLL progenitor (not the full chain) ---
         # Unions have no single progenitor — skip tag/meta merge for them. Their
@@ -829,6 +873,34 @@ def inherit_upstream_column_knowledge_cll(
                             merged_meta.pop(key, None)
                     if merged_meta != local_meta:
                         update_kwargs["meta"] = merged_meta
+
+        # --- desc-source provenance (config.meta) ---
+        # Write the immediate CLL progenitor reference when this run gap-filled an
+        # empty description. Strip a stale tag when the column now owns its own
+        # authored description (transitioned from inherited to anchored).
+        _desc_source_key = _cfg.desc_source_key
+        if _desc_source_key:
+            _cfg_meta = _read_column_config_meta(node_col)
+            _new_cfg_meta = dict(_cfg_meta)
+            if _gap_filled and desc_source_ref is not None:
+                _new_cfg_meta[_desc_source_key] = desc_source_ref
+            elif _desc_source_key in _new_cfg_meta:
+                # The tag is present but no gap-fill happened. Strip it only when the
+                # column now owns real content of its own and is NOT force-inherited
+                # (force_inherit columns stay "owned upstream" and keep no provenance,
+                # so there is nothing to strip there either — they never had it written).
+                _final_desc = (
+                    update_kwargs.get("description")
+                    if "description" in update_kwargs
+                    else existing_desc
+                )
+                _has_own_content = bool(
+                    _final_desc and strip_annotation_tags(_final_desc).strip()
+                )
+                if _has_own_content and not force_inherit:
+                    _new_cfg_meta.pop(_desc_source_key, None)
+            if _new_cfg_meta != _cfg_meta:
+                update_kwargs["config"] = _build_column_config_with_meta(node_col, _new_cfg_meta)
 
         if update_kwargs:
             logger.debug(

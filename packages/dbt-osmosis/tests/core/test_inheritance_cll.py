@@ -37,17 +37,38 @@ PROJECT = "/proj"
 class FakeColumn:
     """Minimal stand-in for dbt ColumnInfo supporting attribute reads + replace()."""
 
-    def __init__(self, name, description="", tags=None, meta=None):
+    def __init__(self, name, description="", tags=None, meta=None, config=None):
         self.name = name
         self.description = description
         self.tags = list(tags or [])
         self.meta = dict(meta or {})
+        # config mirrors dbt ColumnInfo.config — a dict that may carry a nested 'meta'.
+        self.config = dict(config or {})
+
+    def to_dict(self, **kwargs):
+        return {
+            "name": self.name,
+            "description": self.description,
+            "tags": list(self.tags),
+            "meta": dict(self.meta),
+            "config": dict(self.config),
+        }
 
     def replace(self, **kwargs):
-        new = FakeColumn(self.name, self.description, list(self.tags), dict(self.meta))
+        new = FakeColumn(
+            self.name,
+            self.description,
+            list(self.tags),
+            dict(self.meta),
+            dict(self.config),
+        )
         for key, value in kwargs.items():
             setattr(new, key, value)
         return new
+
+    def config_meta(self):
+        """Convenience accessor for the nested config.meta dict in assertions."""
+        return dict((self.config or {}).get("meta", {}))
 
 
 class FakeNode:
@@ -521,3 +542,127 @@ def test_anchor_acts_as_wall_for_downstream_inheritance():
     ):
         inherit_upstream_column_knowledge_cll(ctx, child)
     assert child.columns["COL"].description == "Anchored truth"
+
+
+# ---------------------------------------------------------------------------
+# desc-source provenance (config.meta)
+# ---------------------------------------------------------------------------
+
+
+def test_gap_fill_writes_desc_source_to_config_meta():
+    """An empty column gap-filled via CLL records the immediate progenitor in config.meta."""
+    child = FakeNode("child", {"BPARTNER_ID": FakeColumn("BPARTNER_ID", description="")})
+    ctx = make_context()
+    with patched(
+        results={
+            "child": [
+                cll(
+                    "child",
+                    "bpartner_id",
+                    progenitor_model="stg_edw__ae_aml__aml_t_bpartner_position",
+                    progenitor_column="bpartner_id",
+                )
+            ]
+        },
+        yaml_descs={
+            ("stg_edw__ae_aml__aml_t_bpartner_position", "bpartner_id"): "Geschaeftspartner-Nr."
+        },
+        node_index={
+            "stg_edw__ae_aml__aml_t_bpartner_position": FakeNode(
+                "stg_edw__ae_aml__aml_t_bpartner_position",
+                {"BPARTNER_ID": FakeColumn("BPARTNER_ID", "Geschaeftspartner-Nr.")},
+            )
+        },
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["BPARTNER_ID"]
+    assert col.description == "Geschaeftspartner-Nr."
+    assert col.config_meta() == {
+        "desc-source": "STG_EDW__AE_AML__AML_T_BPARTNER_POSITION.BPARTNER_ID"
+    }
+
+
+def test_force_inherit_overwrite_does_not_write_desc_source():
+    """An existing description overwritten via desc-owner: upstream is owned upstream —
+    no desc-source provenance is written."""
+    child = FakeNode(
+        "child",
+        {"COL": FakeColumn("COL", description="Local desc")},
+        settings={("desc-owner", None): "upstream"},
+    )
+    ctx = make_context()
+    with patched(
+        results={
+            "child": [cll("child", "col", progenitor_model="parent", progenitor_column="col")]
+        },
+        yaml_descs={("parent", "col"): "Parent desc"},
+        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "Parent desc")})},
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["COL"]
+    assert col.description == "Parent desc"  # overwritten
+    assert "desc-source" not in col.config_meta()  # but no provenance tag
+
+
+def test_no_description_resolved_writes_no_desc_source():
+    """When CLL resolves no description, no gap-fill happens → no desc-source written."""
+    child = FakeNode("child", {"COL": FakeColumn("COL", description="")})
+    ctx = make_context()
+    with patched(
+        results={
+            "child": [cll("child", "col", progenitor_model="parent", progenitor_column="col")]
+        },
+        # No yaml_descs entry for parent.col → _find_cll_description returns None.
+        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "")})},
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["COL"]
+    assert col.description == ""
+    assert "desc-source" not in col.config_meta()
+
+
+def test_desc_source_disabled_writes_no_key():
+    """desc-source-key = '' disables writing the provenance key entirely."""
+    child = FakeNode("child", {"COL": FakeColumn("COL", description="")})
+    ctx = make_context()
+    cfg = get_config()
+    cfg.desc_source_key = ""  # disable
+    with patched(
+        results={
+            "child": [cll("child", "col", progenitor_model="parent", progenitor_column="col")]
+        },
+        yaml_descs={("parent", "col"): "Parent desc"},
+        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "Parent desc")})},
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["COL"]
+    assert col.description == "Parent desc"  # still inherited
+    assert col.config_meta() == {}  # but no provenance key
+
+
+def test_desc_source_stripped_when_column_gains_own_description():
+    """A column carrying a stale desc-source tag that now owns its own authored
+    description (desc-owner: this) has the provenance key stripped."""
+    child = FakeNode(
+        "child",
+        {
+            "COL": FakeColumn(
+                "COL",
+                description="Authored locally now",
+                config={"meta": {"desc-source": "PARENT.COL"}},
+            )
+        },
+        settings={("desc-owner", None): "this"},
+    )
+    ctx = make_context()
+    with patched(
+        results={
+            "child": [cll("child", "col", progenitor_model="parent", progenitor_column="col")]
+        },
+        yaml_descs={("parent", "col"): "Parent desc"},
+        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "Parent desc")})},
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["COL"]
+    assert col.description == "Authored locally now"  # own description preserved
+    assert "desc-source" not in col.config_meta()  # stale provenance stripped

@@ -193,6 +193,21 @@ class OsmosisConfig:
     inputs, etc.).  Value format: ``SCHEMA.MODEL``.  Aligns with ``annotation-computed``.
     """
 
+    # ── desc-source provenance ────────────────────────────────────────────────
+    desc_source_key: str = "desc-source"
+    """Meta key written under ``config.meta`` recording the CLL progenitor a column's
+    description was gap-filled from.  Value format: ``MODEL_NAME.COLUMN_NAME`` (uppercase;
+    for sources, ``MODEL_NAME`` is the source table name).
+
+    Written ONLY when CLL inheritance fills a previously empty description (gap-fill) — never
+    for force-inherit (``desc-owner: upstream``) overwrites of an existing description, since
+    such columns are owned upstream and need no provenance tag.  Stripped when a column gains
+    its own authored description and is no longer inherited.
+
+    Set to an empty string in ``.osmosis`` (``desc-source-key =``) to disable writing the key.
+    Configured as ``desc-source-key``.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton
@@ -277,7 +292,7 @@ def _load_config(start: Path) -> OsmosisConfig:
         section = parser[_SECTION]
         known = {f.replace("_", "-") for f in OsmosisConfig.__dataclass_fields__}
         # Add the short aliases that map to field names via custom key names in _load_config
-        known |= {"col-renamed-from", "col-derived-from", "col-computed-in", "legacy-strip-markers"}
+        known |= {"col-renamed-from", "col-derived-from", "col-computed-in", "legacy-strip-markers", "desc-source-key"}
         unknown = set(section) - known
         if unknown:
             logger.warning(
@@ -341,6 +356,7 @@ def _load_config(start: Path) -> OsmosisConfig:
             meta_key_renamed_from              = _str("col-renamed-from",     OsmosisConfig.meta_key_renamed_from),
             meta_key_derived_from              = _str("col-derived-from",     OsmosisConfig.meta_key_derived_from),
             meta_key_computed_in               = _str("col-computed-in",      OsmosisConfig.meta_key_computed_in),
+            desc_source_key                    = _str("desc-source-key",      OsmosisConfig.desc_source_key),
             legacy_strip_markers               = _strlist("legacy-strip-markers", []),
         )
         logger.debug("Loaded dbt-osmosis-cll config from %s: %s", osmosis_file, cfg)
