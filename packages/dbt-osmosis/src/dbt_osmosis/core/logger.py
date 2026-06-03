@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import typing as t
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-
-import rich
-import rich.console
-from rich.logging import RichHandler
 
 __all__ = [
     "LOGGER",
@@ -21,19 +18,32 @@ __all__ = [
 ]
 
 _LOG_FILE_FORMAT = "%(asctime)s — %(name)s — %(levelname)s — %(message)s"
+_LOG_CONSOLE_FORMAT = "%(asctime)s  %(levelname)-8s  %(message)s"
+_LOG_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LOG_PATH = Path.home().absolute() / ".dbt-osmosis" / "logs"
 _LOGGING_LEVEL = logging.INFO
 
+# Strip Rich markup emoji codes (e.g. ":rocket:", ":gear:") and leftover whitespace.
+_RICH_MARKUP_RE = re.compile(r":\w+:")
+
+
+class _CleanFormatter(logging.Formatter):
+    """Plain formatter that strips Rich emoji markup codes from log messages."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        record.msg = _RICH_MARKUP_RE.sub("", str(record.msg)).strip()
+        return super().format(record)
+
 
 def get_rotating_log_handler(name: str, path: Path, formatter: str) -> RotatingFileHandler:
-    """This handler writes warning and higher level outputs to logs in a home .dbt-osmosis directory rotating them as needed"""
+    """Writes WARNING+ logs to a rotating file in ~/.dbt-osmosis/logs/."""
     path.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
         str(path / f"{name}.log"),
         maxBytes=int(1e6),
         backupCount=3,
     )
-    handler.setFormatter(logging.Formatter(formatter))
+    handler.setFormatter(logging.Formatter(formatter, datefmt=_LOG_TIME_FORMAT))
     handler.setLevel(logging.WARNING)
     return handler
 
@@ -45,34 +55,19 @@ def get_logger(
     path: Path = _LOG_PATH,
     formatter: str = _LOG_FILE_FORMAT,
 ) -> logging.Logger:
-    """Builds and caches loggers. Can be configured with module level attributes or on a call by call basis.
-
-    Simplifies logger management without having to instantiate separate pointers in each module.
-
-    Args:
-        name (str, optional): Logger name, also used for output log file name in `~/.dbt-osmosis/logs` directory.
-        level (Union[int, str], optional): Logging level, this is explicitly passed to console handler which effects what level of log messages make it to the console. Defaults to logging.INFO.
-        path (Path, optional): Path for output warning level+ log files. Defaults to `~/.dbt-osmosis/logs`
-        formatter (str, optional): Format for output log files. Defaults to a "time — name — level — message" format
-
-    Returns:
-        logging.Logger: Prepared logger with rotating logs and console streaming. Can be executed directly from function.
-
-    """
+    """Build and cache a logger with a clean console handler (timestamp, no emoji)."""
     if isinstance(level, str):
         level = getattr(logging, level, logging.INFO)
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.addHandler(get_rotating_log_handler(name, path, formatter))
-    logger.addHandler(
-        RichHandler(
-            level=level,
-            console=rich.console.Console(stderr=True),
-            rich_tracebacks=True,
-            markup=True,
-            show_time=False,
-        ),
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(
+        _CleanFormatter(fmt=_LOG_CONSOLE_FORMAT, datefmt=_LOG_TIME_FORMAT)
     )
+    logger.addHandler(console_handler)
     logger.propagate = False
     return logger
 

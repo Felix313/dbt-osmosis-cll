@@ -270,7 +270,7 @@ def inherit_upstream_column_knowledge(
                 logger.info(":hourglass: Inherit Upstream Column Knowledge progress => %d / %d", i, total)
         return
 
-    logger.info(":dna: Inheriting column knowledge for => %s", node.unique_id)
+    logger.debug(":dna: Inheriting column knowledge for => %s", node.unique_id)
 
     from dbt_osmosis.core.inheritance import _build_column_knowledge_graph
     from dbt_osmosis.core.introspection import _get_setting_for_node
@@ -636,7 +636,7 @@ def inherit_upstream_column_knowledge_cll(
                     )
         return
 
-    logger.info(":dna: CLL-driven inheritance for => %s", node.unique_id)
+    logger.debug(":dna: CLL-driven inheritance for => %s", node.unique_id)
 
     from dbt_osmosis.core.cll import (
         _ensure_manifest_index,
@@ -1099,7 +1099,7 @@ def sort_columns_as_in_database(
         ):
             ...
         return
-    logger.info(":1234: Sorting columns by warehouse order => %s", node.unique_id)
+    logger.debug(":1234: Sorting columns by warehouse order => %s", node.unique_id)
     from dbt_osmosis.core.cll import get_model_columns_from_cll
     if node.resource_type == NodeType.Source:
         incoming_columns = get_columns(context, node)
@@ -1160,7 +1160,7 @@ def sort_columns_alphabetically(
         ):
             ...
         return
-    logger.info(":abcd: Sorting columns alphabetically => %s", node.unique_id)
+    logger.debug(":abcd: Sorting columns alphabetically => %s", node.unique_id)
 
     # Determine the case conversion setting for sorting
     # We need to sort based on the FINAL case of the column names, not the original case
@@ -1234,7 +1234,7 @@ def synchronize_data_types(
         ):
             ...
         return
-    logger.info(":1234: Synchronizing data types => %s", node.unique_id)
+    logger.debug(":1234: Synchronizing data types => %s", node.unique_id)
     from dbt_osmosis.core.cll import get_model_columns_from_cll
     if node.resource_type == NodeType.Source:
         incoming_columns = get_columns(context, node)
@@ -1980,7 +1980,7 @@ def apply_semantic_analysis(
             ...
         return
 
-    logger.info(":robot: Analyzing semantics for => %s", node.unique_id)
+    logger.debug(":robot: Analyzing semantics for => %s", node.unique_id)
 
     # Check if LLM is configured
     try:
@@ -2149,7 +2149,7 @@ def suggest_improved_documentation(
         logger.debug(":no_entry_sign: Skipping AI suggestions (skip_ai_suggestions=True).")
         return
 
-    logger.info(":robot: Generating AI documentation suggestions for => %s", node.unique_id)
+    logger.debug(":robot: Generating AI documentation suggestions for => %s", node.unique_id)
 
     # Analyze project style for voice learning
     style_profile: ProjectStyleProfile | None = None

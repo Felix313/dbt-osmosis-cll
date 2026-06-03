@@ -326,7 +326,7 @@ def _finalize_synced_document(
     if not commit:
         return
 
-    logger.info(":inbox_tray: Committing YAML doc changes for => %s", target_path)
+    logger.debug(":inbox_tray: Committing YAML doc changes for => %s", target_path)
 
     from dbt_osmosis.core.schema.writer import _write_yaml
 
