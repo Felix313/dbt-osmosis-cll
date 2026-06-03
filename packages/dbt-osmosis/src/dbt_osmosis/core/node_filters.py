@@ -100,14 +100,14 @@ def _topological_waves(
 
 def _is_fqn_match(node: ResultNode, fqns: list[str]) -> bool:
     """Filter models based on the provided fully qualified name matching on partial segments."""
-    logger.debug(":mag_right: Checking if node => %s matches any FQNs => %s", node.unique_id, fqns)
+    logger.debug("Checking if node => %s matches any FQNs => %s", node.unique_id, fqns)
     for fqn_str in fqns:
         parts = fqn_str.split(".")
         segment_match = len(node.fqn[1:]) >= len(parts) and all(
             left == right for left, right in zip(parts, node.fqn[1:])
         )
         if segment_match:
-            logger.debug(":white_check_mark: FQN matched => %s", fqn_str)
+            logger.debug("FQN matched => %s", fqn_str)
             return True
     return False
 
@@ -127,7 +127,7 @@ def _resolve_select_to_ids(context: t.Any) -> frozenset[str]:
     manifest = context.project.manifest
     select_strs = list(context.settings.select)
 
-    logger.debug(":mag_right: Resolving dbt selectors => %s", select_strs)
+    logger.debug("Resolving dbt selectors => %s", select_strs)
 
     graph = Linker().get_graph(manifest)
     spec = parse_union(select_strs, expect_exists=False)
@@ -143,7 +143,7 @@ def _resolve_select_to_ids(context: t.Any) -> frozenset[str]:
             "(no run artifacts available)."
         ) from exc
 
-    logger.debug(":white_check_mark: Selector resolved => %d node(s)", len(selected_ids))
+    logger.debug("Selector resolved => %d node(s)", len(selected_ids))
     return frozenset(selected_ids)
 
 
@@ -158,17 +158,17 @@ def _is_file_match(node: ResultNode, paths: list[Path | str], root: Path | str) 
     for model_or_dir in paths:
         model_or_dir = Path(model_or_dir).resolve()
         if node.name == model_or_dir.stem:
-            logger.debug(":white_check_mark: Name match => %s", model_or_dir)
+            logger.debug("Name match => %s", model_or_dir)
             return True
         if model_or_dir.is_dir():
             if model_or_dir in node_path.parents or (
                 yaml_path and model_or_dir in yaml_path.parents
             ):
-                logger.debug(":white_check_mark: Directory path match => %s", model_or_dir)
+                logger.debug("Directory path match => %s", model_or_dir)
                 return True
         if model_or_dir.is_file():
             if model_or_dir.samefile(node_path) or (yaml_path and model_or_dir.samefile(yaml_path)):
-                logger.debug(":white_check_mark: File path match => %s", model_or_dir)
+                logger.debug("File path match => %s", model_or_dir)
                 return True
     return False
 
@@ -265,7 +265,7 @@ def _iter_candidate_nodes(
         if context.settings.fqn:
             if not _is_fqn_match(node, context.settings.fqn):
                 return False
-        logger.debug(":white_check_mark: Node => %s passed filtering logic.", node.unique_id)
+        logger.debug("Node => %s passed filtering logic.", node.unique_id)
         return True
 
     candidate_nodes: list[t.Any] = []

@@ -39,7 +39,7 @@ class FuzzyCaseMatching:
             cc := re.sub(r"_(.)", lambda m: m.group(1).upper(), name),  # camelCase
             cc[0].upper() + cc[1:],  # PascalCase
         ]
-        logger.debug(":lower_upper_case: FuzzyCaseMatching variants => %s", variants)
+        logger.debug("FuzzyCaseMatching variants => %s", variants)
         return variants
 
 

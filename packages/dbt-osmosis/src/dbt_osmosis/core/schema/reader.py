@@ -204,9 +204,9 @@ def _read_yaml(
     with yaml_handler_lock, _YAML_BUFFER_CACHE_LOCK:
         if path not in _YAML_BUFFER_CACHE:
             if not path.is_file():
-                logger.debug(":warning: Path => %s is not a file. Returning empty doc.", path)
+                logger.debug("Path => %s is not a file. Returning empty doc.", path)
                 return _YAML_BUFFER_CACHE.setdefault(path, {})
-            logger.debug(":open_file_folder: Reading YAML doc => %s", path)
+            logger.debug("Reading YAML doc => %s", path)
             try:
                 # Read the file using the filtered YAML handler (OsmosisYAML)
                 # This filters out semantic_models, macros, etc.
@@ -236,7 +236,7 @@ def _read_yaml(
                 )
                 raise
             except OSError as e:
-                logger.error(":boom: Failed to read YAML file => %s: %s", path, e)
+                logger.error("Failed to read YAML file => %s: %s", path, e)
                 raise
     with _YAML_BUFFER_CACHE_LOCK:
         return t.cast("dict[str, t.Any]", _YAML_BUFFER_CACHE[path])

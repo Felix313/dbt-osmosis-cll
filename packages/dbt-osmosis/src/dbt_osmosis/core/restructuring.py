@@ -62,7 +62,7 @@ def _generate_minimal_model_yaml(
 
     Includes columns from the manifest to ensure data_type is preserved.
     """
-    logger.debug(":baby: Generating minimal yaml for Model/Seed => %s", node.name)
+    logger.debug("Generating minimal yaml for Model/Seed => %s", node.name)
     columns = []
     for col_name, col_info in node.columns.items():
         col_dict = _column_to_dict(col_info, omit_none=True)
@@ -86,7 +86,7 @@ def _generate_minimal_source_yaml(
 
     Includes columns from the manifest to ensure data_type is preserved.
     """
-    logger.debug(":baby: Generating minimal yaml for Source => %s", node.name)
+    logger.debug("Generating minimal yaml for Source => %s", node.name)
     columns = []
     for col_name, col_info in node.columns.items():
         col_dict = _column_to_dict(col_info, omit_none=True)
@@ -107,10 +107,10 @@ def _create_operations_for_node(
     loc: t.Any,  # SchemaFileLocation
 ) -> list[RestructureOperation]:
     """Create restructure operations for a dbt model or source node."""
-    logger.debug(":bricks: Creating restructure operations for => %s", uid)
+    logger.debug("Creating restructure operations for => %s", uid)
     node = context.project.manifest.nodes.get(uid) or context.project.manifest.sources.get(uid)
     if not node:
-        logger.warning(":warning: Node => %s not found in manifest.", uid)
+        logger.warning("Node => %s not found in manifest.", uid)
         return []
 
     # If loc.current is None => we are generating a brand new file
@@ -118,7 +118,7 @@ def _create_operations_for_node(
     ops: list[RestructureOperation] = []
 
     if loc.current is None:
-        logger.info(":sparkles: No current YAML file, building minimal doc => %s", uid)
+        logger.info("No current YAML file, building minimal doc => %s", uid)
         if isinstance(node, (ModelNode, SeedNode)):
             minimal = _generate_minimal_model_yaml(node, fusion_compat=context.fusion_compat)
             ops.append(
@@ -175,7 +175,7 @@ def _create_operations_for_node(
 
 def draft_restructure_delta_plan(context: YamlRefactorContextProtocol) -> RestructureDeltaPlan:
     """Draft a restructure plan for the dbt project."""
-    logger.debug(":bulb: Drafting restructure delta plan...")
+    logger.debug("Drafting restructure delta plan...")
     plan = RestructureDeltaPlan()
     lock = threading.Lock()
 
@@ -194,7 +194,7 @@ def draft_restructure_delta_plan(context: YamlRefactorContextProtocol) -> Restru
     for fut in done:
         exc = fut.exception()
         if exc:
-            logger.error(":bomb: Error encountered while drafting plan => %s", exc)
+            logger.error("Error encountered while drafting plan => %s", exc)
             raise exc
 
     # Deduplicate operations by target file path
@@ -235,26 +235,26 @@ def draft_restructure_delta_plan(context: YamlRefactorContextProtocol) -> Restru
 
     plan.operations = list(deduplicated_ops.values())
 
-    logger.debug(":star2: Restructure plan => %s operations", len(plan.operations))
+    logger.debug("Restructure plan => %s operations", len(plan.operations))
     return plan
 
 
 def pretty_print_plan(plan: RestructureDeltaPlan) -> None:
     """Pretty print the restructure plan for the dbt project."""
-    logger.info(":mega: Restructure plan includes => %s operations.", len(plan.operations))
+    logger.info("Restructure plan includes => %s operations.", len(plan.operations))
     for op in plan.operations:
         str_content = str(op.content)[:PLAN_OUTPUT_TRUNCATION_LENGTH] + "..."
-        logger.info(":sparkles: Processing => %s", str_content)
+        logger.info("Processing => %s", str_content)
         if not op.superseded_paths:
-            logger.info(":blue_book: CREATE or MERGE => %s", op.file_path)
+            logger.info("CREATE or MERGE => %s", op.file_path)
         else:
             old_paths = [p.name for p in op.superseded_paths.keys()] or ["UNKNOWN"]
-            logger.info(":blue_book: %s -> %s", old_paths, op.file_path)
+            logger.info("%s -> %s", old_paths, op.file_path)
 
 
 def _remove_models(existing_doc: dict[str, t.Any], nodes: list[ResultNode]) -> None:
     """Clean up the existing yaml doc by removing models superseded by the restructure plan."""
-    logger.debug(":scissors: Removing superseded models => %s", [n.name for n in nodes])
+    logger.debug("Removing superseded models => %s", [n.name for n in nodes])
     to_remove = {n.name for n in nodes if n.resource_type == NodeType.Model}
     keep = []
     for section in existing_doc.get("models", []):
@@ -265,7 +265,7 @@ def _remove_models(existing_doc: dict[str, t.Any], nodes: list[ResultNode]) -> N
 
 def _remove_seeds(existing_doc: dict[str, t.Any], nodes: list[ResultNode]) -> None:
     """Clean up the existing yaml doc by removing models superseded by the restructure plan."""
-    logger.debug(":scissors: Removing superseded seeds => %s", [n.name for n in nodes])
+    logger.debug("Removing superseded seeds => %s", [n.name for n in nodes])
     to_remove = {n.name for n in nodes if n.resource_type == NodeType.Seed}
     keep = []
     for section in existing_doc.get("seeds", []):
@@ -279,7 +279,7 @@ def _remove_sources(existing_doc: dict[str, t.Any], nodes: list[ResultNode]) -> 
     to_remove_sources = {
         (n.source_name, n.name) for n in nodes if n.resource_type == NodeType.Source
     }
-    logger.debug(":scissors: Removing superseded sources => %s", sorted(to_remove_sources))
+    logger.debug("Removing superseded sources => %s", sorted(to_remove_sources))
     keep_sources = []
     for section in existing_doc.get("sources", []):
         keep_tables = []
@@ -300,11 +300,11 @@ def apply_restructure_plan(
 ) -> None:
     """Apply the restructure plan for the dbt project."""
     if not plan.operations:
-        logger.debug(":white_check_mark: YAML routing: up to date")
+        logger.debug("YAML routing: up to date")
         return
 
     if confirm:
-        logger.info(":warning: Confirm option set => printing plan and waiting for user input.")
+        logger.info("Confirm option set => printing plan and waiting for user input.")
         pretty_print_plan(plan)
 
     while confirm:
@@ -314,7 +314,7 @@ def apply_restructure_plan(
         if response.lower() in ("n", "no", ""):
             logger.info("Skipping restructure plan.")
             return
-        logger.warning(":loudspeaker: Please respond with 'y' or 'n'.")
+        logger.warning("Please respond with 'y' or 'n'.")
 
     from dbt_osmosis.core.config import _reload_manifest
     from dbt_osmosis.core.schema.reader import (
@@ -329,7 +329,7 @@ def apply_restructure_plan(
     register_disk_mutation = getattr(context, "register_disk_mutation", None)
 
     for op in plan.operations:
-        logger.debug(":arrow_right: Applying restructure operation => %s", op)
+        logger.debug("Applying restructure operation => %s", op)
         output_doc: dict[str, t.Any] = {"version": 2}
         if op.file_path.exists():
             existing_data = _read_yaml(
@@ -380,7 +380,7 @@ def apply_restructure_plan(
                         if callable(register_disk_mutation):
                             register_disk_mutation()
                     context.register_mutations(1)
-                    logger.info(":heavy_minus_sign: Superseded entire file => %s", path)
+                    logger.info("Superseded entire file => %s", path)
                 else:
                     _write_yaml(
                         context.yaml_handler,
@@ -398,7 +398,7 @@ def apply_restructure_plan(
                         op.file_path,
                     )
 
-    logger.debug(":arrows_counterclockwise: Committing restructure changes")
+    logger.debug("Committing restructure changes")
     from dbt_osmosis.core.schema.writer import commit_yamls
 
     commit_yamls(
@@ -410,5 +410,5 @@ def apply_restructure_plan(
         written_file_tracker=written_file_tracker,
     )
     if getattr(context, "disk_mutation_count", starting_disk_mutations) > starting_disk_mutations:
-        logger.debug(":arrows_counterclockwise: Reloading manifest after restructure")
+        logger.debug("Reloading manifest after restructure")
         _reload_manifest(context.project)

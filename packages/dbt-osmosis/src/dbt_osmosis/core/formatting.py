@@ -64,7 +64,7 @@ def run_external_formatter(
     """
     file_list = [str(f) for f in files]
     if not file_list:
-        logger.debug(":white_check_mark: No files to format, skipping external formatter.")
+        logger.debug("No files to format, skipping external formatter.")
         return True
 
     try:
@@ -82,7 +82,7 @@ def run_external_formatter(
         formatter_cmd,
         len(file_list),
     )
-    logger.debug(":arrow_right: Full command: %s", cmd)
+    logger.debug("Full command: %s", cmd)
 
     try:
         result = subprocess.run(
@@ -126,7 +126,7 @@ def run_external_formatter(
 
     stdout_output = result.stdout.decode("utf-8", errors="replace").strip()
     if stdout_output:
-        logger.debug(":art: Formatter output:\n%s", stdout_output)
+        logger.debug("Formatter output:\n%s", stdout_output)
 
     logger.info(
         ":white_check_mark: External formatter completed successfully (%d file(s)).",

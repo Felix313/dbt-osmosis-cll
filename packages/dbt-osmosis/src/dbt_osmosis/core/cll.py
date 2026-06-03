@@ -90,11 +90,11 @@ def _load_disk_cache(project_dir: str) -> dict[str, t.Any]:
             if data.get("schema_version") == _CACHE_SCHEMA_VERSION:
                 entries = data.get("entries", {})
                 _DISK_CACHE[project_dir] = entries
-                logger.info(":rocket: CLL cache — warm (%d entries)", len(entries))
+                logger.info("CLL cache — warm (%d entries)", len(entries))
                 return _DISK_CACHE[project_dir]
         except Exception as exc:
             logger.debug("CLL disk cache load failed (will rebuild): %s", exc)
-    logger.info(":snowflake: CLL cache — cold (no cache found, first run will be slow)")
+    logger.info("CLL cache — cold (no cache found, first run will be slow)")
     _DISK_CACHE[project_dir] = {}
     return _DISK_CACHE[project_dir]
 
@@ -296,7 +296,7 @@ def maybe_bulk_compile(context: "YamlRefactorContextProtocol") -> None:
     target_name: str | None = getattr(runtime_cfg, "target_name", None)
     target_base = Path(project_dir) / getattr(runtime_cfg, "target_path", "target")
 
-    logger.info(":mag: Checking compiled SQL freshness for candidate nodes...")
+    logger.info("Checking compiled SQL freshness for candidate nodes...")
     stale = [
         node
         for _, node in _iter_candidate_nodes(context)
@@ -305,10 +305,10 @@ def maybe_bulk_compile(context: "YamlRefactorContextProtocol") -> None:
     ]
 
     if not stale:
-        logger.info(":white_check_mark: All compiled SQL is up-to-date — skipping bulk compile.")
+        logger.info("All compiled SQL is up-to-date — skipping bulk compile.")
         return
 
-    logger.info(":hammer: %d stale model(s) — running bulk dbt compile upfront.", len(stale))
+    logger.info("%d stale model(s) — running bulk dbt compile upfront.", len(stale))
 
     select_str = " ".join(n.name for n in stale)
     # Windows CreateProcess has a ~32 767 char command-line limit; stay well below it.
@@ -318,7 +318,7 @@ def maybe_bulk_compile(context: "YamlRefactorContextProtocol") -> None:
     if len(select_str) <= _MAX_SELECT_LEN:
         cmd += ["--select", select_str]
     else:
-        logger.debug(":information: select string too long (%d chars) — compiling all models.", len(select_str))
+        logger.debug("select string too long (%d chars) — compiling all models.", len(select_str))
     if target_name:
         cmd += ["--target", target_name]
 
@@ -331,7 +331,7 @@ def maybe_bulk_compile(context: "YamlRefactorContextProtocol") -> None:
             result.stderr or result.stdout,
         )
     else:
-        logger.info(":white_check_mark: Bulk compile done (%d models).", len(stale))
+        logger.info("Bulk compile done (%d models).", len(stale))
         # Invalidate reader cache so ManifestCatalogReader picks up the refreshed manifest.
         _READER_CACHE.pop(project_dir, None)
 

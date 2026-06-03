@@ -105,7 +105,7 @@ def create_yaml_instance(
     encoding: str = "utf-8",
 ) -> ruamel.yaml.YAML:
     """Returns a ruamel.yaml.YAML instance configured with the provided settings."""
-    logger.debug(":notebook: Creating ruamel.yaml.YAML instance with custom formatting.")
+    logger.debug("Creating ruamel.yaml.YAML instance with custom formatting.")
     y = OsmosisYAML()
     y.indent(mapping=indent_mapping, sequence=indent_sequence, offset=indent_offset)
     y.width = width
@@ -179,5 +179,5 @@ def create_yaml_instance(
     y.representer.add_representer(str, str_representer)
     y.representer.add_representer(MappingProxyType, mapping_proxy_representer)
 
-    logger.debug(":notebook: YAML instance created => %s", y)
+    logger.debug("YAML instance created => %s", y)
     return y

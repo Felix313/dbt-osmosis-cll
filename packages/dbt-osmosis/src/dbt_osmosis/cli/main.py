@@ -403,7 +403,7 @@ def refactor(
         _n_nodes = sum(1 for _ in _iter_candidate_nodes(typed_context))
         _proj = settings.project_dir.split("\\")[-1].split("/")[-1] if settings.project_dir else "project"
         _tgt = settings.target or "dev"
-        logger.info(":gear: Propagating docs — project: %s, target: %s, nodes: %d", _proj, _tgt, _n_nodes)
+        logger.info("Propagating docs — project: %s, target: %s, nodes: %d", _proj, _tgt, _n_nodes)
 
         transform = (
             inject_missing_columns
@@ -455,7 +455,7 @@ def organize(
     This command will conform schema ymls in your project as outlined in `dbt_project.yml` &
     bootstrap undocumented dbt models
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -585,7 +585,7 @@ def document(
     This command will conform schema ymls in your project as outlined in `dbt_project.yml` &
     bootstrap undocumented dbt models
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -607,7 +607,7 @@ def document(
 
         from dbt_osmosis.core.node_filters import _iter_candidate_nodes
         _n_nodes = sum(1 for _ in _iter_candidate_nodes(typed_context))
-        logger.info(":gear: Running column propagation pipeline for %d node(s)...", _n_nodes)
+        logger.info("Running column propagation pipeline for %d node(s)...", _n_nodes)
 
         transform = (
             inject_missing_columns
@@ -678,7 +678,7 @@ def doc_health(
     """
     import json as _json
 
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -771,7 +771,7 @@ def model(
     The AI will analyze your query, understand your available models and sources,
     and generate a complete dbt model with SQL and documentation.
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -802,12 +802,12 @@ def model(
                 "columns": columns,
             })
 
-    logger.info(f":crystal_ball: Found {len(available_sources)} available sources/models")
+    logger.info(f"Found {len(available_sources)} available sources/models")
 
     try:
         model_spec = generate_dbt_model_from_nl(query, available_sources)
     except Exception as e:
-        logger.error(f":x: Failed to generate model: {e}")
+        logger.error(f"Failed to generate model: {e}")
         raise
 
     if model_name:
@@ -931,7 +931,7 @@ def sources(
 
     This command discovers tables in your database and generates dbt source YAML definitions.
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1007,7 +1007,7 @@ def staging(
     intelligent staging with AI-powered business logic, or omit for deterministic
     generation via dbt-core-interface.
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1053,7 +1053,7 @@ def staging(
             raise click.ClickException("Generated YAML content is missing a target path.")
 
     except Exception as e:
-        logger.error(f":x: Failed to generate staging model: {e}")
+        logger.error(f"Failed to generate staging model: {e}")
         raise
 
 
@@ -1082,7 +1082,7 @@ def generate_query(
 
     The AI will translate your natural language query into SQL using dbt's ref() syntax.
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1113,12 +1113,12 @@ def generate_query(
                 "columns": columns,
             })
 
-    logger.info(f":crystal_ball: Found {len(available_sources)} available sources/models")
+    logger.info(f"Found {len(available_sources)} available sources/models")
 
     try:
         sql = generate_sql_from_nl(query, available_sources)
     except Exception as e:
-        logger.error(f":x: Failed to generate SQL: {e}")
+        logger.error(f"Failed to generate SQL: {e}")
         raise
 
     click.echo("\n" + "=" * 80)
@@ -1192,7 +1192,7 @@ def nl_generate_deprecated(
         ":warning: The `nl generate` command is deprecated. "
         "Use `dbt-osmosis generate model` instead."
     )
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1226,13 +1226,13 @@ def nl_generate_deprecated(
                 "columns": columns,
             })
 
-    logger.info(f":crystal_ball: Found {len(available_sources)} available sources/models")
+    logger.info(f"Found {len(available_sources)} available sources/models")
 
     # Generate the model specification
     try:
         model_spec = generate_dbt_model_from_nl(query, available_sources)
     except Exception as e:
-        logger.error(f":x: Failed to generate model: {e}")
+        logger.error(f"Failed to generate model: {e}")
         raise
 
     # Override model name if provided
@@ -1322,7 +1322,7 @@ def query(
 
     The AI will translate your natural language query into SQL using dbt's ref() syntax.
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -1354,13 +1354,13 @@ def query(
                 "columns": columns,
             })
 
-    logger.info(f":crystal_ball: Found {len(available_sources)} available sources/models")
+    logger.info(f"Found {len(available_sources)} available sources/models")
 
     # Generate SQL
     try:
         sql = generate_sql_from_nl(query, available_sources)
     except Exception as e:
-        logger.error(f":x: Failed to generate SQL: {e}")
+        logger.error(f"Failed to generate SQL: {e}")
         raise
 
     click.echo("\n" + "=" * 80)
@@ -1429,7 +1429,7 @@ def workbench(
     Pass the --options command to see streamlit specific options that can be passed to the app,
     pass --config to see the output of streamlit config show
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
 
     if "--options" in ctx.args:
         proc = subprocess.run(["streamlit", "run", "--help"], check=False)
@@ -1597,7 +1597,7 @@ def schema(
         dbt-osmosis diff schema --severity breaking
         dbt-osmosis diff schema -f my_project.my_model --output-format json
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
 
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
@@ -1901,7 +1901,7 @@ def suggest(
         dbt-osmosis test suggest --pattern-only --format json
         dbt-osmosis test suggest --output suggestions.json
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
 
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
@@ -1954,7 +1954,7 @@ def suggest(
                 )
                 results[model_name] = analysis
             except Exception as e:  # noqa: BLE001 — per-model failure should not abort the loop
-                logger.error(f":x: Failed to suggest tests for {model_name}: {e}")
+                logger.error(f"Failed to suggest tests for {model_name}: {e}")
     else:
         # Suggest tests for all models
         try:
@@ -1968,7 +1968,7 @@ def suggest(
                 temperature=temperature,
             )
         except Exception as e:
-            logger.error(f":x: Failed to suggest tests: {e}")
+            logger.error(f"Failed to suggest tests: {e}")
             raise
 
     # Format and output results
@@ -2122,7 +2122,7 @@ def lint_file(
 
     This command analyzes SQL code for style issues, anti-patterns, and potential bugs.
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -2219,7 +2219,7 @@ def lint_model_command(
 
     This command analyzes a dbt model's SQL for style issues, anti-patterns, and potential bugs.
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),
@@ -2324,7 +2324,7 @@ def lint_project_command(
 
     This command analyzes all dbt models' SQL for style issues, anti-patterns, and potential bugs.
     """
-    logger.debug(":debug: osmosis command invoked")
+    logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
         project_dir=t.cast(str, project_dir),
         profiles_dir=t.cast(str, profiles_dir),

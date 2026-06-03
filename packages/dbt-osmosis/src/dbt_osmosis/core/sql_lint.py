@@ -585,7 +585,7 @@ class SQLLinter:
         try:
             compiled_node = compile_sql_code(context, raw_sql)
         except Exception as e:
-            logger.debug(":warning: SQL compilation failed: %s", e)
+            logger.debug("SQL compilation failed: %s", e)
             return LintResult(
                 violations=[
                     LintViolation(

@@ -146,7 +146,7 @@ def validate_models(
     report = ValidationReport()
 
     if not models:
-        logger.warning(":warning: No models to validate.")
+        logger.warning("No models to validate.")
         return report
 
     logger.info(
@@ -209,7 +209,7 @@ def validate_models(
 
     # Print summary
     logger.info("=" * 60)
-    logger.info(":clipboard: Validation Summary")
+    logger.info("Validation Summary")
     logger.info("=" * 60)
     logger.info("Total models: %d", report.total_models)
     logger.info("Successful: %d", report.successful)
@@ -250,7 +250,7 @@ def _validate_single_model(
 
     # Step 1: Compile the SQL
     try:
-        logger.debug(":zap: Compiling SQL for model => %s", node.name)
+        logger.debug("Compiling SQL for model => %s", node.name)
         compiled_node = compile_sql_code(context, raw_sql)
         compiled_sql = compiled_node.compiled_code or compiled_node.raw_code
     except Exception as e:
@@ -263,7 +263,7 @@ def _validate_single_model(
 
     # Step 2: Execute the compiled SQL
     try:
-        logger.debug(":running: Executing SQL for model => %s", node.name)
+        logger.debug("Executing SQL for model => %s", node.name)
         start_time = time.time()
         response, table = execute_sql_code(context, compiled_sql)
         execution_time = time.time() - start_time

@@ -152,7 +152,7 @@ class TransformPipeline:
                 from dbt_osmosis.core.sync_operations import sync_node_to_yaml
 
                 sync_node_to_yaml(context, node, commit=True)
-                logger.info(":checkered_flag: [b]Committed[/b] \n")
+                logger.info("[b]Committed[/b] \n")
         self._metadata["completed_at"] = (pipeline_end := time.time())
 
         logger.info(
@@ -167,7 +167,7 @@ class TransformPipeline:
             run-end summary so the user does not have to scroll the log to find
             them.
             """
-            logger.info(":hourglass: Committing all changes to YAML files in batch.")
+            logger.info("Committing all changes to YAML files in batch.")
             _commit_start = time.time()
             failures: list[tuple[str, str]] = []
             try:
@@ -176,7 +176,7 @@ class TransformPipeline:
                 sync_node_to_yaml(context, node, commit=True, failures=failures)
             except Exception as e:
                 # Catch-all so atexit shutdown is never interrupted.
-                logger.error(":boom: Batch commit aborted: %s", e)
+                logger.error("Batch commit aborted: %s", e)
                 failures.append(("<batch>", f"{type(e).__name__}: {e}"))
 
             _commit_end = time.time()
@@ -256,7 +256,7 @@ def inherit_upstream_column_knowledge(
 ) -> None:
     """Inherit column level knowledge from the ancestors of a dbt model or source node."""
     if node is None:
-        logger.info(":wave: Inheriting column knowledge across all matched nodes.")
+        logger.info("Inheriting column knowledge across all matched nodes.")
         from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
         # Must process sequentially in topological order so that upstream in-memory
@@ -267,10 +267,10 @@ def inherit_upstream_column_knowledge(
         for i, (_, n) in enumerate(nodes, start=1):
             inherit_upstream_column_knowledge(context, n)
             if i % 25 == 0 or i == total:
-                logger.info(":hourglass: Inherit Upstream Column Knowledge progress => %d / %d", i, total)
+                logger.info("Inherit Upstream Column Knowledge progress => %d / %d", i, total)
         return
 
-    logger.debug(":dna: Inheriting column knowledge for => %s", node.unique_id)
+    logger.debug("Inheriting column knowledge for => %s", node.unique_id)
 
     from dbt_osmosis.core.inheritance import _build_column_knowledge_graph
     from dbt_osmosis.core.introspection import _get_setting_for_node
@@ -603,7 +603,7 @@ def inherit_upstream_column_knowledge_cll(
     - No name-matching fallback. CLL failure = column skipped, existing description preserved.
     """
     if node is None:
-        logger.info(":wave: CLL-driven column inheritance across all matched nodes.")
+        logger.info("CLL-driven column inheritance across all matched nodes.")
         from dbt_osmosis.core.cll import _ensure_manifest_index
 
         # Build the index dicts once, up front, so the parallel pool only reads them.
@@ -636,7 +636,7 @@ def inherit_upstream_column_knowledge_cll(
                     )
         return
 
-    logger.debug(":dna: CLL-driven inheritance for => %s", node.unique_id)
+    logger.debug("CLL-driven inheritance for => %s", node.unique_id)
 
     from dbt_osmosis.core.cll import (
         _ensure_manifest_index,
@@ -660,7 +660,7 @@ def inherit_upstream_column_knowledge_cll(
     if not results:
         # CLL failed or produced no results → skip entirely, preserve existing state.
         # The failure (if any) was already recorded in _CLL_FAILURES by get_cll_results.
-        logger.debug(":warning: CLL unavailable for %s — skipping CLL inheritance.", node.name)
+        logger.debug("CLL unavailable for %s — skipping CLL inheritance.", node.name)
         return
 
     node_lower = node.name.lower()
@@ -845,10 +845,10 @@ def inject_missing_columns(
     from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
     if _get_setting_for_node("skip-add-columns", node, fallback=context.settings.skip_add_columns):
-        logger.debug(":no_entry_sign: Skipping column injection (skip_add_columns=True).")
+        logger.debug("Skipping column injection (skip_add_columns=True).")
         return
     if node is None:
-        logger.info(":wave: Injecting missing columns for all matched nodes.")
+        logger.info("Injecting missing columns for all matched nodes.")
         # Batch-prefetch source columns in a single DB round trip before per-node processing.
         # For source nodes, get_columns always hits the DB (no CLL) — batching here eliminates
         # the N sequential round trips that make large source refreshes slow.
@@ -866,7 +866,7 @@ def inject_missing_columns(
             (n for _, n in nodes),
         ), start=1):
             if i % 25 == 0 or i == total:
-                logger.info(":hourglass: Inject Missing Columns progress => %d / %d", i, total)
+                logger.info("Inject Missing Columns progress => %d / %d", i, total)
         return
     if (
         _get_setting_for_node(
@@ -876,7 +876,7 @@ def inject_missing_columns(
         )
         and node.resource_type == NodeType.Source
     ):
-        logger.debug(":no_entry_sign: Skipping column injection (skip_add_source_columns=True).")
+        logger.debug("Skipping column injection (skip_add_source_columns=True).")
         return
 
     from dbt_osmosis.core.cll import descriptions_equivalent, get_model_columns_from_cll
@@ -1007,7 +1007,7 @@ def remove_columns_not_in_database(
     from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
     if node is None:
-        logger.info(":wave: Removing columns not in DB across all matched nodes.")
+        logger.info("Removing columns not in DB across all matched nodes.")
         for _ in context.pool.map(
             partial(remove_columns_not_in_database, context),
             (n for _, n in _iter_candidate_nodes(context)),
@@ -1092,14 +1092,14 @@ def sort_columns_as_in_database(
     from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
     if node is None:
-        logger.info(":wave: Sorting columns as they appear in DB across all matched nodes.")
+        logger.info("Sorting columns as they appear in DB across all matched nodes.")
         for _ in context.pool.map(
             partial(sort_columns_as_in_database, context),
             (n for _, n in _iter_candidate_nodes(context)),
         ):
             ...
         return
-    logger.debug(":1234: Sorting columns by warehouse order => %s", node.unique_id)
+    logger.debug("Sorting columns by warehouse order => %s", node.unique_id)
     from dbt_osmosis.core.cll import get_model_columns_from_cll
     if node.resource_type == NodeType.Source:
         incoming_columns = get_columns(context, node)
@@ -1153,14 +1153,14 @@ def sort_columns_alphabetically(
     from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
     if node is None:
-        logger.info(":wave: Sorting columns alphabetically across all matched nodes.")
+        logger.info("Sorting columns alphabetically across all matched nodes.")
         for _ in context.pool.map(
             partial(sort_columns_alphabetically, context),
             (n for _, n in _iter_candidate_nodes(context)),
         ):
             ...
         return
-    logger.debug(":abcd: Sorting columns alphabetically => %s", node.unique_id)
+    logger.debug("Sorting columns alphabetically => %s", node.unique_id)
 
     # Determine the case conversion setting for sorting
     # We need to sort based on the FINAL case of the column names, not the original case
@@ -1197,7 +1197,7 @@ def sort_columns_as_configured(
     from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
     if node is None:
-        logger.info(":wave: Sorting columns as configured across all matched nodes.")
+        logger.info("Sorting columns as configured across all matched nodes.")
         for _ in context.pool.map(
             partial(sort_columns_as_configured, context),
             (n for _, n in _iter_candidate_nodes(context)),
@@ -1227,14 +1227,14 @@ def synchronize_data_types(
     from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
     if node is None:
-        logger.info(":wave: Populating data types across all matched nodes.")
+        logger.info("Populating data types across all matched nodes.")
         for _ in context.pool.map(
             partial(synchronize_data_types, context),
             (n for _, n in _iter_candidate_nodes(context)),
         ):
             ...
         return
-    logger.debug(":1234: Synchronizing data types => %s", node.unique_id)
+    logger.debug("Synchronizing data types => %s", node.unique_id)
     from dbt_osmosis.core.cll import get_model_columns_from_cll
     if node.resource_type == NodeType.Source:
         incoming_columns = get_columns(context, node)
@@ -1356,7 +1356,7 @@ def annotate_column_origins(
     from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
     if node is None:
-        logger.info(":wave: Enriching column origins across all matched nodes.")
+        logger.info("Enriching column origins across all matched nodes.")
         from dbt_osmosis.core.node_filters import _topological_waves
 
         nodes = [n for _, n in _iter_candidate_nodes(context)]
@@ -1617,7 +1617,7 @@ def annotate_column_origins(
                 # No annotation mode: still write stripped description to remove any old tags.
                 node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
 
-            logger.debug(":pencil: %s.%s => derived in %s", node.name, col_name, node_ref)
+            logger.debug("%s.%s => derived in %s", node.name, col_name, node_ref)
 
         else:
             origin = get_column_origin(context, node, col_name)
@@ -1740,7 +1740,7 @@ def annotate_column_origins(
             node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
 
             if is_name_changed:
-                logger.debug(":pencil: %s.%s => renamed from %s.%s", node.name, col_name, schema, origin_col)
+                logger.debug("%s.%s => renamed from %s.%s", node.name, col_name, schema, origin_col)
 
 
 def _collect_upstream_documents(
@@ -1913,7 +1913,7 @@ def synthesize_missing_documentation_with_openai(
             "Please install the 'dbt-osmosis[openai]' extra to use this feature.",
         ) from None
     if node is None:
-        logger.info(":wave: Synthesizing missing documentation across all matched nodes.")
+        logger.info("Synthesizing missing documentation across all matched nodes.")
         for _ in context.pool.map(
             partial(synthesize_missing_documentation_with_openai, context),
             (n for _, n in _iter_candidate_nodes(context)),
@@ -1972,7 +1972,7 @@ def apply_semantic_analysis(
     from dbt_osmosis.core.node_filters import _iter_candidate_nodes
 
     if node is None:
-        logger.info(":wave: Applying semantic analysis across all matched nodes.")
+        logger.info("Applying semantic analysis across all matched nodes.")
         for _ in context.pool.map(
             partial(apply_semantic_analysis, context),
             (n for _, n in _iter_candidate_nodes(context)),
@@ -1980,7 +1980,7 @@ def apply_semantic_analysis(
             ...
         return
 
-    logger.debug(":robot: Analyzing semantics for => %s", node.unique_id)
+    logger.debug("Analyzing semantics for => %s", node.unique_id)
 
     # Check if LLM is configured
     try:
@@ -2022,7 +2022,7 @@ def apply_semantic_analysis(
             continue
 
         try:
-            logger.info(":mag: Analyzing semantics for column => %s", column_name)
+            logger.info("Analyzing semantics for column => %s", column_name)
 
             # Perform semantic analysis
             semantic_result = analyze_column_semantics(
@@ -2131,7 +2131,7 @@ def suggest_improved_documentation(
         ) from None
 
     if node is None:
-        logger.info(":wave: Suggesting improved documentation across all matched nodes.")
+        logger.info("Suggesting improved documentation across all matched nodes.")
         for _ in context.pool.map(
             partial(
                 suggest_improved_documentation,
@@ -2146,17 +2146,17 @@ def suggest_improved_documentation(
 
     # Check if AI co-pilot is disabled for this node
     if _get_setting_for_node("skip-ai-suggestions", node, fallback=False):
-        logger.debug(":no_entry_sign: Skipping AI suggestions (skip_ai_suggestions=True).")
+        logger.debug("Skipping AI suggestions (skip_ai_suggestions=True).")
         return
 
-    logger.debug(":robot: Generating AI documentation suggestions for => %s", node.unique_id)
+    logger.debug("Generating AI documentation suggestions for => %s", node.unique_id)
 
     # Analyze project style for voice learning
     style_profile: ProjectStyleProfile | None = None
     style_examples: list[str] | None = None
 
     if learning_mode:
-        logger.debug(":books: Analyzing project documentation style...")
+        logger.debug("Analyzing project documentation style...")
         style_profile = analyze_project_documentation_style(
             context,
             max_nodes=50,

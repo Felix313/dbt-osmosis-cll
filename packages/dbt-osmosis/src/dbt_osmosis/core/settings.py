@@ -230,17 +230,17 @@ class YamlRefactorContext:
         try:
             # Shutdown the thread pool
             if hasattr(self, "pool") and self.pool is not None:
-                logger.debug(":lock: Shutting down thread pool")
+                logger.debug("Shutting down thread pool")
                 self.pool.shutdown(wait=True)
         except Exception as e:  # noqa: BLE001 — best-effort: shutdown errors must not raise
-            logger.warning(":warning: Error shutting down thread pool: %s", e)
+            logger.warning("Error shutting down thread pool: %s", e)
 
         try:
             # Close the project context
             if hasattr(self, "project") and self.project is not None:
                 self.project.close()
         except Exception as e:  # noqa: BLE001 — best-effort: cleanup errors must not raise
-            logger.warning(":warning: Error closing project context: %s", e)
+            logger.warning("Error closing project context: %s", e)
 
         self._closed = True
 
@@ -266,7 +266,7 @@ class YamlRefactorContext:
     def mutated(self) -> bool:
         """Check if the context has performed any mutations."""
         has_mutated = self._mutation_count > 0
-        logger.debug(":white_check_mark: Has the context mutated anything? => %s", has_mutated)
+        logger.debug("Has the context mutated anything? => %s", has_mutated)
         return has_mutated
 
     @property
@@ -415,7 +415,7 @@ class YamlRefactorContext:
         return default
 
     def __post_init__(self) -> None:
-        logger.debug(":green_book: Running post-init for YamlRefactorContext.")
+        logger.debug("Running post-init for YamlRefactorContext.")
         if EMPTY_STRING not in self.placeholders:
             self.placeholders = (EMPTY_STRING, *self.placeholders)
         for setting, val in self.yaml_settings.items():

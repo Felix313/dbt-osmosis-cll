@@ -38,7 +38,7 @@ class SchemaFileLocation:
     def is_valid(self) -> bool:
         """Check if the current and target locations are valid."""
         valid = self.current == self.target
-        logger.debug(":white_check_mark: Checking if schema file location is valid => %s", valid)
+        logger.debug("Checking if schema file location is valid => %s", valid)
         return valid
 
 
@@ -87,7 +87,7 @@ def _get_yaml_path_template(context: YamlRefactorContextProtocol, node: ResultNo
             elif not isinstance(path_template, str):
                 path_template = None
         except Exception as e:
-            logger.debug(":warning: Failed to read global var: %s", e)
+            logger.debug("Failed to read global var: %s", e)
             path_template = None
 
     if not path_template:
@@ -96,7 +96,7 @@ def _get_yaml_path_template(context: YamlRefactorContextProtocol, node: ResultNo
         )
     if not isinstance(path_template, str):
         return None
-    logger.debug(":gear: Resolved YAML path template => %s", path_template)
+    logger.debug("Resolved YAML path template => %s", path_template)
     return path_template
 
 
@@ -112,11 +112,11 @@ def get_current_yaml_path(
         path = Path(project_root).joinpath(
             t.cast("str", node.patch_path).partition("://")[-1],
         )
-        logger.debug(":page_facing_up: Current YAML path => %s", path)
+        logger.debug("Current YAML path => %s", path)
         return path
     if node.resource_type == NodeType.Source:
         path = Path(project_root, node.path)
-        logger.debug(":page_facing_up: Current YAML path => %s", path)
+        logger.debug("Current YAML path => %s", path)
         return path
     return None
 
@@ -133,9 +133,9 @@ def get_target_yaml_path(context: YamlRefactorContextProtocol, node: ResultNode)
         if node.resource_type == NodeType.Source:
             # Sources not in source_definitions fall back to original_file_path, which is correct.
             # No warning needed — this is expected for sources managed via their own YAML files.
-            logger.debug(":page_facing_up: No source_definitions entry for => %s; using original_file_path", node.unique_id)
+            logger.debug("No source_definitions entry for => %s; using original_file_path", node.unique_id)
         else:
-            logger.warning(":warning: No path template found for => %s", node.unique_id)
+            logger.warning("No path template found for => %s", node.unique_id)
         return Path(project_root, t.cast("str", node.original_file_path))
 
     path = Path(project_root, t.cast("str", node.original_file_path))
@@ -172,7 +172,7 @@ def get_target_yaml_path(context: YamlRefactorContextProtocol, node: ResultNode)
         raise PathResolutionError(
             f"Security violation: Target YAML path '{resolved_path}' is outside project root '{project_root_path}'",
         )
-    logger.debug(":star2: Target YAML path => %s", path)
+    logger.debug("Target YAML path => %s", path)
     return path
 
 
@@ -181,7 +181,7 @@ def build_yaml_file_mapping(
     create_missing_sources: bool = False,
 ) -> dict[str, SchemaFileLocation]:
     """Build a mapping of dbt model and source nodes to their current and target yaml paths."""
-    logger.debug(":globe_with_meridians: Building YAML file mapping...")
+    logger.debug("Building YAML file mapping...")
 
     if create_missing_sources:
         create_missing_source_yamls(context)
@@ -197,7 +197,7 @@ def build_yaml_file_mapping(
             node_type=node.resource_type,
         )
 
-    logger.debug(":card_index_dividers: Built YAML file mapping => %s", out_map)
+    logger.debug("Built YAML file mapping => %s", out_map)
     return out_map
 
 
@@ -218,9 +218,9 @@ def create_missing_source_yamls(context: t.Any) -> None:
     from dbt_osmosis.core.schema.writer import _write_yaml
 
     if context.project.config.disable_introspection:
-        logger.warning(":warning: Introspection is disabled, cannot create missing source YAMLs.")
+        logger.warning("Introspection is disabled, cannot create missing source YAMLs.")
         return
-    logger.debug(":factory: Creating missing source YAMLs and updating existing sources (if any).")
+    logger.debug("Creating missing source YAMLs and updating existing sources (if any).")
     default_database: str = context.project.runtime_cfg.credentials.database
     lowercase: bool = context.settings.output_to_lower
     uppercase: bool = context.settings.output_to_upper

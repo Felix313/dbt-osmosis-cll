@@ -120,7 +120,7 @@ def generate_sources_from_database(
         to_yaml,
     )
 
-    logger.info(":factory: Generating sources from database introspection...")
+    logger.info("Generating sources from database introspection...")
 
     try:
         # Create source generator
@@ -145,7 +145,7 @@ def generate_sources_from_database(
         source_defs = source_gen.generate_sources(options=options)
 
         if not source_defs:
-            logger.warning(":warning: No sources found with given configuration")
+            logger.warning("No sources found with given configuration")
             return SourceGenerationResult(
                 source_name=source_name,
                 table_count=0,
@@ -179,7 +179,7 @@ def generate_sources_from_database(
         )
 
     except Exception as e:
-        logger.error(":boom: Error generating sources: %s", e)
+        logger.error("Error generating sources: %s", e)
         raise
 
 
@@ -322,7 +322,7 @@ def generate_staging_from_source(
             )
 
     except Exception as e:
-        logger.error(":boom: Error generating staging model: %s", e)
+        logger.error("Error generating staging model: %s", e)
         raise
 
 
@@ -351,7 +351,7 @@ def check_documentation(
     """
     from dbt_core_interface.doc_checker import DocumentationChecker
 
-    logger.info(":mag: Checking documentation completeness...")
+    logger.info("Checking documentation completeness...")
 
     try:
         # Create documentation checker
@@ -395,7 +395,7 @@ def check_documentation(
         return result
 
     except Exception as e:
-        logger.error(":boom: Error checking documentation: %s", e)
+        logger.error("Error checking documentation: %s", e)
         raise
 
 

@@ -20,13 +20,13 @@ __all__ = [
 
 def _has_jinja(code: str) -> bool:
     """Check if a code string contains jinja tokens."""
-    logger.debug(":crystal_ball: Checking if code snippet has Jinja => %s", code[:50] + "...")
+    logger.debug("Checking if code snippet has Jinja => %s", code[:50] + "...")
     return any(token in code for token in ("{{", "}}", "{%", "%}", "{#", "#}"))
 
 
 def compile_sql_code(context: DbtProjectContext, raw_sql: str) -> ManifestSQLNode:
     """Compile jinja SQL using the context's manifest and adapter."""
-    logger.info(":zap: Compiling SQL code. Possibly with jinja => %s", raw_sql[:75] + "...")
+    logger.info("Compiling SQL code. Possibly with jinja => %s", raw_sql[:75] + "...")
     tmp_id = str(uuid.uuid4())
     key = f"{NodeType.SqlOperation}.{context.runtime_cfg.project_name}.{tmp_id}"
 
@@ -38,7 +38,7 @@ def compile_sql_code(context: DbtProjectContext, raw_sql: str) -> ManifestSQLNod
         try:
             node = context.sql_parser.parse_remote(raw_sql, tmp_id)
             if not _has_jinja(raw_sql):
-                logger.debug(":scroll: No jinja found in the raw SQL, skipping compile steps.")
+                logger.debug("No jinja found in the raw SQL, skipping compile steps.")
                 result = node
             else:
                 process_node(context.runtime_cfg, context.manifest, node)
@@ -52,13 +52,13 @@ def compile_sql_code(context: DbtProjectContext, raw_sql: str) -> ManifestSQLNod
         finally:
             _ = context.manifest.nodes.pop(key, None)
 
-    logger.info(":sparkles: Compilation complete.")
+    logger.info("Compilation complete.")
     return result
 
 
 def execute_sql_code(context: DbtProjectContext, raw_sql: str) -> tuple[AdapterResponse, Table]:
     """Execute jinja SQL using the context's manifest and adapter."""
-    logger.info(":running: Attempting to execute SQL => %s", raw_sql[:75] + "...")
+    logger.info("Attempting to execute SQL => %s", raw_sql[:75] + "...")
     if _has_jinja(raw_sql):
         comp = compile_sql_code(context, raw_sql)
         sql_to_exec = comp.compiled_code or comp.raw_code
@@ -66,5 +66,5 @@ def execute_sql_code(context: DbtProjectContext, raw_sql: str) -> tuple[AdapterR
         sql_to_exec = raw_sql
 
     resp, table = context.adapter.execute(sql_to_exec, auto_begin=False, fetch=True)
-    logger.info(":white_check_mark: SQL execution complete => %s rows returned.", len(table.rows))  # pyright: ignore[reportUnknownArgumentType]
+    logger.info("SQL execution complete => %s rows returned.", len(table.rows))  # pyright: ignore[reportUnknownArgumentType]
     return resp, table

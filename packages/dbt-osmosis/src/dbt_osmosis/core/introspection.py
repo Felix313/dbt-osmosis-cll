@@ -956,7 +956,7 @@ class SettingsResolver:
                     )
                     return result
 
-        logger.debug(":gear: No YAML path template found in node config")
+        logger.debug("No YAML path template found in node config")
         return None
 
 
@@ -990,7 +990,7 @@ def _find_first(
 def normalize_column_name(column: str, credentials_type: str) -> str:
     """Apply case normalization to a column name based on the credentials type."""
     if credentials_type == "snowflake" and column.startswith('"') and column.endswith('"'):
-        logger.debug(":snowflake: Column name found with double-quotes => %s", column)
+        logger.debug("Column name found with double-quotes => %s", column)
     elif credentials_type == "snowflake":
         return column.upper()
     return column.strip('"').strip("`").strip("[]")
@@ -1018,7 +1018,7 @@ def _maybe_use_precise_dtype(
     # vs ColumnMetadata from catalog (no such methods, type already set)
     if isinstance(col, BaseColumn):
         if (col.is_numeric() and use_num_prec) or (col.is_string() and use_chr_prec):
-            logger.debug(":ruler: Using precise data type => %s", col.data_type)
+            logger.debug("Using precise data type => %s", col.data_type)
             return col.data_type
         if hasattr(col, "mode"):
             return col.data_type
@@ -1101,7 +1101,7 @@ def get_columns(
     normalized_columns: OrderedDict[str, ColumnMetadata] = OrderedDict()
 
     if relation is None:
-        logger.debug(":blue_book: Relation is empty, skipping column collection.")
+        logger.debug("Relation is empty, skipping column collection.")
         return normalized_columns
 
     result_node: ResultNode | None = None
@@ -1123,7 +1123,7 @@ def get_columns(
     else:
         rendered_relation = ""
 
-    logger.info(":mag_right: Collecting columns for table => %s", rendered_relation)
+    logger.info("Collecting columns for table => %s", rendered_relation)
     index = 0
 
     def process_column(c: BaseColumn | ColumnMetadata, /) -> None:
@@ -1174,7 +1174,7 @@ def get_columns(
         cached_columns = _COLUMN_LIST_CACHE.get(cache_key)
 
     if cached_columns is not None:
-        logger.debug(":blue_book: Column list cache HIT => %s", rendered_relation)
+        logger.debug("Column list cache HIT => %s", rendered_relation)
         for column in cached_columns:
             process_column(column)
         return normalized_columns
@@ -1220,7 +1220,7 @@ def get_columns(
         )
 
     try:
-        logger.info(":mag: Introspecting columns in warehouse for => %s", rendered_relation)
+        logger.info("Introspecting columns in warehouse for => %s", rendered_relation)
         warehouse_columns = tuple(
             t.cast(
                 "t.Iterable[BaseColumn]",
@@ -1228,7 +1228,7 @@ def get_columns(
             ),
         )
     except Exception as ex:  # noqa: BLE001 — surface any adapter error and return empty
-        logger.warning(":warning: Could not introspect columns for %s: %s", rendered_relation, ex)
+        logger.warning("Could not introspect columns for %s: %s", rendered_relation, ex)
         return normalized_columns
 
     with _COLUMN_LIST_CACHE_LOCK:
@@ -1265,7 +1265,7 @@ def prefetch_columns(context: t.Any, nodes: t.Iterable[t.Any]) -> int:
                 context.project.adapter.config, node
             )
         except Exception as exc:  # noqa: BLE001 — skip un-relationable nodes; not fatal
-            logger.debug(":blue_book: Skipping node %s in prefetch: %s", getattr(node, "unique_id", node), exc)
+            logger.debug("Skipping node %s in prefetch: %s", getattr(node, "unique_id", node), exc)
             continue
 
         renderer = getattr(relation, "render", None)
@@ -1291,7 +1291,7 @@ def prefetch_columns(context: t.Any, nodes: t.Iterable[t.Any]) -> int:
     if not to_fetch:
         return 0
 
-    logger.info(":rocket: Batch-prefetching columns for %d relations...", len(to_fetch))
+    logger.info("Batch-prefetching columns for %d relations...", len(to_fetch))
 
     try:
         catalog_table, _ = context.project.adapter.get_catalog_by_relations(
@@ -1330,7 +1330,7 @@ def prefetch_columns(context: t.Any, nodes: t.Iterable[t.Any]) -> int:
         if cols:
             with _COLUMN_LIST_CACHE_LOCK:
                 _COLUMN_LIST_CACHE[cache_key] = tuple(cols)
-            logger.debug(":books: Prefetched %d columns for => %s", len(cols), rendered)
+            logger.debug("Prefetched %d columns for => %s", len(cols), rendered)
             prefetched += 1
 
     logger.info(

@@ -79,7 +79,7 @@ def _build_node_ancestor_tree(
     max_depth: int = 100,
 ) -> dict[str, list[str]]:
     """Build a flat graph of a node and it's ancestors."""
-    logger.debug(":seedling: Building ancestor tree/branch for => %s", node.unique_id)
+    logger.debug("Building ancestor tree/branch for => %s", node.unique_id)
     if tree is None or visited is None:
         visited = {node.unique_id}  # set literal — NOT set(str) which iterates characters
         tree = {"generation_0": [node.unique_id]}
@@ -417,7 +417,7 @@ def _build_column_knowledge_graph(
 ) -> dict[str, dict[str, t.Any]]:
     """Generate a column knowledge graph for a dbt model or source node."""
     tree = _build_node_ancestor_tree(context.project.manifest, node)
-    logger.debug(":family_tree: Node ancestor tree => %s", tree)
+    logger.debug("Node ancestor tree => %s", tree)
 
     node_yaml = _get_node_yaml(context, node)
     node_column_variants = _collect_column_variants(context, node)

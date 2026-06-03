@@ -186,7 +186,7 @@ def generate_staging_for_source(
     """
     full_source_name = f"{source_name}.{table_name}"
 
-    logger.info(":robot: Generating staging model for source => %s", full_source_name)
+    logger.info("Generating staging model for source => %s", full_source_name)
 
     try:
         # Get column definitions from manifest or database
@@ -204,10 +204,10 @@ def generate_staging_for_source(
                     "data_type": col_def.data_type or "unknown",
                     "description": col_def.description or "",
                 })
-            logger.info(":page_facing_up: Found %d columns in manifest", len(columns))
+            logger.info("Found %d columns in manifest", len(columns))
         else:
             # Fall back to database introspection
-            logger.info(":mag: Source not in manifest, introspecting database...")
+            logger.info("Source not in manifest, introspecting database...")
             columns = _get_source_table_columns(project, source_name, table_name)
 
         if not columns:
@@ -225,7 +225,7 @@ def generate_staging_for_source(
         # Infer file paths
         sql_path, yaml_path = _infer_staging_model_path(project, settings, spec.staging_name)
 
-        logger.info(":white_check_mark: Generated staging spec => %s", spec.staging_name)
+        logger.info("Generated staging spec => %s", spec.staging_name)
 
         return StagingGenerationResult(
             source_name=full_source_name,
@@ -235,7 +235,7 @@ def generate_staging_for_source(
         )
 
     except Exception as e:
-        logger.error(":boom: Error generating staging for %s: %s", full_source_name, e)
+        logger.error("Error generating staging for %s: %s", full_source_name, e)
         return StagingGenerationResult(
             source_name=full_source_name,
             error=e,
@@ -280,7 +280,7 @@ def generate_staging_for_all_sources(
 
         sources_to_process[key] = source
 
-    logger.info(":mag: Found %d source tables to process", len(sources_to_process))
+    logger.info("Found %d source tables to process", len(sources_to_process))
 
     for (source_name, table_name), source_def in sources_to_process.items():
         result = generate_staging_for_source(
@@ -330,7 +330,7 @@ def write_staging_files(
     spec = result.spec
 
     if result.sql_path:
-        logger.info(":writing_hand: Writing SQL => %s", result.sql_path)
+        logger.info("Writing SQL => %s", result.sql_path)
         if not dry_run:
             result.sql_path.parent.mkdir(parents=True, exist_ok=True)
             result.sql_path.write_text(spec.to_sql(), encoding="utf-8")
@@ -339,7 +339,7 @@ def write_staging_files(
         # Generate YAML documentation
         yaml_content = _generate_staging_yaml(spec)
 
-        logger.info(":writing_hand: Writing YAML => %s", result.yaml_path)
+        logger.info("Writing YAML => %s", result.yaml_path)
         if not dry_run:
             result.yaml_path.parent.mkdir(parents=True, exist_ok=True)
             result.yaml_path.write_text(yaml_content, encoding="utf-8")

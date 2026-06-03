@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
-import re
 import typing as t
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+import rich.console
+from rich.logging import RichHandler
 
 __all__ = [
     "LOGGER",
@@ -18,21 +20,9 @@ __all__ = [
 ]
 
 _LOG_FILE_FORMAT = "%(asctime)s — %(name)s — %(levelname)s — %(message)s"
-_LOG_CONSOLE_FORMAT = "%(asctime)s  %(levelname)-8s  %(message)s"
 _LOG_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LOG_PATH = Path.home().absolute() / ".dbt-osmosis" / "logs"
 _LOGGING_LEVEL = logging.INFO
-
-# Strip Rich markup: emoji codes (:rocket:) and tags ([b], [/green], [yellow], etc.)
-_RICH_MARKUP_RE = re.compile(r":\w+:|(\[/?[^\[\]]+\])")
-
-
-class _CleanFormatter(logging.Formatter):
-    """Plain formatter that strips all Rich markup from log messages."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        record.msg = _RICH_MARKUP_RE.sub("", str(record.msg)).strip()
-        return super().format(record)
 
 
 def get_rotating_log_handler(name: str, path: Path, formatter: str) -> RotatingFileHandler:
@@ -55,19 +45,23 @@ def get_logger(
     path: Path = _LOG_PATH,
     formatter: str = _LOG_FILE_FORMAT,
 ) -> logging.Logger:
-    """Build and cache a logger with a clean console handler (timestamp, no emoji)."""
+    """Build and cache a logger: Rich console with timestamps, rotating file for WARNING+."""
     if isinstance(level, str):
         level = getattr(logging, level, logging.INFO)
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.addHandler(get_rotating_log_handler(name, path, formatter))
-
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(level)
-    console_handler.setFormatter(
-        _CleanFormatter(fmt=_LOG_CONSOLE_FORMAT, datefmt=_LOG_TIME_FORMAT)
+    logger.addHandler(
+        RichHandler(
+            level=level,
+            console=rich.console.Console(stderr=True),
+            rich_tracebacks=True,
+            markup=True,
+            show_time=True,
+            log_time_format=_LOG_TIME_FORMAT,
+            show_path=False,
+        )
     )
-    logger.addHandler(console_handler)
     logger.propagate = False
     return logger
 
@@ -77,14 +71,13 @@ LOGGER = get_logger()
 
 
 def set_log_level(level: int | str) -> None:
-    """Set the log level for the default logger"""
+    """Set the log level for the default logger."""
     global LOGGER
     if isinstance(level, str):
         level = getattr(logging, level, logging.INFO)
     LOGGER.setLevel(level)
     for handler in LOGGER.handlers:
-        # RotatingFileHandler is fixed at WARNING — only update StreamHandlers.
-        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, RotatingFileHandler):
+        if isinstance(handler, RichHandler):
             handler.setLevel(level)
 
 

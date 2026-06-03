@@ -55,7 +55,7 @@ def _merge_preserved_sections(
     for key, value in preserved_sections.items():
         if key in original_data and key not in merged:
             merged[key] = value
-            logger.debug(f":recycle: Restoring preserved section '{key}' from original YAML")
+            logger.debug(f"Restoring preserved section '{key}' from original YAML")
 
     return merged
 
@@ -103,7 +103,7 @@ def _write_yaml(
     Note: When dry_run=True, changes are detected and mutation_tracker is called,
     but no files are written to disk. This enables --check to work with --dry-run.
     """
-    logger.debug(":page_with_curl: Attempting to write YAML to => %s", path)
+    logger.debug("Attempting to write YAML to => %s", path)
     with yaml_handler_lock:
         # Merge preserved sections from original YAML (semantic_models, macros, etc.)
         with _YAML_BUFFER_CACHE_LOCK:
@@ -123,9 +123,9 @@ def _write_yaml(
                 modified = _strip_eof_blank_lines(modified)
             if modified != original:
                 if dry_run:
-                    logger.info(":eyes: Would write changes to => %s (dry-run)", path)
+                    logger.info("Would write changes to => %s (dry-run)", path)
                 else:
-                    logger.info(":writing_hand: Writing changes to => %s", path)
+                    logger.info("Writing changes to => %s", path)
 
                     # Write to temporary file first for safety
                     temp_path = path.with_suffix(path.suffix + ".tmp")
@@ -162,14 +162,14 @@ def _write_yaml(
                             except Exception:
                                 pass
                         # Re-raise to signal failure
-                        logger.error(":boom: Failed to write YAML to => %s: %s", path, e)
+                        logger.error("Failed to write YAML to => %s: %s", path, e)
                         raise
 
                 # Track mutation regardless of dry_run (enables --check with --dry-run)
                 if mutation_tracker:
                     mutation_tracker(1)
             else:
-                logger.debug(":white_check_mark: Skipping write => %s (no changes)", path)
+                logger.debug("Skipping write => %s (no changes)", path)
                 # Clear cache entry even when no changes (to keep cache consistent)
                 if not dry_run:
                     with _YAML_BUFFER_CACHE_LOCK:
@@ -207,7 +207,7 @@ def commit_yamls(
     Note: When dry_run=True, changes are detected and mutation_tracker is called,
     but no files are written to disk. This enables --check to work with --dry-run.
     """
-    logger.info(":inbox_tray: Committing all YAMLs from buffer cache to disk.")
+    logger.info("Committing all YAMLs from buffer cache to disk.")
     with yaml_handler_lock:
         with _YAML_BUFFER_CACHE_LOCK:
             paths = list(_YAML_BUFFER_CACHE.keys())
@@ -230,9 +230,9 @@ def commit_yamls(
                     modified = _strip_eof_blank_lines(modified)
                 if modified != original:
                     if dry_run:
-                        logger.info(":eyes: Would write changes to => %s (dry-run)", path)
+                        logger.info("Would write changes to => %s (dry-run)", path)
                     else:
-                        logger.info(":writing_hand: Writing => %s", path)
+                        logger.info("Writing => %s", path)
 
                         # Write to temporary file first for safety
                         temp_path = path.with_suffix(path.suffix + ".tmp")
@@ -269,7 +269,7 @@ def commit_yamls(
                                 except Exception:
                                     pass
                             # Re-raise to signal failure
-                            logger.error(":boom: Failed to commit YAML to => %s: %s", path, e)
+                            logger.error("Failed to commit YAML to => %s: %s", path, e)
                             raise
 
                     # Track mutation regardless of dry_run (enables --check with --dry-run)
@@ -277,7 +277,7 @@ def commit_yamls(
                         mutation_tracker(1)
 
                 else:
-                    logger.debug(":white_check_mark: Skipping => %s (no changes)", path)
+                    logger.debug("Skipping => %s (no changes)", path)
                     # Clear cache entry even when no changes (to keep cache consistent)
                     if not dry_run:
                         with _YAML_BUFFER_CACHE_LOCK:

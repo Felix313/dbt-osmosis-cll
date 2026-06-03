@@ -118,7 +118,7 @@ def _detect_fusion_manifest(project_dir: str) -> bool:
                 )
                 return True
     except Exception as e:
-        logger.debug(":information_source: Could not check manifest for Fusion: %s", e)
+        logger.debug("Could not check manifest for Fusion: %s", e)
 
     return False
 
@@ -141,15 +141,15 @@ def discover_project_dir() -> str:
     if "DBT_PROJECT_DIR" in os.environ:
         project_dir = Path(os.environ["DBT_PROJECT_DIR"])
         if project_dir.is_dir():
-            logger.debug(":mag: DBT_PROJECT_DIR detected => %s", project_dir)
+            logger.debug("DBT_PROJECT_DIR detected => %s", project_dir)
             return str(project_dir.resolve())
-        logger.warning(":warning: DBT_PROJECT_DIR %s is not a valid directory.", project_dir)
+        logger.warning("DBT_PROJECT_DIR %s is not a valid directory.", project_dir)
     cwd = Path.cwd()
     for p in [cwd] + list(cwd.parents):
         if (p / "dbt_project.yml").exists():
-            logger.debug(":mag: Found dbt_project.yml at => %s", p)
+            logger.debug("Found dbt_project.yml at => %s", p)
             return str(p.resolve())
-    logger.debug(":mag: Defaulting to current directory => %s", cwd)
+    logger.debug("Defaulting to current directory => %s", cwd)
     return str(cwd.resolve())
 
 
@@ -165,21 +165,21 @@ def discover_profiles_dir(project_dir: str | os.PathLike[str] | None = None) -> 
     if "DBT_PROFILES_DIR" in os.environ:
         profiles_dir = Path(os.environ["DBT_PROFILES_DIR"])
         if profiles_dir.is_dir():
-            logger.debug(":mag: DBT_PROFILES_DIR detected => %s", profiles_dir)
+            logger.debug("DBT_PROFILES_DIR detected => %s", profiles_dir)
             return str(profiles_dir.resolve())
-        logger.warning(":warning: DBT_PROFILES_DIR %s is not a valid directory.", profiles_dir)
+        logger.warning("DBT_PROFILES_DIR %s is not a valid directory.", profiles_dir)
     cwd = Path.cwd().resolve()
     if (cwd / "profiles.yml").exists():
-        logger.debug(":mag: Found profiles.yml in current directory.")
+        logger.debug("Found profiles.yml in current directory.")
         return str(cwd)
     resolved_project_dir = (
         Path(project_dir).resolve() if project_dir is not None else Path(discover_project_dir())
     )
     if resolved_project_dir != cwd and (resolved_project_dir / "profiles.yml").exists():
-        logger.debug(":mag: Found profiles.yml in project root => %s", resolved_project_dir)
+        logger.debug("Found profiles.yml in project root => %s", resolved_project_dir)
         return str(resolved_project_dir)
     home_profiles = str(Path.home() / ".dbt")
-    logger.debug(":mag: Defaulting to => %s", home_profiles)
+    logger.debug("Defaulting to => %s", home_profiles)
     return home_profiles
 
 
@@ -361,7 +361,7 @@ class DbtProjectContext:
                 if self._project is not None and hasattr(self._project, "adapter"):
                     adapter = self._project.adapter
                     if hasattr(adapter, "connections"):
-                        logger.debug(":lock: Closing adapter connections")
+                        logger.debug("Closing adapter connections")
                         # Use cleanup_all() instead of close() because close() requires
                         # a connection parameter. cleanup_all() closes all open connections.
                         if hasattr(adapter.connections, "cleanup_all"):
@@ -370,7 +370,7 @@ class DbtProjectContext:
                             # Fallback for adapters that have close_all_connections
                             adapter.connections.close_all_connections()  # pyright: ignore[reportAttributeAccessIssue]
             except Exception as e:
-                logger.warning(":warning: Error closing adapter connections: %s", e)
+                logger.warning("Error closing adapter connections: %s", e)
             finally:
                 self._closed = True
 
@@ -510,13 +510,13 @@ def _add_cross_project_references(
         loom = dbt_loom.dbtLoom(project_name)
         loom_manifests = loom.manifests
     except (AttributeError, KeyError, TypeError) as e:
-        logger.warning(":warning: Failed to load dbt loom manifests: %s", e)
+        logger.warning("Failed to load dbt loom manifests: %s", e)
         return manifest
     except Exception as e:
-        logger.warning(":warning: Unexpected error loading dbt loom manifests: %s", e)
+        logger.warning("Unexpected error loading dbt loom manifests: %s", e)
         return manifest
 
-    logger.info(":arrows_counterclockwise: Loaded dbt loom manifests!")
+    logger.info("Loaded dbt loom manifests!")
     for name, loom_manifest in loom_manifests.items():
         if loom_manifest.get("nodes"):
             loom_manifest_nodes = loom_manifest.get("nodes")
@@ -600,7 +600,7 @@ def create_dbt_project_context(config: DbtConfiguration) -> DbtProjectContext:
         A DbtProjectContext with initialized manifest, adapter, and parsers
 
     """
-    logger.debug(":debug: Creating project context => %s", config)
+    logger.debug("Creating project context => %s", config)
 
     # Check for a Fusion-generated manifest BEFORE parsing, since dbt-core's
     # parser will overwrite it with a v12 manifest. This allows teams running
@@ -631,9 +631,9 @@ def create_dbt_project_context(config: DbtConfiguration) -> DbtProjectContext:
             # Update the manifest in the project
             project.manifest = manifest
         except Exception as e:
-            logger.warning(":warning: Failed to add cross-project references from dbt_loom: %s", e)
+            logger.warning("Failed to add cross-project references from dbt_loom: %s", e)
 
-    logger.debug(":debug: DbtProjectContext created")
+    logger.debug("DbtProjectContext created")
 
     # Create the context wrapper with the existing project
     return DbtProjectContext.from_project(
@@ -651,12 +651,12 @@ def _reload_manifest(context: DbtProjectContext) -> None:
         context: The DbtProjectContext to reload the manifest for
 
     """
-    logger.debug(":arrows_counterclockwise: Reloading manifest")
+    logger.debug("Reloading manifest")
     with context.manifest_mutex:
         assert context._project is not None, "DbtProjectContext not initialized"
         # Use DbtProject's parse_project to reload
         context._project.parse_project(write_manifest=False)
-        logger.debug(":white_check_mark: Manifest reloaded")
+        logger.debug("Manifest reloaded")
 
 
 def config_to_namespace(config: DbtConfiguration) -> argparse.Namespace:

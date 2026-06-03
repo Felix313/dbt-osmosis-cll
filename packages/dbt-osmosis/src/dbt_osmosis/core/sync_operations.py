@@ -27,7 +27,7 @@ def _sync_doc_section(
     This includes columns, description, meta, tags, etc.
     We assume node is the single source of truth, so doc_section is replaced.
     """
-    logger.debug(":arrows_counterclockwise: Syncing doc_section with node => %s", node.unique_id)
+    logger.debug("Syncing doc_section with node => %s", node.unique_id)
     if "description" in doc_section and doc_section["description"] is not None:
         doc_section["description"] = str(doc_section["description"])
     if (
@@ -326,7 +326,7 @@ def _finalize_synced_document(
     if not commit:
         return
 
-    logger.debug(":inbox_tray: Committing YAML doc changes for => %s", target_path)
+    logger.debug("Committing YAML doc changes for => %s", target_path)
 
     from dbt_osmosis.core.schema.writer import _write_yaml
 
@@ -475,7 +475,7 @@ def _deduplicate_model_entries(
             model_indices.append(i)
 
     if len(model_indices) > 1:
-        logger.warning(":warning: Found duplicate entries for model => %s", model_name)
+        logger.warning("Found duplicate entries for model => %s", model_name)
         doc_model = doc_list[model_indices[0]]
         # Remove duplicates in reverse order to avoid index shifting
         for idx in sorted(model_indices[1:], reverse=True):
@@ -709,7 +709,7 @@ def sync_node_to_yaml(
 
     """
     if node is None:
-        logger.info(":wave: No single node specified; synchronizing all matched nodes.")
+        logger.info("No single node specified; synchronizing all matched nodes.")
 
         def _sync_group(group: list[ResultNode]) -> tuple[list[ResultNode], BaseException | None]:
             # Catch per-group so one bad node does not abort the whole batch commit.
