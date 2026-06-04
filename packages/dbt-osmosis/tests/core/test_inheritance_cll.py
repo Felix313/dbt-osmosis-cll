@@ -550,12 +550,16 @@ def test_anchor_acts_as_wall_for_downstream_inheritance():
 
 
 # ---------------------------------------------------------------------------
-# desc-source provenance (config.meta)
+# desc-source provenance (managed meta key, written via top-level meta)
 # ---------------------------------------------------------------------------
+#
+# NOTE: the tag is written to the column's TOP-LEVEL ``meta`` (FakeColumn.meta). The real YAML
+# sync writer then places it under ``config.meta`` (fusion) or keeps it top-level (classic);
+# these unit tests call the inherit transform directly, so they assert on ``meta``.
 
 
-def test_gap_fill_writes_desc_source_to_config_meta():
-    """An empty column gap-filled via CLL records the immediate progenitor in config.meta."""
+def test_gap_fill_writes_desc_source_to_meta():
+    """An empty column gap-filled via CLL records its origin in the column's meta."""
     child = FakeNode("child", {"BPARTNER_ID": FakeColumn("BPARTNER_ID", description="")})
     ctx = make_context()
     with patched(
@@ -582,7 +586,7 @@ def test_gap_fill_writes_desc_source_to_config_meta():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["BPARTNER_ID"]
     assert col.description == "Geschaeftspartner-Nr."
-    assert col.config_meta() == {
+    assert col.meta == {
         "desc-source": "STG_EDW__AE_AML__AML_T_BPARTNER_POSITION.BPARTNER_ID"
     }
 
@@ -616,13 +620,13 @@ def test_desc_source_points_to_true_origin_through_same_text_copies():
     with patched(**chain):
         inherit_upstream_column_knowledge_cll(ctx, base3)
     assert base3.columns["COL"].description == "Y"
-    assert base3.columns["COL"].config_meta() == {"desc-source": "BASE2.COL"}
+    assert base3.columns["COL"].meta == {"desc-source": "BASE2.COL"}
 
     # base2 re-defines the text (Y != X) → it IS an origin → no tag.
     with patched(**chain):
         inherit_upstream_column_knowledge_cll(ctx, base2)
     assert base2.columns["COL"].description == "Y"
-    assert "desc-source" not in base2.columns["COL"].config_meta()
+    assert "desc-source" not in base2.columns["COL"].meta
 
 
 def test_force_inherit_overwrite_does_not_write_desc_source():
@@ -644,7 +648,7 @@ def test_force_inherit_overwrite_does_not_write_desc_source():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == "Parent desc"  # overwritten
-    assert "desc-source" not in col.config_meta()  # but no provenance tag
+    assert "desc-source" not in col.meta  # but no provenance tag
 
 
 def test_no_description_resolved_writes_no_desc_source():
@@ -661,7 +665,7 @@ def test_no_description_resolved_writes_no_desc_source():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == ""
-    assert "desc-source" not in col.config_meta()
+    assert "desc-source" not in col.meta
 
 
 def test_desc_source_disabled_writes_no_key():
@@ -680,7 +684,7 @@ def test_desc_source_disabled_writes_no_key():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == "Parent desc"  # still inherited
-    assert col.config_meta() == {}  # but no provenance key
+    assert col.meta == {}  # but no provenance key
 
 
 def test_desc_source_idempotent_across_runs():
@@ -702,11 +706,11 @@ def test_desc_source_idempotent_across_runs():
 
     first = run()
     assert first.description == "Parent desc"
-    assert first.config_meta() == {"desc-source": "PARENT.COL"}
+    assert first.meta == {"desc-source": "PARENT.COL"}
 
     second = run()  # rerun on the now-populated, now-tagged column
     assert second.description == "Parent desc"
-    assert second.config_meta() == {"desc-source": "PARENT.COL"}  # unchanged — no flip-flop
+    assert second.meta == {"desc-source": "PARENT.COL"}  # unchanged — no flip-flop
 
 
 def test_desc_source_backfilled_for_preexisting_inherited():
@@ -724,7 +728,7 @@ def test_desc_source_backfilled_for_preexisting_inherited():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == "Parent desc"
-    assert col.config_meta() == {"desc-source": "PARENT.COL"}
+    assert col.meta == {"desc-source": "PARENT.COL"}
 
 
 def test_desc_source_updates_when_progenitor_changes():
@@ -732,13 +736,7 @@ def test_desc_source_updates_when_progenitor_changes():
     point at the new one rather than left pointing at the stale old source."""
     child = FakeNode(
         "child",
-        {
-            "COL": FakeColumn(
-                "COL",
-                description="Shared desc",
-                config={"meta": {"desc-source": "OLD_PARENT.COL"}},
-            )
-        },
+        {"COL": FakeColumn("COL", description="Shared desc", meta={"desc-source": "OLD_PARENT.COL"})},
     )
     ctx = make_context()
     with patched(
@@ -752,7 +750,7 @@ def test_desc_source_updates_when_progenitor_changes():
     ):
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
-    assert col.config_meta() == {"desc-source": "NEW_PARENT.COL"}  # repointed, not stale
+    assert col.meta == {"desc-source": "NEW_PARENT.COL"}  # repointed, not stale
 
 
 def test_desc_source_kept_when_upstream_text_drifts():
@@ -761,13 +759,7 @@ def test_desc_source_kept_when_upstream_text_drifts():
     so the tag must not be stripped just because the texts no longer match."""
     child = FakeNode(
         "child",
-        {
-            "COL": FakeColumn(
-                "COL",
-                description="Old parent desc",
-                config={"meta": {"desc-source": "PARENT.COL"}},
-            )
-        },
+        {"COL": FakeColumn("COL", description="Old parent desc", meta={"desc-source": "PARENT.COL"})},
         settings={("desc-owner", None): "this"},
     )
     ctx = make_context()
@@ -781,7 +773,7 @@ def test_desc_source_kept_when_upstream_text_drifts():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == "Old parent desc"  # frozen, not overwritten
-    assert col.config_meta() == {"desc-source": "PARENT.COL"}  # provenance kept
+    assert col.meta == {"desc-source": "PARENT.COL"}  # provenance kept
 
 
 def test_authored_description_without_tag_keeps_no_tag():
@@ -799,7 +791,7 @@ def test_authored_description_without_tag_keeps_no_tag():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == "Locally authored"  # preserved (desc-owner: this)
-    assert "desc-source" not in col.config_meta()
+    assert "desc-source" not in col.meta
 
 
 def test_force_inherit_strips_existing_tag():
@@ -807,13 +799,7 @@ def test_force_inherit_strips_existing_tag():
     carried from a previous (desc-owner: this) state is dropped."""
     child = FakeNode(
         "child",
-        {
-            "COL": FakeColumn(
-                "COL",
-                description="Local desc",
-                config={"meta": {"desc-source": "PARENT.COL"}},
-            )
-        },
+        {"COL": FakeColumn("COL", description="Local desc", meta={"desc-source": "PARENT.COL"})},
         settings={("desc-owner", None): "upstream"},
     )
     ctx = make_context()
@@ -827,7 +813,7 @@ def test_force_inherit_strips_existing_tag():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == "Parent desc"  # overwritten (force-inherit)
-    assert "desc-source" not in col.config_meta()  # owned upstream → no provenance
+    assert "desc-source" not in col.meta  # owned upstream → no provenance
 
 
 def test_desc_source_stripped_when_column_becomes_computed():
@@ -835,13 +821,7 @@ def test_desc_source_stripped_when_column_becomes_computed():
     column loses its tag on the early-skip path — it no longer has a single progenitor."""
     child = FakeNode(
         "child",
-        {
-            "COL": FakeColumn(
-                "COL",
-                description="Some desc",
-                config={"meta": {"desc-source": "PARENT.COL"}},
-            )
-        },
+        {"COL": FakeColumn("COL", description="Some desc", meta={"desc-source": "PARENT.COL"})},
     )
     ctx = make_context()
     with patched(
@@ -849,7 +829,7 @@ def test_desc_source_stripped_when_column_becomes_computed():
     ):
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
-    assert "desc-source" not in col.config_meta()
+    assert "desc-source" not in col.meta
 
 
 # ---------------------------------------------------------------------------
@@ -875,7 +855,7 @@ def test_self_reference_resolves_to_own_and_records_no_soft_fail():
 
         # Through the inherit path, the column must NOT cite itself as its own source.
         inherit_upstream_column_knowledge_cll(ctx, m)
-    assert "desc-source" not in m.columns["COL"].config_meta()
+    assert "desc-source" not in m.columns["COL"].meta
     clear_cll_walk_soft_fails(ctx)
 
 

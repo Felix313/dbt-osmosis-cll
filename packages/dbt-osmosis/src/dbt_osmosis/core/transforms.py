@@ -714,17 +714,28 @@ def _drop_stale_desc_source(node: t.Any, col_name: str, node_col: t.Any, key: st
     Used on the early-skip paths (aggregate / window / literal / generated / multi-source /
     originates-here) where a column that previously inherited a description — and so carries a
     provenance tag — has since become non-inheritable.  Keeping the old tag there would make it
-    stale, so it is dropped.  No-op when the key is disabled or the tag is absent.
+    stale, so it is dropped.
+
+    The tag is a managed meta key, so the authoritative removal is from the column's TOP-LEVEL
+    ``meta``: the YAML sync writer re-adds managed keys to ``config.meta`` ONLY from top-level
+    meta, so leaving a stale tag there would re-persist it.  A stale copy sitting directly in
+    ``config.meta`` is also stripped for completeness (though the writer drops managed keys from
+    existing ``config.meta`` anyway).  No-op when the key is disabled or the tag is absent.
     """
     if not key:
         return
-    meta = _read_column_config_meta(node_col)
-    if key not in meta:
+    top_meta = dict(getattr(node_col, "meta", None) or {})
+    cfg_meta = _read_column_config_meta(node_col)
+    if key not in top_meta and key not in cfg_meta:
         return
-    new_meta = {k: v for k, v in meta.items() if k != key}
-    node.columns[col_name] = _safe_column_replace(
-        node_col, config=_build_column_config_with_meta(node_col, new_meta)
-    )
+    replace_kwargs: dict[str, t.Any] = {}
+    if key in top_meta:
+        replace_kwargs["meta"] = {k: v for k, v in top_meta.items() if k != key}
+    if key in cfg_meta:
+        replace_kwargs["config"] = _build_column_config_with_meta(
+            node_col, {k: v for k, v in cfg_meta.items() if k != key}
+        )
+    node.columns[col_name] = _safe_column_replace(node_col, **replace_kwargs)
 
 
 @_transform_op("Inherit Upstream Column Knowledge (CLL)")
@@ -991,17 +1002,25 @@ def inherit_upstream_column_knowledge_cll(
                     if merged_meta != local_meta:
                         update_kwargs["meta"] = merged_meta
 
-        # --- desc-source provenance (config.meta) ---
+        # --- desc-source provenance (managed meta key) ---
         # Recomputed from current CLL state on EVERY run rather than written once and left in
-        # place, so the tag can never go stale: it always equals the column's CURRENT immediate
-        # progenitor, or is absent when the column is no longer CLL-inherited. This makes the
-        # pass idempotent (a second run with no upstream change is a no-op) and self-correcting
-        # (if the lineage moves to a different progenitor the pointer updates; if the column
-        # stops being inherited the tag is dropped).
+        # place, so the tag can never go stale: it always equals the column's CURRENT true
+        # origin, or is absent when the column is no longer CLL-inherited. This makes the pass
+        # idempotent (a second run with no upstream change is a no-op) and self-correcting (if
+        # the lineage moves to a different origin the pointer updates; if the column stops being
+        # inherited the tag is dropped).
+        #
+        # IMPORTANT — write to the column's TOP-LEVEL ``meta``, not ``config.meta`` directly.
+        # desc-source is a managed meta key, and the YAML sync writer treats top-level ``meta``
+        # as the single source of truth for managed keys: it strips them from any existing
+        # ``config.meta`` (to avoid stale accumulation) and re-adds them from top-level ``meta``
+        # — placing them under ``config.meta`` in fusion mode, or keeping them top-level in
+        # classic mode. A value written straight to ``config.meta`` here is therefore dropped on
+        # write in BOTH modes. Routing through ``meta`` lets the writer persist it correctly.
         #
         # A column counts as CLL-inherited — and therefore carries the tag, pointing at
         # ``desc_source_ref`` — when it is not owned upstream (force_inherit), has a single
-        # resolvable progenitor, has a non-empty final description, AND any of:
+        # resolvable origin, has a non-empty final description, AND any of:
         #   • it was gap-filled this run; or
         #   • its description still matches the resolved upstream text — covers the idempotent
         #     re-match on later runs and backfills descriptions that were inherited before this
@@ -1009,7 +1028,7 @@ def inherit_upstream_column_knowledge_cll(
         #   • it already carried the tag — keeps provenance alive when ``desc-owner: this``
         #     freezes the child while the upstream description text later drifts. The frozen
         #     text no longer matches upstream, but the column is still sourced from the same
-        #     progenitor, so the pointer is correct, not stale.
+        #     origin, so the pointer is correct, not stale.
         # Everything else — owned upstream, unions, the early-skipped computed/aggregate kinds
         # (handled above), an unresolved/empty description, or a genuinely locally authored
         # description that was never inherited — carries no tag, and any existing tag is dropped.
@@ -1017,8 +1036,13 @@ def inherit_upstream_column_knowledge_cll(
         # tag; while the tag is present the column is treated as inherited.
         _desc_source_key = _cfg.desc_source_key
         if _desc_source_key:
-            _cfg_meta = _read_column_config_meta(node_col)
-            _had_tag = _desc_source_key in _cfg_meta
+            _orig_meta = dict(node_col.meta or {})
+            # Detect a prior tag wherever it loaded from: top-level meta (classic) or a
+            # fusion-written config.meta. Either counts as "already inherited".
+            _had_tag = (
+                _desc_source_key in _orig_meta
+                or _desc_source_key in _read_column_config_meta(node_col)
+            )
 
             _final_desc_raw = update_kwargs.get("description", existing_desc)
             _final_desc = (
@@ -1041,13 +1065,18 @@ def inherit_upstream_column_knowledge_cll(
                 and (_gap_filled or _final_desc == _resolved_upstream or _had_tag)
             )
 
-            _new_cfg_meta = dict(_cfg_meta)
+            # Apply onto the meta the writer will persist: the tag/meta block above may already
+            # have staged update_kwargs["meta"]; otherwise start from the column's current meta.
+            _new_meta = dict(update_kwargs["meta"]) if "meta" in update_kwargs else dict(_orig_meta)
             if _is_inherited:
-                _new_cfg_meta[_desc_source_key] = desc_source_ref
+                _new_meta[_desc_source_key] = desc_source_ref
             else:
-                _new_cfg_meta.pop(_desc_source_key, None)
-            if _new_cfg_meta != _cfg_meta:
-                update_kwargs["config"] = _build_column_config_with_meta(node_col, _new_cfg_meta)
+                _new_meta.pop(_desc_source_key, None)
+            if _new_meta != _orig_meta:
+                update_kwargs["meta"] = _new_meta
+            else:
+                # desc-source reverted the meta block's change to a no-op → don't write meta.
+                update_kwargs.pop("meta", None)
 
         if update_kwargs:
             logger.debug(
