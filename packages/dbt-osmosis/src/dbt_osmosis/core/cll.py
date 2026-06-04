@@ -57,6 +57,9 @@ _DISK_CACHE: dict[str, dict[str, t.Any]] = {}
 # project_dir → set of model names for which CLL failed during this run
 _CLL_FAILURES: dict[str, set[str]] = {}
 
+# project_dir → {reason: set of "MODEL.COLUMN"} for origin-walk soft-fails (cycle / max-depth)
+_CLL_WALK_SOFT_FAILS: dict[str, dict[str, set[str]]] = {}
+
 _CACHE_LOCK = threading.Lock()
 _FAILURES_LOCK = threading.Lock()
 
@@ -487,6 +490,42 @@ def clear_cll_failures(context: YamlRefactorContextProtocol) -> None:
     project_dir = str(runtime_cfg.project_root)
     with _FAILURES_LOCK:
         _CLL_FAILURES.pop(project_dir, None)
+
+
+def record_cll_walk_soft_fail(
+    context: YamlRefactorContextProtocol, reason: str, ref: str
+) -> None:
+    """Record a soft-fail from the origin/description walk for the end-of-run summary.
+
+    Unlike a CLL *failure* (a model whose lineage could not be computed), a walk soft-fail is
+    a column whose description/origin could not be fully resolved because the walk bailed out
+    — it hit the depth limit (``reason="max-depth"``) or a genuine multi-node lineage cycle
+    (``reason="cycle"``). The column simply resolves to no inherited description rather than
+    erroring; collecting these lets the run end with one actionable summary instead of silence.
+    ``ref`` is the ``MODEL.COLUMN`` where the guard tripped.
+    """
+    project_dir = str(context.project.runtime_cfg.project_root)
+    with _FAILURES_LOCK:
+        _CLL_WALK_SOFT_FAILS.setdefault(project_dir, {}).setdefault(reason, set()).add(ref)
+
+
+def get_cll_walk_soft_fails(
+    context: YamlRefactorContextProtocol,
+) -> dict[str, frozenset[str]]:
+    """Return ``{reason: {MODEL.COLUMN, ...}}`` of origin-walk soft-fails for this project."""
+    project_dir = str(context.project.runtime_cfg.project_root)
+    with _FAILURES_LOCK:
+        return {
+            reason: frozenset(refs)
+            for reason, refs in _CLL_WALK_SOFT_FAILS.get(project_dir, {}).items()
+        }
+
+
+def clear_cll_walk_soft_fails(context: YamlRefactorContextProtocol) -> None:
+    """Clear the origin-walk soft-fail registry for this project (after emitting summary)."""
+    project_dir = str(context.project.runtime_cfg.project_root)
+    with _FAILURES_LOCK:
+        _CLL_WALK_SOFT_FAILS.pop(project_dir, None)
 
 
 def get_column_origin(

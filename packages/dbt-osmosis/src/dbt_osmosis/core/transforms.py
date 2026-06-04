@@ -229,6 +229,33 @@ class TransformPipeline:
             except Exception:
                 pass
 
+            # Emit the origin-walk soft-fail summary (cycle / max-depth). These columns
+            # resolved to no inherited description/origin because the walk bailed — not hard
+            # errors, but worth surfacing once at the end rather than silently dropping.
+            try:
+                from dbt_osmosis.core.cll import (
+                    clear_cll_walk_soft_fails,
+                    get_cll_walk_soft_fails,
+                )
+                soft_fails = get_cll_walk_soft_fails(context)
+                _labels = {
+                    "max-depth": "exceeded the max lineage depth",
+                    "cycle": "hit a lineage cycle",
+                }
+                for reason, refs in sorted(soft_fails.items()):
+                    if not refs:
+                        continue
+                    logger.warning(
+                        ":warning: CLL origin walk %s for %d column(s) — these kept their "
+                        "existing description and got no desc-source tag:\n  %s",
+                        _labels.get(reason, reason),
+                        len(refs),
+                        "\n  ".join(sorted(refs)),
+                    )
+                clear_cll_walk_soft_fails(context)
+            except Exception:
+                pass
+
         return self
 
     def __repr__(self) -> str:
@@ -443,6 +470,7 @@ def _resolve_cll_description(
         _NODE_INDEX,
         _ensure_manifest_index,
         get_cll_results,
+        record_cll_walk_soft_fail,
         strip_annotation_tags,
     )
     from dbt_osmosis.core.inheritance import _read_ancestor_yaml_description
@@ -453,20 +481,27 @@ def _resolve_cll_description(
     if visited is None:
         visited = set()
     key = (parent_model_name.lower(), parent_col_name.lower())
-    # Cycle guard — incremental self-refs (M.col → M.col) would otherwise burn the
-    # whole depth budget. Stop silently; the depth limit still catches non-cyclic
-    # pathological chains below.
+    here_ref = f"{parent_model_name.upper()}.{parent_col_name.upper()}"
+    # Cycle guard — a node already on THIS walk path is re-entered. Direct self-refs
+    # (incremental {{ this }}, M.col → M.col) are short-circuited at step 8 before they get
+    # here, and union branches each get their own `visited` copy so a diamond (two branches
+    # reconverging) is not mistaken for a cycle — so reaching this point means a genuine
+    # multi-node lineage loop. Record it as a soft-fail and stop (the column resolves to no
+    # inherited description rather than erroring).
     if key in visited:
+        record_cll_walk_soft_fail(context, "cycle", here_ref)
+        logger.debug(":repeat: CLL walk hit a lineage cycle at => %s", here_ref)
         return None, None
     visited.add(key)
 
-    # 1. Depth guard — protects against cyclic or pathological lineage chains.
+    # 1. Depth guard — protects against cyclic or pathological lineage chains. Soft-fail:
+    # the column resolves to no inherited description; surfaced in the end-of-run summary.
     if depth > max_depth:
-        logger.warning(
-            ":warning: CLL description search exceeded max depth (%d) at => %s.%s",
+        record_cll_walk_soft_fail(context, "max-depth", here_ref)
+        logger.debug(
+            ":warning: CLL walk exceeded max depth (%d) at => %s",
             max_depth,
-            parent_model_name,
-            parent_col_name,
+            here_ref,
         )
         return None, None
 
@@ -499,8 +534,6 @@ def _resolve_cll_description(
             if cleaned and cleaned not in context.placeholders:
                 return cleaned
         return None
-
-    here_ref = f"{parent_model_name.upper()}.{parent_col_name.upper()}"
 
     # This node IS the origin of its own description (terminal: source/computed/origin).
     def _own() -> tuple[str | None, str | None]:
@@ -545,13 +578,16 @@ def _resolve_cll_description(
 
         branch_descs: list[str] = []
         for branch_model, branch_col in union_branches:
+            # Each branch is an independent path → give it its own visited copy so two
+            # branches reconverging on a shared ancestor (a diamond) is not mistaken for a
+            # cycle. A real loop within a branch is still caught by that branch's copy.
             branch_desc, _ = _resolve_cll_description(
                 context,
                 branch_model,
                 branch_col,
                 depth + 1,
                 max_depth,
-                visited,
+                set(visited),
             )
             if branch_desc:
                 branch_descs.append(branch_desc)
@@ -593,14 +629,24 @@ def _resolve_cll_description(
     #   • upstream resolved nothing → an owner with its own text is the origin here; a
     #     non-anchored copy with no resolvable upstream yields nothing (never laundered).
     progenitor_col = (parent_result.progenitor_column or parent_col_name).strip('"').strip("'")
-    parent_text, parent_origin = _resolve_cll_description(
-        context,
-        parent_result.progenitor_model.lower(),
-        progenitor_col,
-        depth + 1,
-        max_depth,
-        visited,
-    )
+    if (parent_result.progenitor_model.lower(), progenitor_col.lower()) == (
+        parent_model_name.lower(),
+        parent_col_name.lower(),
+    ):
+        # Direct self-reference (e.g. an incremental model selecting from {{ this }} produces
+        # M.col → M.col): the column is its own progenitor, so there is nothing upstream to
+        # inherit. Treat as no-upstream — it resolves to its own description below — and do
+        # NOT recurse, so this expected pattern never trips the cycle guard / soft-fail log.
+        parent_text, parent_origin = None, None
+    else:
+        parent_text, parent_origin = _resolve_cll_description(
+            context,
+            parent_result.progenitor_model.lower(),
+            progenitor_col,
+            depth + 1,
+            max_depth,
+            visited,
+        )
     owns = _owns_description(context, model_node, parent_col_name)
     own = _own_description()
     if owns and own is not None and own != parent_text:
@@ -982,9 +1028,15 @@ def inherit_upstream_column_knowledge_cll(
                 strip_annotation_tags(desc_to_apply).strip() if desc_to_apply else ""
             )
 
+            # A column never cites itself as its own source: when the origin resolves back to
+            # this very column (e.g. an incremental model selecting from {{ this }}), the text
+            # originates here, so it is authored, not inherited → no tag.
+            _self_ref = f"{node.name.upper()}.{col_name.upper()}"
+
             _is_inherited = (
                 not force_inherit
                 and desc_source_ref is not None
+                and desc_source_ref != _self_ref
                 and bool(_final_desc)
                 and (_gap_filled or _final_desc == _resolved_upstream or _had_tag)
             )

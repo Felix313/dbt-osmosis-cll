@@ -26,8 +26,13 @@ import pytest
 from dbt.artifacts.resources.types import NodeType
 
 from dbt_osmosis.config import get_config, reset_config
+from dbt_osmosis.core.cll import (
+    clear_cll_walk_soft_fails,
+    get_cll_walk_soft_fails,
+)
 from dbt_osmosis.core.transforms import (
     _find_cll_description,
+    _resolve_cll_description,
     inherit_upstream_column_knowledge_cll,
 )
 
@@ -845,3 +850,71 @@ def test_desc_source_stripped_when_column_becomes_computed():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert "desc-source" not in col.config_meta()
+
+
+# ---------------------------------------------------------------------------
+# Origin-walk soft-fails (cycle / max-depth) + self-reference handling
+# ---------------------------------------------------------------------------
+
+
+def test_self_reference_resolves_to_own_and_records_no_soft_fail():
+    """A direct self-ref (incremental {{ this }}: M.col → M.col) is short-circuited before the
+    cycle guard: it resolves to the column's own description, records NO soft-fail, and does not
+    tag itself as its own desc-source."""
+    ctx = make_context()
+    clear_cll_walk_soft_fails(ctx)
+    m = FakeNode("m", {"COL": FakeColumn("COL", "Self-defined desc")})
+    with patched(
+        results={"m": [cll("m", "col", progenitor_model="m", progenitor_column="col")]},
+        node_index={"m": m},
+    ):
+        desc, origin = _resolve_cll_description(ctx, "m", "col")
+        assert desc == "Self-defined desc"
+        assert origin == "M.COL"  # it is its own origin
+        assert get_cll_walk_soft_fails(ctx) == {}  # no cycle recorded
+
+        # Through the inherit path, the column must NOT cite itself as its own source.
+        inherit_upstream_column_knowledge_cll(ctx, m)
+    assert "desc-source" not in m.columns["COL"].config_meta()
+    clear_cll_walk_soft_fails(ctx)
+
+
+def test_multi_node_cycle_records_soft_fail():
+    """A genuine multi-node lineage loop (A.col → B.col → A.col, neither owning a description)
+    resolves to nothing and is recorded as a 'cycle' soft-fail for the run-end summary."""
+    ctx = make_context()
+    clear_cll_walk_soft_fails(ctx)
+    a = FakeNode("a", {"COL": FakeColumn("COL", "")})
+    b = FakeNode("b", {"COL": FakeColumn("COL", "")})
+    with patched(
+        results={
+            "a": [cll("a", "col", progenitor_model="b", progenitor_column="col")],
+            "b": [cll("b", "col", progenitor_model="a", progenitor_column="col")],
+        },
+        node_index={"a": a, "b": b},
+    ):
+        desc, origin = _resolve_cll_description(ctx, "a", "col")
+        assert desc is None and origin is None
+        soft_fails = get_cll_walk_soft_fails(ctx)
+        assert "A.COL" in soft_fails.get("cycle", frozenset())
+    clear_cll_walk_soft_fails(ctx)
+
+
+def test_max_depth_records_soft_fail():
+    """Exceeding the configured max origin depth is recorded as a 'max-depth' soft-fail."""
+    ctx = make_context()
+    clear_cll_walk_soft_fails(ctx)
+    # A 3-link passthrough chain with max_depth=1 forces the depth guard to trip.
+    deep = FakeNode("deep", {"COL": FakeColumn("COL", "Deep")})
+    mid = FakeNode("mid", {"COL": FakeColumn("COL", "")}, settings={("desc-owner", None): "upstream"})
+    with patched(
+        results={
+            "mid": [cll("mid", "col", progenitor_model="deep", progenitor_column="col")],
+        },
+        node_index={"mid": mid, "deep": deep},
+    ):
+        desc, origin = _resolve_cll_description(ctx, "mid", "col", max_depth=0)
+        assert desc is None and origin is None
+        soft_fails = get_cll_walk_soft_fails(ctx)
+        assert soft_fails.get("max-depth")  # at least one column recorded
+    clear_cll_walk_soft_fails(ctx)
