@@ -1057,8 +1057,20 @@ def inherit_upstream_column_knowledge_cll(
             # originates here, so it is authored, not inherited → no tag.
             _self_ref = f"{node.name.upper()}.{col_name.upper()}"
 
+            # desc-source is for GAP-FILL columns only — those whose description is inherited via
+            # CLL because the layer owns descriptions but gap-fills empties (desc-owner: this,
+            # the default). It is NOT written for:
+            #   • desc-owner: upstream (force-inherit) — transparent passthroughs, covered by
+            #     CBM-ODP annotations, owned upstream;
+            #   • a NAMED anchor (desc-owner set to anything else, e.g. "aml") — the description
+            #     is explicitly authored/owned at that column (e.g. injected by AML enrichment),
+            #     so the column is an ORIGIN; a CLL-lineage pointer would mischaracterize it even
+            #     when its text happens to match an upstream source.
+            _is_gap_fill_owner = str(desc_authority).lower() == "this"
+
             _is_inherited = (
                 not force_inherit
+                and _is_gap_fill_owner
                 and desc_source_ref is not None
                 and desc_source_ref != _self_ref
                 and bool(_final_desc)

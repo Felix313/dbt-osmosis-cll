@@ -816,6 +816,50 @@ def test_force_inherit_strips_existing_tag():
     assert "desc-source" not in col.meta  # owned upstream → no provenance
 
 
+def test_named_anchor_owner_gets_no_desc_source():
+    """A column with an explicit NAMED desc-owner anchor (e.g. 'aml') is authored/owned there —
+    it is an ORIGIN — so it gets no desc-source tag even when its text matches an upstream
+    origin. Only the gap-fill default (desc-owner: this) is tagged."""
+    child = FakeNode(
+        "child",
+        {"COL": FakeColumn("COL", description="Parent desc")},
+        settings={("desc-owner", None): "aml"},
+    )
+    ctx = make_context()
+    with patched(
+        results={
+            "child": [cll("child", "col", progenitor_model="parent", progenitor_column="col")]
+        },
+        yaml_descs={("parent", "col"): "Parent desc"},
+        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "Parent desc")})},
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["COL"]
+    assert col.description == "Parent desc"  # preserved (anchored, not overwritten)
+    assert "desc-source" not in col.meta  # named anchor → origin → no provenance
+
+
+def test_named_anchor_owner_strips_existing_desc_source():
+    """A column that gains a NAMED desc-owner anchor has any prior desc-source tag stripped —
+    it is now declared owned/authored, so the CLL-lineage pointer is removed."""
+    child = FakeNode(
+        "child",
+        {"COL": FakeColumn("COL", description="Parent desc", meta={"desc-source": "PARENT.COL"})},
+        settings={("desc-owner", None): "aml"},
+    )
+    ctx = make_context()
+    with patched(
+        results={
+            "child": [cll("child", "col", progenitor_model="parent", progenitor_column="col")]
+        },
+        yaml_descs={("parent", "col"): "Parent desc"},
+        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "Parent desc")})},
+    ):
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["COL"]
+    assert "desc-source" not in col.meta  # stale provenance stripped on the named anchor
+
+
 def test_desc_source_stripped_when_column_becomes_computed():
     """A column that previously inherited (carries a tag) but is now a multi-source/computed
     column loses its tag on the early-skip path — it no longer has a single progenitor."""
