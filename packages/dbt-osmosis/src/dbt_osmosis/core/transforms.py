@@ -1712,7 +1712,11 @@ def annotate_column_origins(
             stripped_desc = strip_annotation_tags((node_col.description or "").strip())
             if _col_docs:
                 central_doc = _col_docs.get(col_name.lower())
-                if central_doc and (not stripped_desc or stripped_desc in context.placeholders):
+                # Glossary columns are CLL-ignored and centrally owned, so the
+                # glossary is authoritative: its description always wins (overwrite,
+                # not just gap-fill). This lets edits to the central glossary
+                # propagate to already-documented columns on the next run.
+                if central_doc:
                     stripped_desc = central_doc
 
             any_removed = bool(removed_meta) or bool(removed_config)

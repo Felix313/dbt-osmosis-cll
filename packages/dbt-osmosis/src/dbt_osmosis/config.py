@@ -28,9 +28,9 @@ Column glossary (``column-docs-path``)
 A flat YAML file mapping column names to canonical descriptions.  Every column
 listed there is automatically treated as CLL-ignored: no ``col-renamed-from`` /
 ``col-derived-from`` / ``col-computed-in`` meta tag is written for it, stale tags from prior runs are
-removed, and the glossary description is injected when the column has no
-existing description.  ``cll-ignore-columns`` is for columns you want to
-suppress *without* providing a description.
+removed, and the glossary description is authoritative — it is written on every
+run, overwriting any existing description in the YAML.  ``cll-ignore-columns`` is
+for columns you want to suppress *without* providing a description.
 
 .. code-block:: yaml
 
@@ -137,9 +137,9 @@ class OsmosisConfig:
 
     Every column listed in the file is **automatically CLL-ignored**: osmosis
     will not write ``meta_key_renamed_from`` / ``meta_key_derived_from`` / ``meta_key_computed_in``
-    meta tags for it, stale tags from prior runs are
-    will strip any stale tags from prior runs, and will inject the description
-    when the column has no existing description in the YAML.
+    meta tags for it, will strip any stale tags from prior runs, and treats the
+    glossary description as authoritative — writing it on every run and
+    overwriting any existing description in the YAML.
 
     Leave empty (default) to disable.
     """

@@ -74,14 +74,16 @@ def cll(model, column, **kwargs):
 
 
 @contextlib.contextmanager
-def patched(*, results=None, settings=None, origin=None, origin_desc=None):
+def patched(*, results=None, settings=None, origin=None, origin_desc=None, col_docs=None):
     """Patch the CLL boundaries annotate_column_origins reads from.
 
     *settings* maps a setting key to its value for _get_setting_for_node (only the
-    annotate-column-origin-infos mode matters here).
+    annotate-column-origin-infos mode matters here).  *col_docs* is the central
+    glossary mapping (column_name_lower → description); empty by default.
     """
     results = results or {}
     settings = settings or {}
+    col_docs = dict(col_docs or {})
 
     def fake_get_setting(key, node, col_name=None, fallback=None):
         return settings.get(key, fallback)
@@ -94,7 +96,9 @@ def patched(*, results=None, settings=None, origin=None, origin_desc=None):
     stack.enter_context(
         mock.patch("dbt_osmosis.core.introspection._get_setting_for_node", fake_get_setting)
     )
-    stack.enter_context(mock.patch("dbt_osmosis.config.get_column_docs", dict))
+    stack.enter_context(
+        mock.patch("dbt_osmosis.config.get_column_docs", lambda *a, **k: dict(col_docs))
+    )
     stack.enter_context(
         mock.patch("dbt_osmosis.core.cll.get_column_origin", lambda *a, **k: origin)
     )
@@ -195,6 +199,60 @@ def test_multi_source_computed_annotation_here():
     assert "here" in desc
     assert "DC_STG.M" not in desc
     assert "Business KPI" in desc
+
+
+def test_glossary_doc_gap_fills_empty_description():
+    """A glossary (CLL-ignored) column with no description gets the central doc."""
+    node = FakeNode("m", {"ROW_BATCH_TIMESTAMP": FakeColumn("ROW_BATCH_TIMESTAMP", "")})
+    _annotate(
+        node,
+        col_docs={"row_batch_timestamp": "Canonical batch timestamp."},
+        settings={"annotate-column-origin-infos": "always"},
+    )
+    assert node.columns["ROW_BATCH_TIMESTAMP"].description == "Canonical batch timestamp."
+
+
+def test_glossary_doc_overwrites_existing_description():
+    """The glossary is authoritative: the central doc overwrites an existing
+    description, so edits to the glossary propagate to already-documented columns."""
+    node = FakeNode(
+        "m", {"ROW_BATCH_TIMESTAMP": FakeColumn("ROW_BATCH_TIMESTAMP", "stale previous text")}
+    )
+    _annotate(
+        node,
+        col_docs={"row_batch_timestamp": "Updated canonical text."},
+        settings={"annotate-column-origin-infos": "always"},
+    )
+    assert node.columns["ROW_BATCH_TIMESTAMP"].description == "Updated canonical text."
+
+
+def test_glossary_doc_is_idempotent():
+    """A column already holding the canonical doc is left unchanged on rerun."""
+    node = FakeNode(
+        "m", {"ROW_BATCH_TIMESTAMP": FakeColumn("ROW_BATCH_TIMESTAMP", "Canonical text.")}
+    )
+    _annotate(
+        node,
+        col_docs={"row_batch_timestamp": "Canonical text."},
+        settings={"annotate-column-origin-infos": "always"},
+    )
+    assert node.columns["ROW_BATCH_TIMESTAMP"].description == "Canonical text."
+
+
+def test_glossary_doc_overwrites_and_strips_stale_annotation():
+    """An existing annotation block on a glossary column is stripped and the
+    description replaced wholesale by the central doc."""
+    cfg = get_config()
+    stale = f"old text\n\n{cfg.annotation_separator}\nMY-ORG -> Derived from: SRC.X"
+    node = FakeNode("m", {"ROW_BATCH_TIMESTAMP": FakeColumn("ROW_BATCH_TIMESTAMP", stale)})
+    _annotate(
+        node,
+        col_docs={"row_batch_timestamp": "Canonical text."},
+        settings={"annotate-column-origin-infos": "always"},
+    )
+    desc = node.columns["ROW_BATCH_TIMESTAMP"].description
+    assert desc == "Canonical text."
+    assert cfg.annotation_separator not in desc
 
 
 def test_never_mode_strips_stale_tags_without_annotating():
