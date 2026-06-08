@@ -62,7 +62,7 @@ workbench = [
   "setuptools>=70",
 ]
 
-openai = ["openai~=1.58.1"]
+openai = ["openai>=1.58.1,<2.42.0"]
 
 dev = [
   "basedpyright~=1.38.4",
