@@ -15,7 +15,7 @@ For full workflow details: `bd prime`
 
 ## Repository Overview
 
-**dbt-osmosis** is a CLI tool that enhances the dbt developer experience through automated YAML schema management, column-level documentation inheritance, and a Streamlit-based workbench for interactive dbt SQL development. The tool operates as both a dbt utility and standalone Python package.
+**dbt-osmosis-cll** is a CLI tool that enhances the dbt developer experience through automated YAML schema management, column-level documentation inheritance, and a Streamlit-based workbench for interactive dbt SQL development. The tool operates as both a dbt utility and standalone Python package.
 
 ## Development Commands
 
@@ -79,41 +79,41 @@ uv pip install -e .
 uv add <package>
 ```
 
-### Running dbt-osmosis Commands
+### Running dbt-osmosis-cll Commands
 ```bash
 # Main YAML refactor command (organize + document)
-uv run dbt-osmosis yaml refactor --project-dir <path> --profiles-dir <path>
+uv run dbt-osmosis-cll yaml refactor --project-dir <path> --profiles-dir <path>
 
 # Organize YAML files only (no documentation)
-uv run dbt-osmosis yaml organize --project-dir <path> --profiles-dir <path>
+uv run dbt-osmosis-cll yaml organize --project-dir <path> --profiles-dir <path>
 
 # Document models only (inherit upstream docs)
-uv run dbt-osmosis yaml document --project-dir <path> --profiles-dir <path>
+uv run dbt-osmosis-cll yaml document --project-dir <path> --profiles-dir <path>
 
 # Run with external YAML formatter (prettier, yamlfmt, yq, etc.)
-uv run dbt-osmosis yaml refactor --formatter "prettier --write" --project-dir <path> --profiles-dir <path>
+uv run dbt-osmosis-cll yaml refactor --formatter "prettier --write" --project-dir <path> --profiles-dir <path>
 
 # Start workbench (requires workbench extra)
-uv run dbt-osmosis workbench --project-dir <path> --profiles-dir <path>
+uv run dbt-osmosis-cll workbench --project-dir <path> --profiles-dir <path>
 
 # Compile SQL
-uv run dbt-osmosis sql compile "SELECT * FROM {{ ref('my_model') }}"
+uv run dbt-osmosis-cll sql compile "SELECT * FROM {{ ref('my_model') }}"
 
 # Execute SQL
-uv run dbt-osmosis sql run "SELECT 1"
+uv run dbt-osmosis-cll sql run "SELECT 1"
 
 # Natural language interface (NEW)
 # Generate SQL from natural language
-uv run dbt-osmosis nl query "Show me the top 10 customers by lifetime value"
+uv run dbt-osmosis-cll nl query "Show me the top 10 customers by lifetime value"
 
 # Generate a complete dbt model from natural language
-uv run dbt-osmosis generate model "Show me customers who churned in the last 30 days"
+uv run dbt-osmosis-cll generate model "Show me customers who churned in the last 30 days"
 
 # Generate model with custom name and dry-run preview
-uv run dbt-osmosis generate model "Monthly revenue by region" --model-name monthly_revenue --dry-run
+uv run dbt-osmosis-cll generate model "Monthly revenue by region" --model-name monthly_revenue --dry-run
 
 # Validate LLM connectivity and provider configuration
-uv run dbt-osmosis test-llm
+uv run dbt-osmosis-cll test-llm
 ```
 
 ### Demo Project
@@ -127,10 +127,10 @@ dbt test --profiles-dir . --target test
 ## Code Architecture
 
 ### Entry Points
-- **CLI**: `src/dbt_osmosis/cli/main.py` - Click-based CLI with `yaml`, `sql`, `workbench`, `generate`, `nl`, `diff`, `lint`, `test`, and `test-llm` command families
-- **Core API**: `src/dbt_osmosis/core/osmosis.py` - Re-exports all public APIs for backwards compatibility
+- **CLI**: `src/dbt_osmosis_cll/cli/main.py` - Click-based CLI with `yaml`, `sql`, `workbench`, `generate`, `nl`, `diff`, `lint`, `test`, and `test-llm` command families
+- **Core API**: `src/dbt_osmosis_cll/osmosis_propagation/osmosis.py` - Re-exports all public APIs for backwards compatibility
 
-### Core Module Structure (`src/dbt_osmosis/core/`)
+### Core Module Structure (`src/dbt_osmosis_cll/osmosis_propagation/`)
 
 The core functionality is split into specialized modules:
 
@@ -158,9 +158,9 @@ The core functionality is split into specialized modules:
 
 ### Configuration Resolution System
 
-**dbt-osmosis** provides a unified configuration resolution system through two main APIs:
+**dbt-osmosis-cll** provides a unified configuration resolution system through two main APIs:
 
-#### SettingsResolver (`dbt_osmosis.core.introspection.SettingsResolver`)
+#### SettingsResolver (`dbt_osmosis_cll.osmosis_propagation.introspection.SettingsResolver`)
 
 The `SettingsResolver` class provides a clean, testable interface for retrieving configuration values from multiple sources with defined precedence rules.
 
@@ -170,13 +170,13 @@ The `SettingsResolver` class provides a clean, testable interface for retrieving
 3. **Node-level config.extra** (e.g., `{{ config(dbt_osmosis_<key>=value) }}`)
 4. **Node-level config.meta** (dbt 1.10+, e.g., `{{ config(meta={'dbt-osmosis-<key>': value}) }}`)
 5. **Node-level unrendered_config** (dbt 1.10+)
-6. **Project-level vars** (e.g., `dbt_project.yml` vars.dbt-osmosis.<key>)
-7. **Supplementary file** (`dbt-osmosis.yml` in project root)
+6. **Project-level vars** (e.g., `dbt_project.yml` vars.dbt-osmosis-cll.<key>)
+7. **Supplementary file** (`dbt-osmosis-cll.yml` in project root)
 8. **Fallback value** (default if not found)
 
 **Public API:**
 ```python
-from dbt_osmosis.core.osmosis import SettingsResolver
+from dbt_osmosis_cll.osmosis_propagation.osmosis import SettingsResolver
 
 resolver = SettingsResolver()
 
@@ -214,7 +214,7 @@ chain = resolver.get_precedence_chain(
 **Example Usage:**
 ```python
 # In a transform function
-from dbt_osmosis.core.osmosis import SettingsResolver
+from dbt_osmosis_cll.osmosis_propagation.osmosis import SettingsResolver
 
 def my_transform(context: YamlRefactorContext) -> YamlRefactorContext:
     resolver = SettingsResolver()
@@ -242,7 +242,7 @@ def my_transform(context: YamlRefactorContext) -> YamlRefactorContext:
     return context
 ```
 
-#### PropertyAccessor (`dbt_osmosis.core.introspection.PropertyAccessor`)
+#### PropertyAccessor (`dbt_osmosis_cll.osmosis_propagation.introspection.PropertyAccessor`)
 
 The `PropertyAccessor` class provides a unified interface for accessing model properties (descriptions, tags, meta, data types) from multiple sources with support for unrendered jinja templates.
 
@@ -253,7 +253,7 @@ The `PropertyAccessor` class provides a unified interface for accessing model pr
 
 **Public API:**
 ```python
-from dbt_osmosis.core.osmosis import PropertyAccessor, PropertySource
+from dbt_osmosis_cll.osmosis_propagation.osmosis import PropertyAccessor, PropertySource
 
 accessor = PropertyAccessor(context=context)
 
@@ -298,7 +298,7 @@ has_desc = accessor.has_property(
 **Example Usage:**
 ```python
 # In a transform that preserves doc blocks
-from dbt_osmosis.core.osmosis import PropertyAccessor, PropertySource
+from dbt_osmosis_cll.osmosis_propagation.osmosis import PropertyAccessor, PropertySource
 
 def inherit_docs_preserving_blocks(context: YamlRefactorContext) -> YamlRefactorContext:
     accessor = PropertyAccessor(context=context)
@@ -337,7 +337,7 @@ The legacy `_get_setting_for_node()` function is now a backward compatibility wr
 
 ```python
 # Old way (still works)
-from dbt_osmosis.core.introspection import _get_setting_for_node
+from dbt_osmosis_cll.osmosis_propagation.introspection import _get_setting_for_node
 
 value = _get_setting_for_node(
     "output-to-lower",
@@ -347,7 +347,7 @@ value = _get_setting_for_node(
 )
 
 # New recommended way
-from dbt_osmosis.core.osmosis import SettingsResolver
+from dbt_osmosis_cll.osmosis_propagation.osmosis import SettingsResolver
 
 resolver = SettingsResolver()
 value = resolver.resolve(
@@ -380,7 +380,7 @@ value = resolver.resolve(
 
 ### Transform Pipeline Pattern
 
-dbt-osmosis uses a functional pipeline pattern with the `>>` operator:
+dbt-osmosis-cll uses a functional pipeline pattern with the `>>` operator:
 ```python
 transform = (
     inject_missing_columns
@@ -394,7 +394,7 @@ result = transform(context=context)
 
 Each transform function takes a `YamlRefactorContext` and returns it for chaining.
 
-### Workbench (`src/dbt_osmosis/workbench/`)
+### Workbench (`src/dbt_osmosis_cll/osmosis_propagation/commands/workbench/`)
 - **app.py**: Main Streamlit app
 - **components/**: Modular UI components (editor, preview, profiler, dashboard, feed)
 - Provides real-time dbt compilation, query execution, and pandas profiling
@@ -407,7 +407,7 @@ models:
     +dbt-osmosis: "{node.schema}/{node.name}.yml"  # Template for YAML paths
 
 vars:
-  dbt-osmosis:
+  dbt-osmosis-cll:
     yaml_settings:
       map_indent: 2
       sequence_indent: 4
@@ -416,7 +416,7 @@ vars:
 ```
 
 ### Column-Level Configuration Override (User Story 4)
-dbt-osmosis supports column-level configuration overrides, allowing individual columns to have different settings than the node-level default. This is useful when you want specific columns to behave differently.
+dbt-osmosis-cll supports column-level configuration overrides, allowing individual columns to have different settings than the node-level default. This is useful when you want specific columns to behave differently.
 
 **Precedence Order** (highest to lowest):
 1. Column-level meta (highest precedence)
@@ -425,7 +425,7 @@ dbt-osmosis supports column-level configuration overrides, allowing individual c
 4. Node-level config.meta (dbt 1.10+)
 5. Node-level unrendered_config (dbt 1.10+)
 6. Project vars
-7. Supplementary file (dbt-osmosis.yml)
+7. Supplementary file (dbt-osmosis-cll.yml)
 8. Fallback defaults
 
 **Example: Column-level overrides in schema.yml**
@@ -465,7 +465,7 @@ models:
 
 **Using SettingsResolver programmatically**:
 ```python
-from dbt_osmosis.core.introspection import SettingsResolver
+from dbt_osmosis_cll.osmosis_propagation.introspection import SettingsResolver
 
 resolver = SettingsResolver()
 
@@ -493,7 +493,7 @@ chain = resolver.get_precedence_chain(
 ```
 
 ### Testing Approach
-- Tests live in `tests/core/` mirroring `src/dbt_osmosis/core/`
+- Tests live in `tests/core/` mirroring `src/dbt_osmosis_cll/osmosis_propagation/`
 - Uses pytest with demo_duckdb project as test fixture
 - Local Taskfile matrix covers Python 3.10-3.12 with dbt-core 1.8-1.9 plus Python 3.10-3.13 with dbt-core 1.10.0; CI covers additional dbt versions
 - Run `dbt parse` before tests to generate manifest.json
@@ -501,13 +501,13 @@ chain = resolver.get_precedence_chain(
 ## Important Implementation Details
 
 ### dbt Integration
-- dbt-osmosis loads dbt projects via `dbt.cli.main.dbtRunner` and `dbt.cli.main.dbtRunnerResult`
+- dbt-osmosis-cll loads dbt projects via `dbt.cli.main.dbtRunner` and `dbt.cli.main.dbtRunnerResult`
 - Accesses parsed manifest at `target/manifest.json` via `dbt.contracts.graph.manifest.Manifest`
 - Uses dbt's internal SQL compilation via `dbt.task.sql.SqlCompileRunner`
 
 ### YAML Formatting
 - Uses `ruamel.yaml` (NOT PyYAML) to preserve formatting, comments, and anchors
-- YAML settings in `dbt_project.yml` under `vars.dbt-osmosis.yaml_settings` control output formatting
+- YAML settings in `dbt_project.yml` under `vars.dbt-osmosis-cll.yaml_settings` control output formatting
 - Custom `create_yaml_instance()` in `schema/parser.py` configures ruamel.yaml
 
 ### Column Knowledge Graph
@@ -527,28 +527,28 @@ chain = resolver.get_precedence_chain(
 - Hooks defined in `plugins.py` via `dbt_osmosis_hookspec`
 
 ### External Formatter Integration
-dbt-osmosis supports running an external YAML formatter on all files it writes, reducing the need for a separate formatting step in CI:
+dbt-osmosis-cll supports running an external YAML formatter on all files it writes, reducing the need for a separate formatting step in CI:
 
 **CLI usage:**
 ```bash
 # With prettier
-dbt-osmosis yaml refactor --formatter "prettier --write" --project-dir . --profiles-dir .
+dbt-osmosis-cll yaml refactor --formatter "prettier --write" --project-dir . --profiles-dir .
 
 # With yamlfmt
-dbt-osmosis yaml refactor --formatter "yamlfmt" --project-dir . --profiles-dir .
+dbt-osmosis-cll yaml refactor --formatter "yamlfmt" --project-dir . --profiles-dir .
 
 # With yq (in-place normalization)
-dbt-osmosis yaml refactor --formatter "yq -i '.'" --project-dir . --profiles-dir .
+dbt-osmosis-cll yaml refactor --formatter "yq -i '.'" --project-dir . --profiles-dir .
 ```
 
-**Project-level config** (`dbt-osmosis.yml` in project root):
+**Project-level config** (`dbt-osmosis-cll.yml` in project root):
 ```yaml
 formatter: prettier --write
 ```
 
 **Configuration precedence** (highest to lowest):
 1. CLI flag `--formatter "cmd"`
-2. `formatter` key in `dbt-osmosis.yml`
+2. `formatter` key in `dbt-osmosis-cll.yml`
 3. None (default)
 
 **How it works:**
@@ -558,19 +558,19 @@ formatter: prettier --write
 4. Formatter failure is **non-fatal**: osmosis logs a warning but exits 0
 
 **Key implementation files:**
-- `src/dbt_osmosis/core/formatting.py` — `run_external_formatter()` function
-- `src/dbt_osmosis/core/settings.py` — `formatter` field on `YamlRefactorSettings`, `_written_files` tracking and `resolved_formatter` property on `YamlRefactorContext`
-- `src/dbt_osmosis/core/schema/writer.py` — `written_file_tracker` callback parameter
-- `src/dbt_osmosis/cli/main.py` — `--formatter` option and `_run_formatter_if_configured()` hook
+- `src/dbt_osmosis_cll/osmosis_propagation/formatting.py` — `run_external_formatter()` function
+- `src/dbt_osmosis_cll/osmosis_propagation/settings.py` — `formatter` field on `YamlRefactorSettings`, `_written_files` tracking and `resolved_formatter` property on `YamlRefactorContext`
+- `src/dbt_osmosis_cll/osmosis_propagation/schema/writer.py` — `written_file_tracker` callback parameter
+- `src/dbt_osmosis_cll/cli/main.py` — `--formatter` option and `_run_formatter_if_configured()` hook
 
 ### Pre-commit Integration
-Users can add dbt-osmosis as a pre-commit hook:
+Users can add dbt-osmosis-cll as a pre-commit hook:
 ```yaml
 repos:
   - repo: https://github.com/z3z1ma/dbt-osmosis
     rev: v1.1.17
     hooks:
-      - id: dbt-osmosis
+      - id: dbt-osmosis-cll
         files: ^models/
         args: [--target=prod]
         additional_dependencies: [dbt-duckdb]
@@ -587,20 +587,20 @@ repos:
 
 ## Key Files Reference
 
-- **CLI Entry**: src/dbt_osmosis/cli/main.py:48 (`cli()` function)
-- **Transform Pipeline**: src/dbt_osmosis/core/transforms.py
-- **YAML Path Logic**: src/dbt_osmosis/core/path_management.py:45 (`get_target_yaml_path()`)
-- **Column Inheritance**: src/dbt_osmosis/core/inheritance.py:22 (`_build_column_knowledge_graph()`)
-- **Database Introspection**: src/dbt_osmosis/core/introspection.py:33 (`get_columns()`)
-- **External Formatter**: src/dbt_osmosis/core/formatting.py (`run_external_formatter()`)
-- **Configuration Resolution**: src/dbt_osmosis/core/introspection.py:533 (`SettingsResolver`)
-- **Property Access**: src/dbt_osmosis/core/introspection.py:1153 (`PropertyAccessor`)
-- **Public API Exports**: src/dbt_osmosis/core/osmosis.py (re-exports all public APIs)
+- **CLI Entry**: src/dbt_osmosis_cll/cli/main.py:48 (`cli()` function)
+- **Transform Pipeline**: src/dbt_osmosis_cll/osmosis_propagation/transforms.py
+- **YAML Path Logic**: src/dbt_osmosis_cll/osmosis_propagation/path_management.py:45 (`get_target_yaml_path()`)
+- **Column Inheritance**: src/dbt_osmosis_cll/osmosis_propagation/inheritance.py:22 (`_build_column_knowledge_graph()`)
+- **Database Introspection**: src/dbt_osmosis_cll/osmosis_propagation/introspection.py:33 (`get_columns()`)
+- **External Formatter**: src/dbt_osmosis_cll/osmosis_propagation/formatting.py (`run_external_formatter()`)
+- **Configuration Resolution**: src/dbt_osmosis_cll/osmosis_propagation/introspection.py:533 (`SettingsResolver`)
+- **Property Access**: src/dbt_osmosis_cll/osmosis_propagation/introspection.py:1153 (`PropertyAccessor`)
+- **Public API Exports**: src/dbt_osmosis_cll/osmosis_propagation/osmosis.py (re-exports all public APIs)
 
 ## Documentation and Resources
 
-- **Official Docs**: https://z3z1ma.github.io/dbt-osmosis/
-- **Migration Guide**: https://z3z1ma.github.io/dbt-osmosis/docs/migrating (for 0.x.x → 1.x.x)
+- **Official Docs**: https://z3z1ma.github.io/dbt-osmosis-cll/
+- **Migration Guide**: https://z3z1ma.github.io/dbt-osmosis-cll/docs/migrating (for 0.x.x → 1.x.x)
 - **Workbench Demo**: https://dbt-osmosis-playground.streamlit.app/
 - **Quickstart Guide**: `specs/001-unified-config-resolution/quickstart.md` - Developer quickstart for the unified configuration resolution system
 

@@ -53,7 +53,7 @@ _CONTEXT = {"max_content_width": 800}
 @click.group()
 @click.version_option()
 def cli() -> None:
-    """dbt-osmosis is a CLI tool for dbt that helps you manage, document, and organize your dbt yaml files"""
+    """dbt-osmosis-cll — lineage-aware dbt YAML doc management (dbt-osmosis fused with column-level lineage)."""
 
 
 
@@ -766,7 +766,7 @@ def model(
 
     \f
     Example:
-        dbt-osmosis generate model "Show me customers who churned in the last 30 days"
+        dbt-osmosis-cll generate model "Show me customers who churned in the last 30 days"
 
     The AI will analyze your query, understand your available models and sources,
     and generate a complete dbt model with SQL and documentation.
@@ -927,7 +927,7 @@ def sources(
 
     \f
     Example:
-        dbt-osmosis generate sources --source-name raw --schema-name my_schema
+        dbt-osmosis-cll generate sources --source-name raw --schema-name my_schema
 
     This command discovers tables in your database and generates dbt source YAML definitions.
     """
@@ -1000,8 +1000,8 @@ def staging(
 
     \f
     Example:
-        dbt-osmosis generate staging raw customers --ai
-        dbt-osmosis generate staging raw stripe_transactions
+        dbt-osmosis-cll generate staging raw customers --ai
+        dbt-osmosis-cll generate staging raw stripe_transactions
 
     This command generates staging models from source tables. Use --ai flag for
     intelligent staging with AI-powered business logic, or omit for deterministic
@@ -1078,7 +1078,7 @@ def generate_query(
 
     \f
     Example:
-        dbt-osmosis generate query "Show me the top 10 customers by lifetime value"
+        dbt-osmosis-cll generate query "Show me the top 10 customers by lifetime value"
 
     The AI will translate your natural language query into SQL using dbt's ref() syntax.
     """
@@ -1180,17 +1180,17 @@ def nl_generate_deprecated(
     """Generate a dbt model from a natural language description.
 
     \f
-    DEPRECATED: Use `dbt-osmosis generate model` instead.
+    DEPRECATED: Use `dbt-osmosis-cll generate model` instead.
 
     Example:
-        dbt-osmosis nl generate "Show me customers who churned in the last 30 days"
+        dbt-osmosis-cll nl generate "Show me customers who churned in the last 30 days"
 
     The AI will analyze your query, understand your available models and sources,
     and generate a complete dbt model with SQL and documentation.
     """
     logger.warning(
         ":warning: The `nl generate` command is deprecated. "
-        "Use `dbt-osmosis generate model` instead."
+        "Use `dbt-osmosis-cll generate model` instead."
     )
     logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
@@ -1318,7 +1318,7 @@ def query(
 
     \f
     Example:
-        dbt-osmosis nl query "Show me the top 10 customers by lifetime value"
+        dbt-osmosis-cll nl query "Show me the top 10 customers by lifetime value"
 
     The AI will translate your natural language query into SQL using dbt's ref() syntax.
     """
@@ -1423,7 +1423,7 @@ def workbench(
     host: str = "localhost",
     port: int = 8501,
 ) -> None:
-    """Start the dbt-osmosis workbench
+    """Start the dbt-osmosis-cll workbench
 
     \f
     Pass the --options command to see streamlit specific options that can be passed to the app,
@@ -1593,9 +1593,9 @@ def schema(
     - Column data type changes
 
     Example:
-        dbt-osmosis diff schema
-        dbt-osmosis diff schema --severity breaking
-        dbt-osmosis diff schema -f my_project.my_model --output-format json
+        dbt-osmosis-cll diff schema
+        dbt-osmosis-cll diff schema --severity breaking
+        dbt-osmosis-cll diff schema -f my_project.my_model --output-format json
     """
     logger.debug("osmosis command invoked")
 
@@ -1896,10 +1896,10 @@ def suggest(
     It can use AI-powered analysis (requires OpenAI) or pattern-based analysis.
 
     Examples:
-        dbt-osmosis test suggest
-        dbt-osmosis test suggest --fqn my_project.my_model --use-ai
-        dbt-osmosis test suggest --pattern-only --format json
-        dbt-osmosis test suggest --output suggestions.json
+        dbt-osmosis-cll test suggest
+        dbt-osmosis-cll test suggest --fqn my_project.my_model --use-ai
+        dbt-osmosis-cll test suggest --pattern-only --format json
+        dbt-osmosis-cll test suggest --output suggestions.json
     """
     logger.debug("osmosis command invoked")
 
@@ -2117,8 +2117,8 @@ def lint_file(
 
     \f
     Example:
-        dbt-osmosis lint file "SELECT * FROM users"
-        dbt-osmosis lint file "$(cat models/my_model.sql)" --rules keyword-case line-length
+        dbt-osmosis-cll lint file "SELECT * FROM users"
+        dbt-osmosis-cll lint file "$(cat models/my_model.sql)" --rules keyword-case line-length
 
     This command analyzes SQL code for style issues, anti-patterns, and potential bugs.
     """
@@ -2214,8 +2214,8 @@ def lint_model_command(
 
     \f
     Example:
-        dbt-osmosis lint model my_model
-        dbt-osmosis lint model my_model --rules keyword-case select-star
+        dbt-osmosis-cll lint model my_model
+        dbt-osmosis-cll lint model my_model --rules keyword-case select-star
 
     This command analyzes a dbt model's SQL for style issues, anti-patterns, and potential bugs.
     """
@@ -2318,9 +2318,9 @@ def lint_project_command(
 
     \f
     Example:
-        dbt-osmosis lint project
-        dbt-osmosis lint project --fqn my_project.staging
-        dbt-osmosis lint project --rules keyword-case select-star
+        dbt-osmosis-cll lint project
+        dbt-osmosis-cll lint project --fqn my_project.staging
+        dbt-osmosis-cll lint project --rules keyword-case select-star
 
     This command analyzes all dbt models' SQL for style issues, anti-patterns, and potential bugs.
     """

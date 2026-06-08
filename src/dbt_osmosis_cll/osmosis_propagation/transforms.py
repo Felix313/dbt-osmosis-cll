@@ -345,7 +345,7 @@ def inherit_upstream_column_knowledge(
         force_inherit = str(desc_authority).lower() == "upstream"
         existing_desc = node_column.description.strip()
         if not force_inherit and existing_desc:
-            from dbt_osmosis_cll.integration.cll import strip_annotation_tags
+            from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
             if not strip_annotation_tags(existing_desc).strip():
                 force_inherit = True  # annotation-only ⟹ treat as no real description
         if (
@@ -366,7 +366,7 @@ def inherit_upstream_column_knowledge(
         # never removes freshly-written annotation from the current node — it only cleans
         # stale annotation carried on the upstream node's in-memory description.
         if "description" in updated_metadata and isinstance(updated_metadata["description"], str):
-            from dbt_osmosis_cll.integration.cll import strip_annotation_tags
+            from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
             _clean_desc = strip_annotation_tags(updated_metadata["description"]).strip()
             updated_metadata = {**updated_metadata, "description": _clean_desc}
 
@@ -471,8 +471,8 @@ def _resolve_cll_description(
         _ensure_manifest_index,
         get_cll_results,
         record_cll_walk_soft_fail,
-        strip_annotation_tags,
     )
+    from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
     from dbt_osmosis_cll.osmosis_propagation.inheritance import _read_ancestor_yaml_description
 
     if max_depth is None:
@@ -574,7 +574,7 @@ def _resolve_cll_description(
         union_branches = getattr(parent_result, "union_branches", []) or []
         if not union_branches:
             return _own()
-        from dbt_osmosis_cll.integration.cll import descriptions_equivalent
+        from dbt_osmosis_cll.osmosis_propagation.annotations import descriptions_equivalent
 
         branch_descs: list[str] = []
         for branch_model, branch_col in union_branches:
@@ -799,8 +799,8 @@ def inherit_upstream_column_knowledge_cll(
         _SOURCE_INDEX,
         _NODE_INDEX,
         get_cll_results,
-        strip_annotation_tags,
     )
+    from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
     from dbt_osmosis_cll.osmosis_propagation.introspection import _get_setting_for_node
 
     _ensure_manifest_index(context)
@@ -875,7 +875,7 @@ def inherit_upstream_column_knowledge_cll(
             union_branches = getattr(result, "union_branches", []) or []
             desc_to_apply: str | None = None
             if union_branches:
-                from dbt_osmosis_cll.integration.cll import descriptions_equivalent
+                from dbt_osmosis_cll.osmosis_propagation.annotations import descriptions_equivalent
 
                 branch_descs: list[str] = []
                 for branch_model, branch_col in union_branches:
@@ -1144,7 +1144,8 @@ def inject_missing_columns(
         logger.debug("Skipping column injection (skip_add_source_columns=True).")
         return
 
-    from dbt_osmosis_cll.integration.cll import descriptions_equivalent, get_model_columns_from_cll
+    from dbt_osmosis_cll.integration.cll import get_model_columns_from_cll
+    from dbt_osmosis_cll.osmosis_propagation.annotations import descriptions_equivalent
     from dbt_osmosis_cll.osmosis_propagation.introspection import normalize_column_name
 
     incoming_columns: dict[str, t.Any] | None = None
@@ -1600,6 +1601,11 @@ def annotate_column_origins(
     """
     from dbt.artifacts.resources.types import NodeType
     from dbt_osmosis_cll.integration.cll import (
+        get_column_origin,
+        get_cll_results,
+        get_origin_source_description,
+    )
+    from dbt_osmosis_cll.osmosis_propagation.annotations import (
         descriptions_equivalent,
         format_aggregate_from_tag,
         format_aggregate_in_tag,
@@ -1612,9 +1618,6 @@ def annotate_column_origins(
         format_union_tag,
         format_window_from_tag,
         format_window_in_tag,
-        get_column_origin,
-        get_cll_results,
-        get_origin_source_description,
         strip_annotation_tags,
     )
     from dbt_osmosis_cll.osmosis_propagation.introspection import _get_setting_for_node

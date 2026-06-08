@@ -1,7 +1,7 @@
 # CORE MODULE KNOWLEDGE BASE
 
 **Generated:** 2026-01-11
-**Scope:** src/dbt_osmosis/core/
+**Scope:** src/dbt_osmosis_cll/osmosis_propagation/
 
 ## OVERVIEW
 Core transformation engine with config resolution, YAML handling, column inheritance via knowledge graphs.

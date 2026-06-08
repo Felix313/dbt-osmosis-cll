@@ -113,8 +113,8 @@ def compute_doc_health(
     from dbt_osmosis_cll.integration.cll import (
         get_cll_failures,
         get_cll_results,
-        strip_annotation_tags,
     )
+    from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
     from dbt_osmosis_cll.osmosis_propagation.node_filters import _iter_candidate_nodes
 
     placeholders = set(context.placeholders)
