@@ -1,0 +1,863 @@
+# pyright: reportPrivateImportUsage=false, reportPrivateUsage=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportAny=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportArgumentType=false, reportFunctionMemberAccess=false, reportUnknownVariableType=false, reportUnusedParameter=false
+
+import logging
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from dbt_osmosis_cll.osmosis_propagation.path_management import create_missing_source_yamls
+from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+    RestructureDeltaPlan,
+    RestructureOperation,
+    apply_restructure_plan,
+    draft_restructure_delta_plan,
+    pretty_print_plan,
+)
+from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext, YamlRefactorSettings
+
+
+@pytest.fixture(scope="function")
+def fresh_caches():
+    """Patches the internal caches so each test starts with a fresh state."""
+    from dbt_osmosis_cll.osmosis_propagation.schema.reader import _YAML_BUFFER_CACHE, _YAML_ORIGINAL_CACHE
+
+    _YAML_BUFFER_CACHE.clear()
+    _YAML_ORIGINAL_CACHE.clear()
+    try:
+        yield
+    finally:
+        _YAML_BUFFER_CACHE.clear()
+        _YAML_ORIGINAL_CACHE.clear()
+
+
+def _build_source_bootstrap_context(tmp_path: Path, *, dry_run: bool) -> YamlRefactorContext:
+    runtime_cfg = mock.Mock()
+    runtime_cfg.credentials = mock.Mock(database="analytics")
+    runtime_cfg.model_paths = ["models"]
+    runtime_cfg.project_root = str(tmp_path)
+    runtime_cfg.threads = 1  # real int — __post_init__ compares resolved_threads > 1
+    runtime_cfg.vars = mock.Mock()
+    runtime_cfg.vars.to_dict.return_value = {
+        "dbt-osmosis": {"sources": {"raw": {"schema": "raw", "path": "sources/raw.yml"}}},
+    }
+
+    project = mock.Mock()
+    project.runtime_cfg = runtime_cfg
+    project.manifest = mock.Mock(sources={})
+    project.adapter = mock.Mock()
+    project.config = mock.Mock(disable_introspection=False)
+
+    return YamlRefactorContext(
+        project=project,
+        settings=YamlRefactorSettings(dry_run=dry_run),
+    )
+
+
+def test_create_missing_source_yamls(yaml_context: YamlRefactorContext, fresh_caches):
+    """Creates missing source YAML files if any are declared in dbt-osmosis sources
+    but do not exist in the manifest. Typically, might be none in your project.
+    """
+    create_missing_source_yamls(yaml_context)
+
+
+def test_create_missing_source_yamls_tracks_written_files(tmp_path: Path):
+    """Creating a missing source registers the real disk write and reloads the manifest once."""
+    context = _build_source_bootstrap_context(tmp_path, dry_run=False)
+    relation = mock.Mock(identifier="orders")
+    relation_meta = mock.Mock(comment="Order id", type="integer")
+    target_file = tmp_path / "models" / "sources" / "raw.yml"
+
+    context.project.adapter.list_relations.return_value = [relation]
+
+    with (
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.introspection.get_columns",
+            return_value={"id": relation_meta},
+        ),
+        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._reload_manifest") as reload_manifest,
+    ):
+        create_missing_source_yamls(context)
+
+    assert target_file.resolve() in context.written_files
+    assert context.disk_mutation_count == 1
+    reload_manifest.assert_called_once_with(context.project)
+
+
+def test_create_missing_source_yamls_dry_run_skips_reload(tmp_path: Path):
+    """Dry-run source bootstrap reports logical mutations without pretending the manifest changed on disk."""
+    context = _build_source_bootstrap_context(tmp_path, dry_run=True)
+    relation = mock.Mock(identifier="orders")
+    relation_meta = mock.Mock(comment="Order id", type="integer")
+    target_file = tmp_path / "models" / "sources" / "raw.yml"
+
+    context.project.adapter.list_relations.return_value = [relation]
+
+    with (
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.introspection.get_columns",
+            return_value={"id": relation_meta},
+        ),
+        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._reload_manifest") as reload_manifest,
+    ):
+        create_missing_source_yamls(context)
+
+    assert not target_file.exists()
+    assert context.written_files == frozenset()
+    assert context.disk_mutation_count == 0
+    reload_manifest.assert_not_called()
+
+
+def test_create_missing_source_yamls_does_not_leak_database_override_between_sources(
+    tmp_path: Path,
+    fresh_caches,
+):
+    """Each source bootstrap should resolve its database independently from the runtime default."""
+    import yaml
+
+    context = _build_source_bootstrap_context(tmp_path, dry_run=False)
+    context.project.runtime_cfg.vars.to_dict.return_value = {
+        "dbt-osmosis": {
+            "sources": {
+                "raw": {
+                    "database": "warehouse",
+                    "schema": "raw",
+                    "path": "sources/raw.yml",
+                },
+                "staging": {
+                    "schema": "staging",
+                    "path": "sources/staging.yml",
+                },
+            },
+        },
+    }
+    relation_meta = mock.Mock(comment="Order id", type="integer")
+
+    def list_relations(*, database: str, schema: str):
+        return [mock.Mock(identifier=f"{database}_{schema}_orders")]
+
+    context.project.adapter.list_relations.side_effect = list_relations
+
+    with (
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.introspection.get_columns",
+            return_value={"id": relation_meta},
+        ),
+        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._reload_manifest") as reload_manifest,
+    ):
+        create_missing_source_yamls(context)
+
+    assert context.project.adapter.list_relations.call_args_list == [
+        mock.call(database="warehouse", schema="raw"),
+        mock.call(database="analytics", schema="staging"),
+    ]
+    assert context.disk_mutation_count == 2
+
+    raw_doc = yaml.safe_load((tmp_path / "models" / "sources" / "raw.yml").read_text())
+    staging_doc = yaml.safe_load((tmp_path / "models" / "sources" / "staging.yml").read_text())
+
+    assert raw_doc["sources"][0]["database"] == "warehouse"
+    assert staging_doc["sources"][0]["database"] == "analytics"
+    reload_manifest.assert_called_once_with(context.project)
+
+
+def test_draft_restructure_delta_plan(yaml_context: YamlRefactorContext, fresh_caches):
+    """Ensures we can generate a restructure plan for real models and sources.
+    Usually, this plan might be empty if everything lines up already.
+    """
+    plan = draft_restructure_delta_plan(yaml_context)
+    assert plan is not None
+
+
+def test_apply_restructure_plan(yaml_context: YamlRefactorContext, fresh_caches):
+    """Applies the restructure plan for the real project (in dry_run mode).
+    Should not raise errors even if the plan is empty or small.
+    """
+    plan = draft_restructure_delta_plan(yaml_context)
+    apply_restructure_plan(yaml_context, plan, confirm=False)
+
+
+def test_apply_restructure_plan_dry_run_skips_reload(
+    yaml_context: YamlRefactorContext,
+    fresh_caches,
+    tmp_path: Path,
+):
+    """Dry-run restructure should not claim an on-disk change by reloading the manifest."""
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=tmp_path / "models" / "dry_run.yml",
+                content={"version": 2, "models": [{"name": "dry_run_model"}]},
+            ),
+        ],
+    )
+
+    with (
+        mock.patch.object(yaml_context.settings, "dry_run", True),
+        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._reload_manifest") as reload_manifest,
+    ):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    assert yaml_context.disk_mutation_count == 0
+    reload_manifest.assert_not_called()
+
+
+def test_apply_restructure_plan_counts_deleted_files_as_disk_mutations(
+    yaml_context: YamlRefactorContext,
+    tmp_path: Path,
+    fresh_caches,
+):
+    """Restructure tracks both the new file write and the superseded file deletion truthfully."""
+    from unittest import mock as mock_patch
+
+    import yaml
+    from dbt.artifacts.resources.types import NodeType
+    from dbt.contracts.graph.nodes import ModelNode
+
+    old_file = tmp_path / "models" / "old.yml"
+    old_file.parent.mkdir(parents=True, exist_ok=True)
+    with old_file.open("w") as f:
+        yaml.dump({"version": 2, "models": [{"name": "my_model"}]}, f)
+
+    mock_node = mock_patch.Mock(spec=ModelNode)
+    mock_node.name = "my_model"
+    mock_node.resource_type = NodeType.Model
+
+    new_file = tmp_path / "models" / "staging" / "my_model.yml"
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=new_file,
+                content={"version": 2, "models": [{"name": "my_model"}]},
+                superseded_paths={old_file: [mock_node]},
+            ),
+        ],
+    )
+
+    with mock_patch.patch.object(yaml_context.settings, "dry_run", False):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    assert new_file.resolve() in yaml_context.written_files
+    assert old_file.resolve() not in yaml_context.written_files
+    assert yaml_context.disk_mutation_count == 2
+
+
+def test_pretty_print_plan(caplog):
+    """Test pretty_print_plan logs the correct output for each operation."""
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=Path("models/some_file.yml"),
+                content={"models": [{"name": "my_model"}]},
+            ),
+            RestructureOperation(
+                file_path=Path("sources/another_file.yml"),
+                content={"sources": [{"name": "my_source"}]},
+                superseded_paths={Path("old_file.yml"): []},
+            ),
+        ],
+    )
+    test_logger = logging.getLogger("test_logger")
+    with mock.patch("dbt_osmosis_cll.osmosis_propagation.logger.LOGGER", test_logger):
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            pretty_print_plan(plan)
+    logs = caplog.text
+    assert "Restructure plan includes => 2 operations" in logs
+    assert f"CREATE or MERGE => {Path('models/some_file.yml')}" in logs
+    assert f"['old_file.yml'] -> {Path('sources/another_file.yml')}" in logs
+
+
+def test_apply_restructure_plan_confirm_prompt(
+    yaml_context: YamlRefactorContext,
+    fresh_caches,
+    capsys,
+):
+    """We test apply_restructure_plan with confirm=True, mocking input to 'n' to skip it.
+    This ensures we handle user input logic.
+    """
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=Path("models/some_file.yml"),
+                content={"models": [{"name": "m1"}]},
+            ),
+        ],
+    )
+
+    with mock.patch("builtins.input", side_effect=["n"]):
+        apply_restructure_plan(yaml_context, plan, confirm=True)
+        captured = capsys.readouterr()
+        assert "Skipping restructure plan." in captured.err
+
+
+def test_apply_restructure_plan_confirm_yes(
+    yaml_context: YamlRefactorContext,
+    fresh_caches,
+    capsys,
+):
+    """Same as above, but we input 'y' so it actually proceeds with the plan.
+    Dry-run should preview the commit step without pretending the manifest changed on disk.
+    """
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=Path("models/whatever.yml"),
+                content={"models": [{"name": "m2"}]},
+            ),
+        ],
+    )
+
+    with mock.patch("builtins.input", side_effect=["y"]):
+        apply_restructure_plan(yaml_context, plan, confirm=True)
+        captured = capsys.readouterr()
+        assert "Committing any buffered restructure changes" in captured.err
+        assert "Reloading the dbt project manifest" not in captured.err
+
+
+# ============================================================================
+# Behavior Tests for Config-Driven Path Resolution
+# ============================================================================
+
+
+def test_target_path_resolution_with_schema_template(yaml_context: YamlRefactorContext):
+    """Behavior test: Verify that {node.schema}/{node.name}.yml template produces
+    the expected directory structure.
+    """
+    from dbt_osmosis_cll.osmosis_propagation.path_management import get_target_yaml_path
+
+    # Find a model node from the manifest
+    model_nodes = [
+        node
+        for node in yaml_context.project.manifest.nodes.values()
+        if node.resource_type.value == "model"
+    ]
+    assert model_nodes, "No model nodes found in manifest"
+
+    test_node = model_nodes[0]
+    target_path = get_target_yaml_path(yaml_context, test_node)
+
+    # Verify path includes schema
+    assert test_node.schema in str(target_path) or target_path.parent.name == test_node.schema
+    assert target_path.suffix in (".yml", ".yaml")
+
+
+def test_target_path_resolution_with_custom_template(yaml_context: YamlRefactorContext):
+    """Behavior test: Verify that custom path templates are correctly rendered."""
+    from unittest import mock
+
+    from dbt_osmosis_cll.osmosis_propagation.path_management import get_target_yaml_path
+
+    # Find a model node
+    model_nodes = [
+        node
+        for node in yaml_context.project.manifest.nodes.values()
+        if node.resource_type.value == "model"
+    ]
+    if not model_nodes:
+        pytest.skip("No model nodes found in manifest")
+    test_node = model_nodes[0]
+
+    # Test with a custom template that uses {node.name}
+    custom_template = "{node.name}.yml"
+    with mock.patch(
+        "dbt_osmosis_cll.osmosis_propagation.path_management._get_yaml_path_template",
+        return_value=custom_template,
+    ):
+        target_path = get_target_yaml_path(yaml_context, test_node)
+        assert target_path.stem == test_node.name
+        assert target_path.suffix in (".yml", ".yaml")
+
+
+def test_target_path_source_node_handling(yaml_context: YamlRefactorContext):
+    """Behavior test: Verify that source nodes are handled correctly and placed
+    under the models directory.
+    """
+    from dbt_osmosis_cll.osmosis_propagation.path_management import get_target_yaml_path
+
+    # Find a source node
+    source_nodes = list(yaml_context.project.manifest.sources.values())
+    if not source_nodes:
+        pytest.skip("No source nodes found in manifest")
+    test_node = source_nodes[0]
+
+    target_path = get_target_yaml_path(yaml_context, test_node)
+
+    # Sources should be under models directory
+    model_path = Path(yaml_context.project.runtime_cfg.model_paths[0])
+    assert target_path.is_relative_to(model_path)
+
+
+def test_target_path_auto_extension_addition(yaml_context: YamlRefactorContext):
+    """Behavior test: Verify that .yml extension is automatically added if missing."""
+    from unittest import mock
+
+    from dbt_osmosis_cll.osmosis_propagation.path_management import get_target_yaml_path
+
+    model_nodes = [
+        node
+        for node in yaml_context.project.manifest.nodes.values()
+        if node.resource_type.value == "model"
+    ]
+    if not model_nodes:
+        pytest.skip("No model nodes found in manifest")
+    test_node = model_nodes[0]
+
+    # Template without extension
+    with mock.patch(
+        "dbt_osmosis_cll.osmosis_propagation.path_management._get_yaml_path_template",
+        return_value="{node.name}",
+    ):
+        target_path = get_target_yaml_path(yaml_context, test_node)
+        assert target_path.suffix in (".yml", ".yaml")
+
+
+# ============================================================================
+# Error Handling Tests for Invalid Path Templates
+# ============================================================================
+
+
+def test_missing_osmosis_config_raises_error(yaml_context: YamlRefactorContext):
+    """Behavior test: Verify that models without dbt-osmosis config raise
+    MissingOsmosisConfig.
+    """
+    from unittest import mock
+
+    from dbt_osmosis_cll.osmosis_propagation.path_management import get_target_yaml_path
+
+    model_nodes = [
+        node
+        for node in yaml_context.project.manifest.nodes.values()
+        if node.resource_type.value == "model"
+    ]
+    if not model_nodes:
+        pytest.skip("No model nodes found in manifest")
+    test_node = model_nodes[0]
+
+    # Mock _get_yaml_path_template to return None (missing config)
+    with mock.patch(
+        "dbt_osmosis_cll.osmosis_propagation.path_management._get_yaml_path_template",
+        return_value=None,
+    ):
+        # Should return original file path, not raise
+        target_path = get_target_yaml_path(yaml_context, test_node)
+        assert target_path is not None
+
+
+def test_path_traversal_attack_prevented(yaml_context: YamlRefactorContext):
+    """Security test: Verify that path traversal attempts are blocked."""
+    from unittest import mock
+
+    from dbt_osmosis_cll.osmosis_propagation.exceptions import PathResolutionError
+    from dbt_osmosis_cll.osmosis_propagation.path_management import get_target_yaml_path
+
+    model_nodes = [
+        node
+        for node in yaml_context.project.manifest.nodes.values()
+        if node.resource_type.value == "model"
+    ]
+    if not model_nodes:
+        pytest.skip("No model nodes found in manifest")
+    test_node = model_nodes[0]
+
+    # Attempt path traversal with malicious template
+    malicious_template = "../../../etc/passwd"
+
+    with (
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.path_management._get_yaml_path_template",
+            return_value=malicious_template,
+        ),
+        pytest.raises(PathResolutionError, match="Security violation"),
+    ):
+        get_target_yaml_path(yaml_context, test_node)
+
+
+def test_absolute_path_within_project_allowed(yaml_context: YamlRefactorContext):
+    """Behavior test: Verify that absolute paths starting with / are allowed
+    as long as they're within project root (single leading slash is stripped).
+    """
+    from unittest import mock
+
+    from dbt_osmosis_cll.osmosis_propagation.path_management import get_target_yaml_path
+
+    model_nodes = [
+        node
+        for node in yaml_context.project.manifest.nodes.values()
+        if node.resource_type.value == "model"
+    ]
+    if not model_nodes:
+        pytest.skip("No model nodes found in manifest")
+    test_node = model_nodes[0]
+
+    # Template with leading slash (allowed convention for absolute paths under models)
+    with mock.patch(
+        "dbt_osmosis_cll.osmosis_propagation.path_management._get_yaml_path_template",
+        return_value="/staging/{node.name}.yml",
+    ):
+        target_path = get_target_yaml_path(yaml_context, test_node)
+        # Should be under models directory
+        # Need to resolve model_path relative to project root for comparison
+        project_root = Path(yaml_context.project.runtime_cfg.project_root)
+        model_path = project_root / yaml_context.project.runtime_cfg.model_paths[0]
+        assert target_path.is_relative_to(model_path)
+
+
+# ============================================================================
+# File Operation Behavior Tests
+# ============================================================================
+
+
+def test_yaml_file_creation_on_disk(yaml_context: YamlRefactorContext, tmp_path):
+    """Behavior test: Verify that YAML files are actually created on disk."""
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+
+    # Create a plan with a new file
+    target_file = tmp_path / "models" / "test_model.yml"
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=target_file,
+                content={"version": 2, "models": [{"name": "test_model", "columns": []}]},
+            ),
+        ],
+    )
+
+    # Apply with dry_run=False to actually write
+    from unittest import mock
+
+    with mock.patch.object(yaml_context.settings, "dry_run", False):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    # Verify file was created
+    assert target_file.exists(), f"Target file {target_file} was not created"
+
+    # Verify content
+    import yaml
+
+    with target_file.open() as f:
+        content = yaml.safe_load(f)
+    assert content["version"] == 2
+    assert "models" in content
+
+
+def test_yaml_file_merge_with_existing(yaml_context: YamlRefactorContext, tmp_path):
+    """Behavior test: Verify that new content is merged with existing YAML content."""
+    import yaml
+
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+
+    target_file = tmp_path / "models" / "existing.yml"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Create existing file with content
+    existing_content = {
+        "version": 2,
+        "models": [{"name": "model1", "description": "Existing model"}],
+    }
+    with target_file.open("w") as f:
+        yaml.dump(existing_content, f)
+
+    # Plan to add another model
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=target_file,
+                content={"models": [{"name": "model2", "description": "New model"}]},
+            ),
+        ],
+    )
+
+    from unittest import mock
+
+    with mock.patch.object(yaml_context.settings, "dry_run", False):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    # Verify both models exist
+    with target_file.open() as f:
+        content = yaml.safe_load(f)
+
+    model_names = [m["name"] for m in content.get("models", [])]
+    assert "model1" in model_names
+    assert "model2" in model_names
+
+
+def test_superseded_file_cleanup(yaml_context: YamlRefactorContext, tmp_path):
+    """Behavior test: Verify that superseded files are cleaned up after migration."""
+    from unittest import mock as mock_patch
+
+    import yaml
+    from dbt.artifacts.resources.types import NodeType
+    from dbt.contracts.graph.nodes import ModelNode
+
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+
+    old_file = tmp_path / "models" / "old.yml"
+    old_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Create old file with a model
+    old_content = {
+        "version": 2,
+        "models": [{"name": "my_model", "description": "To be migrated"}],
+    }
+    with old_file.open("w") as f:
+        yaml.dump(old_content, f)
+
+    # Create a mock node
+    mock_node = mock_patch.Mock(spec=ModelNode)
+    mock_node.name = "my_model"
+    mock_node.resource_type = NodeType.Model
+
+    # Plan to migrate to new location
+    new_file = tmp_path / "models" / "staging" / "my_model.yml"
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=new_file,
+                content={"version": 2, "models": [{"name": "my_model"}]},
+                superseded_paths={old_file: [mock_node]},
+            ),
+        ],
+    )
+
+    with mock_patch.patch.object(yaml_context.settings, "dry_run", False):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    # Verify old file was removed (since all its content was migrated)
+    assert not old_file.exists(), "Old file should be removed after migration"
+
+    # Verify new file exists
+    assert new_file.exists(), "New file should be created"
+
+
+def test_directory_structure_creation(yaml_context: YamlRefactorContext, tmp_path):
+    """Behavior test: Verify that nested directories are created as needed."""
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+
+    # Create a deep nested path
+    nested_path = tmp_path / "models" / "staging" / "raw" / "sources" / "test.yml"
+    assert not nested_path.parent.exists(), "Parent directories should not exist initially"
+
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=nested_path,
+                content={"version": 2, "sources": []},
+            ),
+        ],
+    )
+
+    from unittest import mock
+
+    with mock.patch.object(yaml_context.settings, "dry_run", False):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    # Verify all parent directories were created
+    assert nested_path.parent.exists(), "Parent directories should be created"
+    assert nested_path.exists(), "Target file should be created"
+
+
+# ============================================================================
+# Conflict Resolution Tests
+# ============================================================================
+
+
+def test_conflict_resolution_file_already_exists(yaml_context: YamlRefactorContext, tmp_path):
+    """Behavior test: Verify behavior when target file already exists.
+    Content should be merged, not overwritten.
+    """
+    import yaml
+
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+
+    target_file = tmp_path / "models" / "conflict.yml"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Create existing file
+    existing = {"version": 2, "models": [{"name": "model_a"}]}
+    with target_file.open("w") as f:
+        yaml.dump(existing, f)
+
+    # Try to create file at same location
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=target_file,
+                content={"version": 2, "models": [{"name": "model_b"}]},
+            ),
+        ],
+    )
+
+    from unittest import mock
+
+    with mock.patch.object(yaml_context.settings, "dry_run", False):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    # Verify merge occurred
+    with target_file.open() as f:
+        content = yaml.safe_load(f)
+
+    model_names = [m["name"] for m in content.get("models", [])]
+    assert "model_a" in model_names, "Existing model should be preserved"
+    assert "model_b" in model_names, "New model should be added"
+
+
+def test_empty_superseded_file_removal(yaml_context: YamlRefactorContext, tmp_path):
+    """Behavior test: Verify that empty superseded files are deleted."""
+    from unittest import mock as mock_patch
+
+    import yaml
+    from dbt.artifacts.resources.types import NodeType
+    from dbt.contracts.graph.nodes import ModelNode
+
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+
+    old_file = tmp_path / "models" / "to_empty.yml"
+    old_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # File with single model
+    content = {"version": 2, "models": [{"name": "only_model"}]}
+    with old_file.open("w") as f:
+        yaml.dump(content, f)
+
+    mock_node = mock_patch.Mock(spec=ModelNode)
+    mock_node.name = "only_model"
+    mock_node.resource_type = NodeType.Model
+
+    new_file = tmp_path / "models" / "new_location.yml"
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=new_file,
+                content={"version": 2, "models": [{"name": "only_model"}]},
+                superseded_paths={old_file: [mock_node]},
+            ),
+        ],
+    )
+
+    with mock_patch.patch.object(yaml_context.settings, "dry_run", False):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    # Old file should be deleted (empty after removing the model)
+    assert not old_file.exists()
+
+
+def test_partial_superseded_file_preserved(yaml_context: YamlRefactorContext, tmp_path):
+    """Behavior test: Verify that partially superseded files are preserved
+    with remaining content.
+    """
+    from unittest import mock as mock_patch
+
+    import yaml
+    from dbt.artifacts.resources.types import NodeType
+    from dbt.contracts.graph.nodes import ModelNode
+
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+
+    old_file = tmp_path / "models" / "partial.yml"
+    old_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # File with multiple models
+    content = {
+        "version": 2,
+        "models": [
+            {"name": "model_to_move"},
+            {"name": "model_to_stay"},
+        ],
+    }
+    with old_file.open("w") as f:
+        yaml.dump(content, f)
+
+    mock_node = mock_patch.Mock(spec=ModelNode)
+    mock_node.name = "model_to_move"
+    mock_node.resource_type = NodeType.Model
+
+    new_file = tmp_path / "models" / "moved.yml"
+    plan = RestructureDeltaPlan(
+        operations=[
+            RestructureOperation(
+                file_path=new_file,
+                content={"version": 2, "models": [{"name": "model_to_move"}]},
+                superseded_paths={old_file: [mock_node]},
+            ),
+        ],
+    )
+
+    with mock_patch.patch.object(yaml_context.settings, "dry_run", False):
+        apply_restructure_plan(yaml_context, plan, confirm=False)
+
+    # Old file should still exist with remaining model
+    assert old_file.exists()
+    with old_file.open() as f:
+        remaining = yaml.safe_load(f)
+
+    model_names = [m["name"] for m in remaining.get("models", [])]
+    assert "model_to_stay" in model_names
+    assert "model_to_move" not in model_names
+
+
+# ============================================================================
+# Data Type Sync Tests
+# ============================================================================
+
+
+def test_sync_uses_manifest_data_types(
+    yaml_context: YamlRefactorContext,
+    fresh_caches,
+):
+    """Behavior test: _sync_doc_section writes the manifest's data types into the
+    doc section (the only source now that catalog support has been removed).
+    """
+    from unittest import mock as mock_patch
+    from unittest.mock import PropertyMock
+
+    from dbt.artifacts.resources.types import NodeType
+    from dbt.contracts.graph.nodes import ModelNode
+
+    from dbt_osmosis_cll.osmosis_propagation.sync_operations import _sync_doc_section
+
+    # Create a mock node with data types in manifest
+    mock_node = mock_patch.Mock(spec=ModelNode)
+    mock_node.unique_id = "model.test.test_model"
+    mock_node.name = "test_model"
+    mock_node.schema = "test_schema"
+    mock_node.description = "Test model"
+    mock_node.resource_type = NodeType.Model
+    mock_node.package_name = "test"
+
+    # Mock columns with manifest types
+    mock_col1 = mock_patch.Mock()
+    mock_col1.name = "col1"
+    mock_col1.to_dict.return_value = {"name": "col1", "data_type": "INTEGER"}
+    mock_col1.meta = {}
+
+    mock_col2 = mock_patch.Mock()
+    mock_col2.name = "col2"
+    mock_col2.to_dict.return_value = {"name": "col2", "data_type": "TEXT"}
+    mock_col2.meta = {}
+
+    mock_node.columns = {"col1": mock_col1, "col2": mock_col2}
+    mock_node.meta = {}
+    mock_node.config = mock_patch.Mock()
+    mock_node.config.extra = {}
+
+    # Doc section to sync into
+    doc_section = {"columns": []}
+
+    mock_runtime = mock_patch.Mock()
+    mock_runtime.credentials.type = "postgres"
+
+    with mock_patch.patch.object(
+        type(yaml_context.project),
+        "runtime_cfg",
+        new_callable=PropertyMock,
+        return_value=mock_runtime,
+    ):
+        _sync_doc_section(yaml_context, mock_node, doc_section)
+
+    # Manifest data types are written into the doc section.
+    assert len(doc_section["columns"]) == 2
+    col_types = {col["name"]: col.get("data_type") for col in doc_section["columns"]}
+
+    assert col_types["col1"] == "INTEGER"
+    assert col_types["col2"] == "TEXT"

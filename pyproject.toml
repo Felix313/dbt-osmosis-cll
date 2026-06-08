@@ -1,26 +1,175 @@
-# Workspace root — not installed as a package itself.
-# Run `uv sync` here to install both packages in editable mode.
-[project]
-name = "dbt-osmosis-cll-workspace"
-version = "0.0.0"
-description = "Monorepo: dbt-osmosis + dbt-col-lineage (internal forks)"
-readme = "README.md"
-requires-python = ">=3.10"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.uv.workspace]
-members = ["packages/dbt-osmosis", "packages/dbt-col-lineage"]
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[project]
+name = "dbt-osmosis-cll"
+version = "0.1.0"
+description = "Lineage-aware dbt YAML documentation: dbt-osmosis fused with an embedded column-level-lineage resolver (Snowflake-tested)."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Felix Kinzius" }]
+keywords = ["dbt", "yaml", "osmosis", "column-level-lineage", "cll", "snowflake"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Build Tools",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.10,<3.14"
+
+dependencies = [
+  "click>7,<9",
+  "dbt-core>=1.8",
+  "dbt-core-interface>=1.1.7",
+  "ruamel.yaml>=0.17,<0.19",
+  "rich>=10",
+  "pluggy>=1.5.0,<2",
+  "mysql-mimic>=2.5.7",
+  "rapidfuzz>=3.0.0",
+  # vendored column-level-lineage resolver — runtime deps for the osmosis path
+  "pydantic>=2.10.6,<3.0.0",
+  "sqlglot>=26.8.0,<27.0.0",
+]
+
+[project.optional-dependencies]
+# Standalone resolver CLI / HTML+graphviz display / FastAPI server and the
+# catalog.json readers — NOT needed for the osmosis propagation path, which uses
+# the manifest-only ManifestCatalogReader.
+lineage-ui = [
+  "fastapi>=0.115.12,<0.116.0",
+  "uvicorn>=0.34.0,<0.35.0",
+  "graphviz>=0.20.3,<0.21.0",
+  "duckdb>=1.2.1,<2.0.0",
+  "dbt-duckdb>=1,<2",
+  "dbt-sqlite>=1.6.0",
+]
+
+workbench = [
+  "streamlit>=1.20.0,<1.42.0",
+  "streamlit-ace~=0.1.1",
+  "ydata-profiling>=4.17.0",
+  "feedparser~=6.0.12",
+  "streamlit-elements-fluence>=0.1.4",
+  "dbt-duckdb>=1,<2",
+  "setuptools>=70",
+]
+
+openai = ["openai~=1.58.1"]
+
+dev = [
+  "basedpyright~=1.38.4",
+  "ruff~=0.8.4",
+  "pytest~=8.3.4",
+  "pytest-cov~=6.0",
+  "hypothesis",
+  "mutmut",
+  "pre-commit>3.0.0,<5",
+  "dbt-duckdb>=1,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Felix313/dbt-osmosis-cll"
+"Upstream (dbt-osmosis)" = "https://github.com/z3z1ma/dbt-osmosis"
+"Upstream (dbt-column-lineage)" = "https://github.com/Fszta/dbt-column-lineage"
+
+[project.scripts]
+"dbt-osmosis-cll" = "dbt_osmosis_cll.cli.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dbt_osmosis_cll"]
 
 [tool.uv]
-# Keep consistent with the osmosis package constraint
 override-dependencies = ["protobuf>=5.0,<6.0"]
 
-[tool.uv.sources]
-dbt-osmosis = { workspace = true }
-dbt-col-lineage = { workspace = true }
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312", "py313"]
+preview = true
 
-# Install both workspace members when running `uv sync` from the root
+[tool.isort]
+color_output = true
+line_length = 100
+profile = "black"
+src_paths = ["src"]
+include_trailing_comma = true
+
+[tool.ruff]
+line-length = 100
+preview = true
+
+[tool.pyright]
+include = ["src/dbt_osmosis_cll/osmosis_propagation", "src/dbt_osmosis_cll/integration", "src/dbt_osmosis_cll/cli"]
+exclude = [
+  "**/_deps/**",
+  "**/.venv/**",
+  "demo_duckdb/target/**",
+  "src/dbt_osmosis_cll/osmosis_propagation/commands/workbench/**",
+  "src/dbt_osmosis_cll/cll_generator/**",
+  "tests/**",
+]
+pythonVersion = "3.10"
+reportMissingTypeStubs = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportOptionalMemberAccess = false
+reportAttributeAccessIssue = true
+reportPrivateImportUsage = false
+reportImportCycles = false
+reportUnsupportedDunderAll = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "if t.TYPE_CHECKING:",
+]
+fail_under = 70
+precision = 2
+show_missing = true
+skip_covered = false
+
 [dependency-groups]
 dev = [
-    "dbt-osmosis",
-    "dbt-col-lineage",
+    "basedpyright>=1.38.4",
+    "dbt-duckdb>=1,<2",
+    "openai>=1.58.1",
+    "pytest>=8.3.5",
 ]

@@ -1,0 +1,20 @@
+dbt-osmosis-cll
+
+This product is a derivative work that fuses and modifies two upstream open-source
+projects. Their original copyrights and licenses are retained.
+
+1. dbt-osmosis
+   https://github.com/z3z1ma/dbt-osmosis
+   Copyright (c) Alex Butler (z3z1ma)
+   Licensed under the Apache License, Version 2.0.
+   The Apache-2.0 text governing this combined work is in ./LICENSE.
+
+2. dbt-column-lineage
+   https://github.com/Fszta/dbt-column-lineage
+   Copyright 2025 Fszta
+   Licensed under the MIT License (see ./licenses/dbt-column-lineage-MIT.txt).
+   Vendored, with namespace changes, into src/dbt_osmosis_cll/cll_generator/.
+
+Modifications in this repository (column-level-lineage integration, the
+authoritative column glossary, the three-pillar restructure, and Snowflake-focused
+behavior) are distributed under the Apache License, Version 2.0.

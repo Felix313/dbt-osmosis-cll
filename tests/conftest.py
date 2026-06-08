@@ -1,0 +1,320 @@
+"""Shared pytest configuration and fixtures for dbt-osmosis tests.
+
+This module provides DuckDB-backed fixtures for exercising dbt-osmosis tests.
+"""
+
+from __future__ import annotations
+
+import gc
+import os
+import shutil
+import tempfile
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from dbt_osmosis_cll.osmosis_propagation.config import DbtConfiguration, create_dbt_project_context
+from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext, YamlRefactorSettings
+from tests.support import run_dbt_command
+
+
+def _release_duckdb_connections() -> None:
+    """Drop dbt-duckdb's cached connection so the DuckDB file is unlocked.
+
+    dbt-duckdb caches the live connection on ``DuckDBConnectionManager._ENV`` (a
+    class-level global), which dbt-core's ``reset_adapters()`` does not touch. On
+    Windows that lingering handle locks ``test.db`` / ``test.db.wal`` and makes the
+    next ``shutil.copytree`` of the template fail with WinError 32. Nulling ``_ENV``
+    and forcing GC releases the handle.
+    """
+    try:
+        from dbt.adapters.duckdb.connections import DuckDBConnectionManager
+
+        DuckDBConnectionManager.close_all_connections()
+    except Exception:  # noqa: BLE001, S110 — best-effort: connection release must not raise
+        pass
+    try:
+        from dbt.adapters.factory import reset_adapters
+
+        reset_adapters()
+    except Exception:  # noqa: BLE001, S110 — best-effort: adapter reset must not raise
+        pass
+    gc.collect()
+
+
+def _run_dbt_commands(project_dir: str, profiles_dir: str, target: str = "test") -> None:
+    """Run dbt seed and dbt run to populate the database and produce compiled SQL.
+
+    Uses dbt's CLI runner. ``seed`` + ``run`` create the DuckDB tables (for live
+    source introspection) and the compiled SQL under target/compiled (for CLL).
+    No catalog is generated — column metadata comes from live DuckDB and source YAMLs.
+    """
+    # Run dbt seed to load CSV files into the database.
+    run_dbt_command([
+        "seed",
+        "--project-dir",
+        project_dir,
+        "--profiles-dir",
+        profiles_dir,
+        "--target",
+        target,
+    ])
+
+    # Run dbt run to create models.
+    run_dbt_command([
+        "run",
+        "--project-dir",
+        project_dir,
+        "--profiles-dir",
+        profiles_dir,
+        "--target",
+        target,
+    ])
+
+
+def _create_temp_project_copy(
+    source_dir: Path,
+    temp_dir: Path,
+    exclude_target: bool = False,
+) -> Path:
+    """Create a copy of the source project in a temporary directory.
+
+    Args:
+        source_dir: Source directory to copy
+        temp_dir: Temporary directory to copy into
+        exclude_target: If True, exclude the target/ directory to avoid
+            copying cached manifest.json with wrong paths
+
+    Returns:
+        Path: Path to the copied project directory
+
+    """
+    project_dir = temp_dir / source_dir.name
+
+    # Function to exclude target directory and other build artifacts
+    def _ignore_filter(src: str, names: list[str]) -> list[str]:
+        # Get the relative path from the source directory
+        src_path = Path(src).relative_to(source_dir)
+        # Exclude target directory (contains cached manifest)
+        if exclude_target and "target" in names and src_path == Path():
+            return ["target"]
+        return []
+
+    shutil.copytree(source_dir, project_dir, ignore=_ignore_filter)
+    return project_dir
+
+
+@pytest.fixture(scope="session")
+def built_duckdb_template() -> Iterator[Path]:
+    """Builds a dbt project template once per test session.
+
+    This session-scoped fixture:
+    1. Creates a session-scoped temporary directory
+    2. Copies the demo_duckdb project to it
+    3. Runs dbt seed, dbt run, and dbt docs generate ONCE
+    4. Yields the path to the built template project
+    5. Cleans up the template directory at session end
+
+    The resulting template includes:
+    - Populated test.db file (DuckDB database)
+    - Generated catalog.json (for introspection)
+    - Generated manifest.json
+    - All other dbt artifacts in target/
+
+    Yields:
+        Path: Path to the built template project directory
+
+    """
+    # Create a session-scoped temp directory for the template
+    template_temp_dir = Path(tempfile.mkdtemp(prefix="dbt_osmosis_template_"))
+    source_dir = Path("demo_duckdb")
+    # Exclude target directory to avoid copying cached manifest.json with wrong paths
+    template_project_dir = _create_temp_project_copy(
+        source_dir,
+        template_temp_dir,
+        exclude_target=True,
+    )
+
+    try:
+        # Build the database and generate artifacts ONCE per session
+        print("\n" + "=" * 60)
+        print("SESSION SETUP: Building dbt project template")
+        print("=" * 60)
+
+        # Change to the project directory before running dbt commands
+        # This is necessary because DuckDB uses relative paths based on CWD
+        old_cwd = os.getcwd()
+        os.chdir(str(template_project_dir))
+        try:
+            _run_dbt_commands(str(template_project_dir), str(template_project_dir))
+        finally:
+            os.chdir(old_cwd)
+
+        # The dbt commands above run in-process (dbtRunner), so dbt-duckdb keeps an
+        # open handle on the template's test.db. On Windows that handle locks the file,
+        # making the per-test shutil.copytree of this template fail with WinError 32.
+        # Release the cached connection before any copies happen.
+        _release_duckdb_connections()
+
+        # Verify the database file was created
+        db_file = template_project_dir / "test.db"
+        if not db_file.exists():
+            raise RuntimeError(f"Database file not created at {db_file}")
+        print(f"✓ Template database created: {db_file} ({db_file.stat().st_size} bytes)")
+
+        manifest_file = template_project_dir / "target" / "manifest.json"
+        if not manifest_file.exists():
+            raise RuntimeError(f"Manifest file not created at {manifest_file}")
+        print(f"✓ Template manifest created: {manifest_file}")
+
+        print("=" * 60)
+        print("SESSION SETUP: Template build complete")
+        print("=" * 60 + "\n")
+
+        yield template_project_dir
+
+    finally:
+        # Clean up the template directory at session end
+        print("\n" + "=" * 60)
+        print(f"SESSION TEARDOWN: Removing template directory {template_temp_dir}")
+        print("=" * 60)
+        try:
+            shutil.rmtree(template_temp_dir)
+            print("✓ Removed template directory")
+        except Exception as e:  # noqa: BLE001 — best-effort cleanup of a temp dir
+            print(f"Warning: Error removing template directory: {e}")
+        print("=" * 60 + "\n")
+
+
+@pytest.fixture(scope="function")
+def yaml_context(built_duckdb_template: Path) -> Iterator[YamlRefactorContext]:
+    """Creates a YamlRefactorContext with a DuckDB database from the session template.
+
+    This function-scoped fixture:
+    1. Copies the session-built template project to a unique temp directory (avoids DbtProject cache)
+    2. Uses the pre-built test.db file copied from the template
+    3. Creates and yields a YamlRefactorContext
+    4. Properly closes connections on teardown
+    5. Cleans up the temp directory
+
+    Using a unique temp directory for each test ensures complete isolation from
+    the DbtProject WeakValueDictionary cache while reusing the pre-built database.
+
+    Args:
+        built_duckdb_template: Path to the session-built template project
+
+    Yields:
+        YamlRefactorContext: Configured context with populated database
+
+    """
+    # Create a unique temp directory for this test
+    temp_dir = Path(tempfile.mkdtemp(prefix="dbt_osmosis_test_"))
+
+    # Copy the ENTIRE template project to preserve isolation
+    project_dir = _create_temp_project_copy(built_duckdb_template, temp_dir)
+
+    # Verify the database file was copied
+    db_file = project_dir / "test.db"
+    if not db_file.exists():
+        raise RuntimeError(f"Database file not copied to {db_file}")
+
+    # The duckdb profile uses a relative path ("test.db"), resolved against the CWD.
+    # chdir into this test's project copy so live introspection opens the copy's
+    # test.db (and not a stray one) — restored in teardown.
+    _fixture_old_cwd = os.getcwd()
+    os.chdir(str(project_dir))
+
+    try:
+        # Use the test profile with file-based database
+        cfg = DbtConfiguration(
+            project_dir=str(project_dir),
+            profiles_dir=str(project_dir),
+            target="test",  # Uses profiles.yml with test.db
+        )
+        cfg.vars = {"dbt-osmosis": {}}
+
+        # Create the project context (will use the copied test.db)
+        start = time.time()
+        project_context = create_dbt_project_context(cfg)
+        print(f"✓ create_dbt_project_context took {time.time() - start:.2f}s")
+
+        # Column metadata comes from live DuckDB (sources) + CLL/compiled SQL (models);
+        # no catalog file is used.
+        context = YamlRefactorContext(
+            project_context,
+            settings=YamlRefactorSettings(
+                dry_run=True,
+                use_unrendered_descriptions=True,
+            ),
+        )
+
+        yield context
+
+    finally:
+        # Restore the working directory changed during setup.
+        try:
+            os.chdir(_fixture_old_cwd)
+        except Exception as e:  # noqa: BLE001 — best-effort cwd restore
+            print(f"Warning: Error restoring cwd: {e}")
+
+        # Teardown: Clean up temp directory
+        print(f"\n=== Cleaning up temp directory {temp_dir} ===")
+        try:
+            # Close connections first
+            if (
+                "project_context" in locals()
+                and hasattr(project_context, "_project")
+                and project_context._project is not None
+                and hasattr(project_context._project, "adapter")
+            ):
+                adapter = project_context._project.adapter
+                if hasattr(adapter, "connections") and hasattr(
+                    adapter.connections,
+                    "close",
+                ):
+                    try:
+                        adapter.connections.close()
+                        print("✓ Adapter connections closed")
+                    except Exception as e:  # noqa: BLE001 — best-effort connection close
+                        print(f"Warning: Error closing connections: {e}")
+        except Exception as e:  # noqa: BLE001 — best-effort teardown wrapper
+            print(f"Warning: Error during connection cleanup: {e}")
+
+        # Delete the DbtProject reference and trigger GC
+        try:
+            if "project_context" in locals() and hasattr(project_context, "_project"):
+                del project_context._project
+                gc.collect()
+                print("✓ DbtProject reference deleted and garbage collected")
+        except Exception as e:  # noqa: BLE001 — best-effort cleanup of cached project
+            print(f"Warning: Error deleting DbtProject reference: {e}")
+
+        # Forcefully release any remaining dbt-duckdb connection held on the global
+        # DuckDBConnectionManager._ENV cache. Without this, an open handle on this
+        # test's test.db lingers and (on Windows) locks files, making the NEXT test's
+        # copytree fail with WinError 32.
+        _release_duckdb_connections()
+
+        # Remove the temp directory
+        try:
+            shutil.rmtree(temp_dir)
+            print(f"✓ Removed temp directory {temp_dir}")
+        except Exception as e:  # noqa: BLE001 — best-effort cleanup of a temp dir
+            print(f"Warning: Error removing temp directory: {e}")
+
+        print("=== Teardown complete ===\n")
+
+
+# Function-scoped fixture for tests that need fresh caches
+@pytest.fixture(scope="function")
+def fresh_caches():
+    """Patches the internal caches so each test starts with a fresh state."""
+    from unittest import mock
+
+    with (
+        mock.patch("dbt_osmosis_cll.osmosis_propagation.introspection._COLUMN_LIST_CACHE", {}),
+        mock.patch("dbt_osmosis_cll.osmosis_propagation.schema.reader._YAML_BUFFER_CACHE", {}),
+    ):
+        yield
