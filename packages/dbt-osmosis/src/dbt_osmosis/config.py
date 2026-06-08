@@ -29,8 +29,7 @@ A flat YAML file mapping column names to canonical descriptions.  Every column
 listed there is automatically treated as CLL-ignored: no ``col-renamed-from`` /
 ``col-derived-from`` / ``col-computed-in`` meta tag is written for it, stale tags from prior runs are
 removed, and the glossary description is authoritative — it is written on every
-run, overwriting any existing description in the YAML.  ``cll-ignore-columns`` is
-for columns you want to suppress *without* providing a description.
+run, overwriting any existing description in the YAML.
 
 .. code-block:: yaml
 

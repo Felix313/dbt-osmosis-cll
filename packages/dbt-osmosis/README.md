@@ -265,9 +265,9 @@ A flat YAML file that maps column names (case-insensitive) to canonical descript
 
 - No `col-renamed-from` / `col-derived-from` / `col-computed-in` meta tags are written.
 - Stale tags from previous runs are stripped on the next osmosis run.
-- The description is injected whenever the column has no existing description in the YAML.
+- The description is authoritative: osmosis writes it on every run, overwriting any existing description in the YAML. Edit the glossary and rerun osmosis to propagate the change everywhere.
 
-This is the right place for audit/technical columns that are computed in every model (e.g. `ROW_BATCH_TIMESTAMP`) — define them once, osmosis handles them everywhere. No separate `cll-ignore-columns` setting is needed.
+This is the right place for audit/technical columns that are computed in every model (e.g. `ROW_BATCH_TIMESTAMP`) — define them once, osmosis handles them everywhere.
 
 ```yaml
 # docs/osmosis_column_references.yml
