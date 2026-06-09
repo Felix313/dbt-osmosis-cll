@@ -474,6 +474,7 @@ def _resolve_cll_description(
     )
     from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
     from dbt_osmosis_cll.osmosis_propagation.inheritance import _read_ancestor_yaml_description
+    from dbt_osmosis_cll.osmosis_propagation.introspection import _get_setting_for_node
 
     if max_depth is None:
         max_depth = get_config().cll_max_origin_depth
@@ -629,6 +630,26 @@ def _resolve_cll_description(
     #   • upstream resolved nothing → an owner with its own text is the origin here; a
     #     non-anchored copy with no resolvable upstream yields nothing (never laundered).
     progenitor_col = (parent_result.progenitor_column or parent_col_name).strip('"').strip("'")
+    # Rename / derivation boundary. When the output name differs from its single upstream
+    # source name, THIS hop renames or derives the column — a new identity/value begins here
+    # (a pure rename OR a single-source computed column such as a cast or
+    # ``CASE WHEN src IS NULL ...``; step 6 only walls *multi-source* computed columns, so
+    # single-source derived columns reach this point). Per inherit-through-renames semantics
+    # the upstream column's description must NOT cross this boundary unless the node opts in.
+    # A same-name passthrough/cast ("aliased back to the same name") is never gated and walks
+    # through normally. Checking this at every hop — not just the top node the caller gates —
+    # is what stops e.g. META_PREP.FLG_SR_ERSTELLT (a same-name passthrough) from laundering
+    # CONTRACT_ACCOUNT_ID's description across the derive boundary at REPORTING_BASE.
+    if progenitor_col.lower() != parent_col_name.lower():
+        _inherit_renames = _get_setting_for_node(
+            "inherit-through-renames",
+            model_node,
+            parent_col_name,
+            fallback=get_config().inherit_through_renames,
+        )
+        if not _inherit_renames:
+            # The text originates HERE (returns this node's own authored text, or nothing).
+            return _own()
     if (parent_result.progenitor_model.lower(), progenitor_col.lower()) == (
         parent_model_name.lower(),
         parent_col_name.lower(),
@@ -1845,22 +1866,15 @@ def annotate_column_origins(
                 new_desc = f"{base_desc}\n\n{tag}".strip() if has_real_desc else tag
                 node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
             else:
-                # Non-annotation mode: still propagate the immediate progenitor description.
-                # Without this, wrong descriptions written by a previous (buggy) CLL run
-                # persist forever because no annotation tag ever replaces them.
-                if result.progenitor_column is not None:
-                    _raw_prog = get_origin_source_description(
-                        context, "", result.progenitor_model or "", result.progenitor_column
-                    )
-                    if _raw_prog:
-                        _prog_desc = strip_annotation_tags(_raw_prog).strip() or None
-                        if _prog_desc:
-                            _desc_auth = _get_setting_for_node(
-                                "desc-owner", node, col_name, fallback="this"
-                            )
-                            _force_here = str(_desc_auth).lower() == "upstream"
-                            if not has_real_desc or _force_here:
-                                base_desc = _prog_desc
+                # Non-annotation mode: annotation is disabled for this layer, so just strip any
+                # stale CBM-ODP tags from the column's OWN description and write it back.
+                # annotate_column_origins never SETS a description — descriptions are owned
+                # exclusively by propagation (inherit_upstream_column_knowledge_cll), which walls
+                # aggregate / window / literal / generated / union columns (their value is born
+                # here, so no single upstream description transfers). (Previously this path copied
+                # the immediate progenitor's description onto these columns — propagation in the
+                # annotation function — which laundered e.g. SERVICE_CONTRACT_TYPE's text onto the
+                # MAX(CASE ...) HAS_* flags. Propagation now owns that decision.)
                 node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
             continue
 
@@ -1973,13 +1987,15 @@ def annotate_column_origins(
             if not base_desc or base_desc in context.placeholders:
                 base_desc = ""
 
-            # When the column has no own description, promote source_desc as base_desc.
-            # This bridges the rename gap: name-based inheritance cannot propagate
-            # descriptions across renamed columns, so CLL-resolved source_desc fills the
-            # role instead. As a side-effect the dedup check below will suppress the
-            # source description from the annotation (no duplication).
-            if not base_desc and source_desc:
-                base_desc = source_desc
+            # NOTE: annotate_column_origins never SETS a column description. Descriptions are
+            # owned exclusively by propagation (inherit_upstream_column_knowledge_cll +
+            # _resolve_cll_description), which respects inherit-through-renames per hop. This
+            # function only appends the CBM-ODP provenance tag. (Previously a
+            # "base_desc = source_desc" promotion bridged the rename gap here by copying the
+            # deep-origin description onto empty columns — that laundered descriptions across
+            # rename/derivation boundaries regardless of inherit-through-renames, e.g.
+            # FLG_SR_ERSTELLT absorbing CONTRACT_ACCOUNT_ID's description. Propagation now
+            # owns that decision.) source_desc below feeds only the annotation text.
 
             # Determine annotation block.
             # annotation-include-source-description is a per-node option (default true):
