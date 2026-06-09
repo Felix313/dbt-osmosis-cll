@@ -29,6 +29,7 @@ from dbt_osmosis_cll.config import get_config, reset_config
 from dbt_osmosis_cll.integration.cll import (
     clear_cll_walk_soft_fails,
     get_cll_walk_soft_fails,
+    get_column_origin,
 )
 from dbt_osmosis_cll.osmosis_propagation.transforms import (
     _find_cll_description,
@@ -942,3 +943,95 @@ def test_max_depth_records_soft_fail():
         soft_fails = get_cll_walk_soft_fails(ctx)
         assert soft_fails.get("max-depth")  # at least one column recorded
     clear_cll_walk_soft_fails(ctx)
+
+
+# ---------------------------------------------------------------------------
+# get_column_origin — computation-origin walker (annotation provenance)
+#
+# The annotation walker answers "where is this column COMPUTED?" and must agree
+# with the desc-source walker on the model a column is born in. Both stop at the
+# same computation walls (union / aggregate / window / literal / generated /
+# multi-source). The annotation walker is purely structural: it passes *through*
+# pure passthroughs / renames and inherited description copies, and must NOT stop
+# at the first ancestor that merely carries a description.
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _no_origin_cache():
+    """Run with an empty, isolated origin cache (it is a module global)."""
+    with mock.patch("dbt_osmosis_cll.integration.cll._ORIGIN_CACHE", {}):
+        yield
+
+
+def _window_passthrough_fixture():
+    """DP.prev_col ← (passthrough) UNION.prev_col ← (passthrough) IDENT.prev_col = LAG(...).
+
+    IDENT computes prev_col with a window function; UNION carries an inherited *copy* of
+    its description; DP is the layer being annotated. Returns (ctx, dp, node_index, results).
+    """
+    ctx = make_context()
+    desc = "Previous value at the same partition (LAG)."
+    ident = FakeNode("ident", {"PREV_COL": FakeColumn("PREV_COL", desc)})
+    union = FakeNode("union", {"PREV_COL": FakeColumn("PREV_COL", desc)})
+    dp = FakeNode("dp", {"PREV_COL": FakeColumn("PREV_COL", "")})
+    results = {
+        "dp": [cll("dp", "prev_col", is_rename=True, progenitor_model="union", progenitor_column="prev_col")],
+        "union": [cll("union", "prev_col", is_rename=True, progenitor_model="ident", progenitor_column="prev_col")],
+        "ident": [
+            cll("ident", "prev_col", is_window=True, is_computed=True, progenitor_model="src", progenitor_column="col")
+        ],
+    }
+    return ctx, dp, {"dp": dp, "union": union, "ident": ident}, results
+
+
+def test_origin_walks_through_passthrough_to_window_computation():
+    """The computation origin is the window node IDENT, not the described intermediate UNION.
+
+    Regression: the annotation tracer stopped at the first ancestor carrying a description
+    (UNION), crediting a passthrough instead of the node where the column is computed.
+    """
+    ctx, dp, node_index, results = _window_passthrough_fixture()
+    with _no_origin_cache(), patched(results=results, node_index=node_index):
+        origin = get_column_origin(ctx, dp, "PREV_COL")
+    assert origin is not None
+    _schema, origin_model, origin_col, _entry = origin
+    assert origin_model == "IDENT"  # computed where the window lives, not UNION
+    assert origin_col == ""  # "computed in MODEL" sentinel — no single source column
+
+
+def test_annotation_origin_and_desc_source_agree_on_window_passthrough():
+    """Computation origin (annotation) and description origin (desc-source) resolve to
+    the SAME model for a window passthrough — the maintainer's documentation-quality
+    invariant: the annotation points at the model the desc-source resolves to."""
+    ctx, dp, node_index, results = _window_passthrough_fixture()
+    with _no_origin_cache(), patched(results=results, node_index=node_index):
+        origin = get_column_origin(ctx, dp, "PREV_COL")
+        _desc, desc_source_ref = _resolve_cll_description(ctx, "dp", "prev_col")
+    assert origin is not None and desc_source_ref is not None
+    assert origin[1] == desc_source_ref.split(".")[0] == "IDENT"
+
+
+def test_origin_carries_renamed_name_at_computation_wall():
+    """When the chain renames the column before the computation wall, the origin's
+    entry_col reports the name AT the wall (here BAR) so the annotation can append
+    '(as BAR)' — letting the reader find the column in the computing model under its
+    real name there. Regression guard for rename-aware computed-in annotations."""
+    ctx = make_context()
+    desc = "Windowed value."
+    ident = FakeNode("ident", {"BAR": FakeColumn("BAR", desc)})
+    union = FakeNode("union", {"BAR": FakeColumn("BAR", desc)})
+    dp = FakeNode("dp", {"FOO": FakeColumn("FOO", "")})
+    results = {
+        "dp": [cll("dp", "foo", is_rename=True, progenitor_model="union", progenitor_column="bar")],
+        "union": [cll("union", "bar", is_rename=True, progenitor_model="ident", progenitor_column="bar")],
+        "ident": [
+            cll("ident", "bar", is_window=True, is_computed=True, progenitor_model="src", progenitor_column="col")
+        ],
+    }
+    with _no_origin_cache(), patched(results=results, node_index={"dp": dp, "union": union, "ident": ident}):
+        origin = get_column_origin(ctx, dp, "FOO")
+    _schema, origin_model, origin_col, entry_col = origin
+    assert origin_model == "IDENT"
+    assert origin_col == ""  # computed-in sentinel
+    assert entry_col == "BAR"  # name at the wall — feeds the "(as BAR)" annotation

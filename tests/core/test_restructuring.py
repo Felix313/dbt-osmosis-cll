@@ -311,7 +311,7 @@ def test_apply_restructure_plan_confirm_yes(
     with mock.patch("builtins.input", side_effect=["y"]):
         apply_restructure_plan(yaml_context, plan, confirm=True)
         captured = capsys.readouterr()
-        assert "Committing any buffered restructure changes" in captured.err
+        assert "Committing all YAMLs from buffer cache to disk" in captured.err
         assert "Reloading the dbt project manifest" not in captured.err
 
 

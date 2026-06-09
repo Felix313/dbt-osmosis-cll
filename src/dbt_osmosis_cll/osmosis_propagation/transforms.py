@@ -470,6 +470,7 @@ def _resolve_cll_description(
         _NODE_INDEX,
         _ensure_manifest_index,
         get_cll_results,
+        is_computation_wall,
         record_cll_walk_soft_fail,
     )
     from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
@@ -560,11 +561,7 @@ def _resolve_cll_description(
         # No lineage for this column — best effort: trust whatever it stores.
         return _own()
 
-    _is_aggregate = getattr(parent_result, "is_aggregate", False)
-    _is_window = getattr(parent_result, "is_window", False)
     _is_union = getattr(parent_result, "is_union", False)
-    _is_literal = getattr(parent_result, "is_literal", False)
-    _is_generated = getattr(parent_result, "is_generated", False)
 
     # 5. Union column — agreement-aware: recurse into every branch, then accept the
     # description iff at most one distinct non-empty answer is found (single populated
@@ -603,13 +600,10 @@ def _resolve_cll_description(
     # 6. Computed wall — the value is BORN here (aggregate / window / literal / generated
     # / multi-source expression). No single upstream column's description transfers, so
     # return only a description authored HERE; never recurse into the computation inputs.
-    if (
-        _is_aggregate
-        or _is_window
-        or _is_literal
-        or _is_generated
-        or (parent_result.is_computed and parent_result.progenitor_column is None)
-    ):
+    # Shares one predicate with the annotation tracer (``get_column_origin``) so both stop
+    # at exactly the same set of computation walls. (Union is handled above in step 5 with
+    # branch-agreement semantics and never reaches here.)
+    if is_computation_wall(parent_result):
         return _own()
 
     # 7. Column originates in this model with no upstream — nothing to inherit from.

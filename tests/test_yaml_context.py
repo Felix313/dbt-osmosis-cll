@@ -65,18 +65,23 @@ def test_get_columns_meta(yaml_context: YamlRefactorContext):
 
 
 def test_get_columns_meta_char_length(yaml_context: YamlRefactorContext):
-    """Test string_length setting uses catalog types (VARCHAR)."""
+    """Test string_length setting includes the VARCHAR length in the type.
+
+    Column types come from live DuckDB introspection (no catalog file is used — see
+    the yaml_context fixture). With string_length=True, VARCHAR columns therefore
+    report their length as ``character varying(256)``; with it off they are bare
+    ``VARCHAR`` (see test_get_columns_meta). Only the two VARCHAR columns differ.
+    """
     # Update the context settings for this test
     yaml_context.settings.string_length = True
     with mock.patch.dict(_COLUMN_LIST_CACHE, {}, clear=True):
-        # Catalog returns VARCHAR, not character varying(256)
         assert _customer_column_types(yaml_context) == {
             "customer_average_value": "DECIMAL(18,3)",
             "customer_id": "INTEGER",
             "customer_lifetime_value": "DOUBLE",
-            "first_name": "VARCHAR",  # Catalog type
+            "first_name": "character varying(256)",  # length included by string_length
             "first_order": "DATE",
-            "last_name": "VARCHAR",  # Catalog type
+            "last_name": "character varying(256)",  # length included by string_length
             "most_recent_order": "DATE",
             "number_of_orders": "BIGINT",
         }
