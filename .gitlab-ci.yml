@@ -1,0 +1,43 @@
+# CI: build the dbt-osmosis-cll wheel + sdist and publish them to THIS project's
+# GitLab PyPI Package Registry on every version tag (e.g. v0.1.0).
+#
+# This file is maintained on GitHub (the canonical source) and pulled into the
+# GitLab mirror. For it to run on the mirror, the project's pull-mirror needs
+# "Trigger pipelines for mirror updates" enabled
+# (Settings -> Repository -> Mirroring repositories).
+#
+# Release flow:
+#   1. bump `version` in pyproject.toml, commit to master (on GitHub)
+#   2. git tag v<version> && git push origin v<version>
+#   3. the mirror pulls the tag -> this pipeline builds + publishes the wheel
+#      (the GitLab PyPI registry rejects re-uploading an existing version, so
+#       every release needs a fresh version number)
+#
+# Consumers install with a GitLab token that has read_package_registry scope:
+#   pip install dbt-osmosis-cll \
+#     --index-url https://__token__:<token>@git.eon-cds.de/api/v4/projects/<PROJECT_ID>/packages/pypi/simple
+
+stages:
+  - publish
+
+publish-wheel:
+  stage: publish
+  image: python:3.11-slim
+  rules:
+    # Run only on version tags: v0.1.0, 0.1.0, 0.1.0.dev1, 1.2.3-rc1, ...
+    - if: '$CI_COMMIT_TAG =~ /^v?\d+\.\d+\.\d+/'
+  before_script:
+    - pip install --no-cache-dir --upgrade build twine
+  script:
+    - python -m build
+    - >
+      TWINE_USERNAME=gitlab-ci-token
+      TWINE_PASSWORD="${CI_JOB_TOKEN}"
+      python -m twine upload
+      --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi"
+      dist/*
+  artifacts:
+    paths:
+      - dist/dbt_osmosis_cll-*.whl
+      - dist/dbt_osmosis_cll-*.tar.gz
+    expire_in: 90 days
