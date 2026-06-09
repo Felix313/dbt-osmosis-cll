@@ -327,3 +327,44 @@ def test_no_cll_meta_written_when_setting_off():
         origin=("DC_STG", "SRC", "ID", "ID"),
     )
     assert cfg.meta_key_renamed_from not in node.columns["ORDER_ID"].meta
+
+
+def test_passthrough_of_upstream_computation_points_to_computing_model():
+    """A passthrough column whose value is COMPUTED upstream (origin sentinel has an empty
+    origin column) is annotated 'computed in: SCHEMA.<computing model>' — pointing at the
+    model where the value is born (e.g. the window/aggregate), not the immediate
+    passthrough parent. Locks the annotate side of the computation-origin fix."""
+    cfg = get_config()
+    node = FakeNode("dp", {"PREV_SOURCE_SYS_ID": FakeColumn("PREV_SOURCE_SYS_ID", "Vorperiodenwert")})
+    _annotate(
+        node,
+        results={
+            "dp": [
+                cll("dp", "prev_source_sys_id", progenitor_model="union", progenitor_column="prev_source_sys_id")
+            ]
+        },
+        settings={"annotate-column-origin-infos": "always"},
+        # computed-in sentinel: value is born in IDENT (origin column empty)
+        origin=("DC_STG", "IDENT", "", "PREV_SOURCE_SYS_ID"),
+    )
+    desc = node.columns["PREV_SOURCE_SYS_ID"].description
+    assert cfg.annotation_computed in desc
+    assert "IDENT" in desc
+    assert "UNION" not in desc  # never credits the immediate passthrough parent
+
+
+def test_computed_origin_appends_renamed_name_as_clause():
+    """A computed-in origin reached via a rename appends '(as <origin name>)' so the
+    reader can locate the column in the computing model under the name it has there."""
+    cfg = get_config()
+    node = FakeNode("dp", {"FOO": FakeColumn("FOO", "")})
+    _annotate(
+        node,
+        results={"dp": [cll("dp", "foo", progenitor_model="union", progenitor_column="bar")]},
+        settings={"annotate-column-origin-infos": "always"},
+        origin=("DC_STG", "IDENT", "", "BAR"),  # computed in IDENT, named BAR there
+    )
+    desc = node.columns["FOO"].description
+    assert cfg.annotation_computed in desc
+    assert "IDENT" in desc
+    assert "(as BAR)" in desc

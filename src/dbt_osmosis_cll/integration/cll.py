@@ -26,7 +26,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from dbt_osmosis_cll.config import get_config
-from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
 
 if t.TYPE_CHECKING:
     from dbt.contracts.graph.nodes import ResultNode
@@ -529,6 +528,32 @@ def clear_cll_walk_soft_fails(context: YamlRefactorContextProtocol) -> None:
         _CLL_WALK_SOFT_FAILS.pop(project_dir, None)
 
 
+def is_computation_wall(result: t.Any) -> bool:
+    """True when *result* describes a column whose value is BORN in its own model.
+
+    A union, aggregate, window, literal or generated column, or a multi-source
+    expression (``is_computed`` with no single progenitor column). The value is
+    produced *here*, so no single upstream column is its origin and the lineage walk
+    must not trace through it. BOTH lineage walkers stop at this same wall set:
+    ``_resolve_cll_description`` returns the locally-owned description (its step 6),
+    and ``get_column_origin`` returns the ``computed in: SCHEMA.MODEL`` sentinel.
+    Sharing one predicate is what keeps the description tracer and the annotation
+    tracer from drifting on *where a column is computed* (the bug this replaces:
+    the annotation tracer instead stopped at the first described ancestor).
+    """
+    return bool(
+        getattr(result, "is_union", False)
+        or getattr(result, "is_aggregate", False)
+        or getattr(result, "is_window", False)
+        or getattr(result, "is_literal", False)
+        or getattr(result, "is_generated", False)
+        or (
+            getattr(result, "is_computed", False)
+            and not (getattr(result, "progenitor_column", None) or "")
+        )
+    )
+
+
 def get_column_origin(
     context: YamlRefactorContextProtocol,
     node: ResultNode,
@@ -607,24 +632,15 @@ def _compute_column_origin(
     if result is None:
         return None
 
-    # Union column: column is born in this model from multiple branches.
-    # Return the "computed in: SCHEMA.MODEL" sentinel so annotate writes the
-    # union-marker annotation rather than picking an arbitrary branch and
-    # silently inheriting its description. Description inheritance for unions
-    # is handled separately by the agreement-aware walker in
-    # ``inherit_upstream_column_knowledge_cll`` / ``_find_cll_description``.
-    if getattr(result, "is_union", False):
-        schema = (
-            getattr(getattr(node, "unrendered_config", None), "schema", None)
-            or getattr(node, "schema", None)
-            or ""
-        )
-        return (str(schema).upper(), node.name.upper(), "", column_name.upper())
-
-    # Multi-source computed: column is born in this model (multi-arg expression…).
-    # Return (schema, model, "") as a sentinel so the caller can write the "computed in: SCHEMA.MODEL"
-    # annotation rather than silently dropping it.
-    if (result.progenitor_column is None or result.progenitor_column == "") and result.is_computed:
+    # Computation wall — the value is BORN in this model (union / aggregate / window /
+    # literal / generated / multi-source expression). Return the "computed in:
+    # SCHEMA.MODEL" sentinel (empty origin column) so the caller writes a model-level
+    # annotation rather than tracing through into the computation's inputs or crediting an
+    # arbitrary branch. This is the SAME wall set ``_resolve_cll_description`` stops at
+    # (its step 6), so the annotation tracer and the desc-source tracer agree on where a
+    # column is computed. Description inheritance for unions is handled separately by the
+    # agreement-aware walker in ``inherit_upstream_column_knowledge_cll``.
+    if is_computation_wall(result):
         schema = (
             getattr(getattr(node, "unrendered_config", None), "schema", None)
             or getattr(node, "schema", None)
@@ -658,71 +674,18 @@ def _compute_column_origin(
         schema = (getattr(src_node, "schema", None) or "").upper()
         return (schema, progenitor_lower.upper(), progenitor_col.upper(), progenitor_col.upper())
 
-    # Walker semantics: if the progenitor already has a meaningful description
-    # (in either the YAML buffer or the in-memory manifest), stop there instead
-    # of recursing all the way to the source. This keeps annotate's "deep
-    # tracer" consistent with inherit's chain walker, eliminating a class of
-    # non-idempotency bugs where intermediate models populated during the run
-    # change which upstream gets credited as the origin.
+    # Pure rename or single-source derivation: the value is RELOCATED or type-transformed,
+    # not born here — trace through to where it is computed (a wall) or to its source.
+    # We deliberately do NOT stop at the first ancestor that merely carries a description:
+    # a described passthrough is still a passthrough, and stopping there credited the wrong
+    # model and drifted from the desc-source walker, which passes transitively through
+    # inherited copies to the origin. Being purely structural (CLL flags only), this walk is
+    # deterministic regardless of which descriptions are populated during the run.
     model_node = _NODE_INDEX[project_dir].get(progenitor_lower)
-    if model_node is not None and _node_has_real_description(
-        context, model_node, progenitor_col
-    ):
-        schema = (
-            getattr(getattr(model_node, "unrendered_config", None), "schema", None)
-            or getattr(model_node, "schema", None)
-            or ""
-        )
-        return (
-            str(schema).upper(),
-            progenitor_lower.upper(),
-            progenitor_col.upper(),
-            progenitor_col.upper(),
-        )
-
-    # Recurse into the progenitor dbt model
     if model_node is not None:
         return _compute_column_origin(context, model_node, progenitor_col, project_dir, _depth + 1)
 
     return None
-
-
-def _node_has_real_description(
-    context: YamlRefactorContextProtocol, node: t.Any, column_name: str
-) -> bool:
-    """True iff the column has a non-placeholder description after annotation strip.
-
-    Used by ``_compute_column_origin`` so its walking semantics match the
-    inherit walker (``_find_cll_description``): both stop at the first node in
-    the chain that carries a real description, instead of one consumer racing
-    to the leaf source while the other stops at the first populated ancestor.
-    Reads the YAML buffer first (parallel-safe, reflects pre-pipeline state)
-    then falls back to the in-memory manifest (live during the run).
-    """
-    # In-memory manifest first — see comment in `_find_cll_description` for
-    # the topological-waves rationale.
-    cols = getattr(node, "columns", {})
-    col_info = next(
-        (v for k, v in cols.items() if k.lower() == column_name.lower()), None
-    )
-    if col_info is not None:
-        raw = getattr(col_info, "description", None) or ""
-        cleaned = strip_annotation_tags(raw).strip()
-        if cleaned and cleaned not in context.placeholders:
-            return True
-
-    # YAML buffer fallback — covers nodes outside this run's candidate set.
-    try:
-        from dbt_osmosis_cll.osmosis_propagation.inheritance import _read_ancestor_yaml_description
-    except Exception:  # noqa: BLE001 — defensive: missing dep means treat as no description
-        return False
-    variants = [column_name, column_name.upper(), column_name.lower()]
-    yaml_desc = _read_ancestor_yaml_description(context, node, variants)
-    if yaml_desc:
-        cleaned = strip_annotation_tags(yaml_desc).strip()
-        if cleaned and cleaned not in context.placeholders:
-            return True
-    return False
 
 
 def get_origin_source_description(
