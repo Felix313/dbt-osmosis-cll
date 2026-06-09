@@ -36,11 +36,15 @@ def format_computed_origin_tag(origin_col: str, origin_table: str, source_descri
 def format_derived_tag(schema: str, model: str, entry_col: str | None = None) -> str:
     """Return the annotation block for a **multi-source / computed** column.
 
-    When *entry_col* is supplied and differs from the queried column name, it is
-    appended as ``(as ENTRY_COL)`` so the reader knows what name to search for
-    in the referenced model.
+    References the model by bare name (no schema prefix) — dbt model names are
+    project-unique, and every other annotation tag (renamed/derived/aggregate/window
+    "from MODEL.COL") is unqualified too, so qualifying only this one was inconsistent.
+    *schema* is kept in the signature for symmetry with the sibling ``*_in`` formatters
+    but is intentionally not rendered. When *entry_col* is supplied and differs from the
+    queried column name, it is appended as ``(as ENTRY_COL)`` so the reader knows what
+    name to search for in the referenced model.
     """
-    tag = f"{get_config().annotation_computed} {schema}.{model}"
+    tag = f"{get_config().annotation_computed} {model}"
     if entry_col:
         tag = f"{tag} (as {entry_col})"
     return _wrap_annotation(tag)

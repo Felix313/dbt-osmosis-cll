@@ -1874,7 +1874,8 @@ def annotate_column_origins(
 
         if is_multi_source:
             if _write_meta:
-                new_meta[_key_computed] = node_ref
+                # Bare model name (no schema) — consistent with renamed_from / derived_from.
+                new_meta[_key_computed] = node.name.upper()
             else:
                 new_meta.pop(_key_computed, None)
             new_meta.pop(_key_renamed, None)
@@ -1934,7 +1935,9 @@ def annotate_column_origins(
                 # If entry_col differs from col_name, a rename occurred along the chain —
                 # append "(as ENTRY_COL)" so the reader knows what to search for in that model.
                 if _write_meta:
-                    new_meta[_key_computed] = f"{schema}.{origin_model}" if schema else origin_model
+                    # Bare model name (no schema) — consistent with renamed_from / derived_from
+                    # meta and the unqualified annotation tags.
+                    new_meta[_key_computed] = origin_model
                 else:
                     new_meta.pop(_key_computed, None)
                 new_meta.pop(_key_renamed, None)

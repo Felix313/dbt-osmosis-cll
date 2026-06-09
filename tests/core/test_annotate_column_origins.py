@@ -331,9 +331,10 @@ def test_no_cll_meta_written_when_setting_off():
 
 def test_passthrough_of_upstream_computation_points_to_computing_model():
     """A passthrough column whose value is COMPUTED upstream (origin sentinel has an empty
-    origin column) is annotated 'computed in: SCHEMA.<computing model>' — pointing at the
-    model where the value is born (e.g. the window/aggregate), not the immediate
-    passthrough parent. Locks the annotate side of the computation-origin fix."""
+    origin column) is annotated 'computed in: <computing model>' — pointing at the model
+    where the value is born (e.g. the window/aggregate), not the immediate passthrough
+    parent, and by bare model name (no schema prefix). Locks the annotate side of the
+    computation-origin fix."""
     cfg = get_config()
     node = FakeNode("dp", {"PREV_SOURCE_SYS_ID": FakeColumn("PREV_SOURCE_SYS_ID", "Vorperiodenwert")})
     _annotate(
@@ -351,6 +352,7 @@ def test_passthrough_of_upstream_computation_points_to_computing_model():
     assert cfg.annotation_computed in desc
     assert "IDENT" in desc
     assert "UNION" not in desc  # never credits the immediate passthrough parent
+    assert "DC_STG" not in desc  # model referenced WITHOUT schema prefix
 
 
 def test_computed_origin_appends_renamed_name_as_clause():
@@ -368,3 +370,4 @@ def test_computed_origin_appends_renamed_name_as_clause():
     assert cfg.annotation_computed in desc
     assert "IDENT" in desc
     assert "(as BAR)" in desc
+    assert "DC_STG" not in desc  # model referenced WITHOUT schema prefix
