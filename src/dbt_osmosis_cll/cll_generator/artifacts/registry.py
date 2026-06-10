@@ -34,6 +34,104 @@ def _extract_source_select(sql: str, dialect: Optional[str] = None) -> str:
     return sql
 
 
+def _strip_self_referencing_union_branches(
+    sql: str, model_name: str, dialect: str | None = None
+) -> str:
+    """Remove set-operation branches that read from the model's OWN relation.
+
+    dbt incremental SCD2 / attribute-history models often accumulate state with
+    ``SELECT ... FROM {{ this }} UNION ALL SELECT ... FROM <new source>``. In the compiled
+    SQL ``{{ this }}`` is the model's own relation, so column lineage classifies the column
+    as a multi-source UNION with no single origin — even though the only *real* upstream is
+    the new-data branch (the ``{{ this }}`` branch just carries the accumulated history of
+    the same value). Dropping the self-referencing branch(es) lets the column resolve to its
+    true origin instead of stopping at the model itself.
+
+    A branch is "self" when its primary FROM resolves — directly, or through a CTE whose
+    primary FROM does — to a relation whose identifier matches *model_name*. Self-references
+    inside scalar / WHERE subqueries (e.g. an incremental high-watermark
+    ``SELECT MAX(...) FROM {{ this }}``) are not branches and are left untouched. Branches
+    are removed only when at least one non-self branch remains. Any parse/transform failure
+    returns the SQL unchanged (best-effort preprocessing).
+
+    Relation matching is by name, consistent with the rest of the resolver (which keys
+    models by name, not by a custom dbt ``alias``).
+    """
+    self_name = model_name.lower()
+    try:
+        tree = parse_one(sql, dialect=dialect)
+    except Exception:  # noqa: BLE001 — best-effort preprocessing; never block parsing
+        return sql
+
+    def _primary_from(select: exp.Select) -> str | None:
+        frm = select.args.get("from")
+        if frm is None:
+            return None
+        table = frm.this
+        return table.name.lower() if isinstance(table, exp.Table) else None
+
+    # CTEs whose primary FROM is the self relation — transitively (a CTE reading from
+    # another self-CTE is itself self).
+    ctes = {c.alias_or_name.lower(): c for c in tree.find_all(exp.CTE)}
+    self_ctes: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, cte in ctes.items():
+            if name in self_ctes:
+                continue
+            body = cte.this
+            if isinstance(body, exp.Select):
+                pf = _primary_from(body)
+                if pf is not None and (pf == self_name or pf in self_ctes):
+                    self_ctes.add(name)
+                    changed = True
+
+    def _is_self_branch(node: exp.Expression) -> bool:
+        if not isinstance(node, exp.Select):
+            return False
+        pf = _primary_from(node)
+        return pf is not None and (pf == self_name or pf in self_ctes)
+
+    def _flatten(union: exp.Union) -> list:
+        branches: list = []
+        for side in (union.this, union.expression):
+            # Recurse only into pure UNION / UNION ALL — never EXCEPT / INTERSECT, whose
+            # branches are not interchangeable and must not be dropped.
+            if type(side) is exp.Union:
+                branches.extend(_flatten(side))
+            else:
+                branches.append(side)
+        return branches
+
+    modified = False
+    for union in [
+        u
+        for u in tree.find_all(exp.Union)
+        if type(u) is exp.Union and not isinstance(u.parent, exp.Union)
+    ]:
+        branches = _flatten(union)
+        kept = [b for b in branches if not _is_self_branch(b)]
+        if kept and len(kept) < len(branches):
+            new_node: exp.Expression = kept[0]
+            for branch in kept[1:]:
+                new_node = exp.Union(
+                    this=new_node, expression=branch, distinct=union.args.get("distinct", False)
+                )
+            if union is tree:  # root-level set operation has no parent to swap into
+                tree = new_node
+            else:
+                union.replace(new_node)
+            modified = True
+
+    if not modified:
+        return sql
+    try:
+        return tree.sql(dialect=dialect)
+    except Exception:  # noqa: BLE001
+        return sql
+
+
 def _replace_placeholder(match: re.Match) -> str:
     """Return TRUE for custom placeholders; leave dbt-internal tokens untouched.
 
@@ -217,6 +315,16 @@ class ModelRegistry:
             # the vast majority — skip the throwaway parse via a cheap keyword check.
             if re.search(r"\b(?:MERGE|INSERT)\b", sql, re.IGNORECASE):
                 sql = _extract_source_select(sql, dialect=self._adapter_override)
+
+            # Incremental SCD2 / history models read {{ this }} as a UNION source to
+            # accumulate state. Drop that self-referencing branch so the column resolves to
+            # its real upstream instead of a multi-source UNION with no origin. Cheap gate
+            # (UNION present AND the model's own name appears) avoids the parse for the
+            # vast majority of models.
+            if re.search(r"\bUNION\b", sql, re.IGNORECASE) and model_name.lower() in sql.lower():
+                sql = _strip_self_referencing_union_branches(
+                    sql, model_name, dialect=self._adapter_override
+                )
 
             # Replace unresolved custom-materialization placeholders (e.g.
             # __PERIOD_FILTER__) with TRUE so the SQL parser sees valid syntax.
