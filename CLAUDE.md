@@ -2,20 +2,14 @@
 
 ## Issue Tracking
 
-This project uses **bd (beads)** for issue tracking.
-Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
-
-**Quick reference:**
-- `bd ready` - Find unblocked work
-- `bd create "Title" --type task --priority 2` - Create issue
-- `bd close <id>` - Complete work
-- `bd sync` - Sync with git (run at session end)
-
-For full workflow details: `bd prime`
+Open work is tracked in `docs/plans/` (currently `2026-06-10-phase1-cll-roadmap.md`).
+Record follow-ups there — update the item's Status column or add a dated note.
+(The repo previously referenced the `bd`/beads tracker, but it was never installed
+or used here; do not attempt `bd` commands.)
 
 ## Repository Overview
 
-**dbt-osmosis-cll** is a CLI tool that enhances the dbt developer experience through automated YAML schema management and column-level documentation inheritance driven by an embedded column-level-lineage (CLL) resolver. The tool operates as both a dbt utility and standalone Python package. It deliberately ships no LLM client and no UI: AI-assisted documentation is done by coding agents working in the repo against `yaml doc-health --format json` and `yaml document` (see "Using with coding agents" in docs/USAGE.md).
+**dbt-osmosis-cll** is a CLI tool that enhances the dbt developer experience through automated YAML schema management and column-level documentation inheritance driven by an embedded column-level-lineage (CLL) resolver. The tool operates as both a dbt utility and standalone Python package. It deliberately ships no LLM client and no in-package doc-synthesis UI: AI-assisted documentation is done by coding agents working in the repo against `yaml doc-health --format json` and `yaml document` (see "Using with coding agents" in docs/USAGE.md). The only UI is the read-only lineage explorer (`lineage explore`, optional `lineage-ui` extra).
 
 ## Development Commands
 
@@ -589,19 +583,17 @@ repos:
 
 **MANDATORY WORKFLOW:**
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
+1. **Record remaining work** - Note follow-ups in the active plan under `docs/plans/`
 2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
+3. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
    git push
    git status  # MUST show "up to date with origin"
    ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
+4. **Clean up** - Clear stashes, prune remote branches
+5. **Verify** - All changes committed AND pushed
+6. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
 - Work is NOT complete until `git push` succeeds

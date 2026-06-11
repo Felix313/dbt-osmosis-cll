@@ -17,6 +17,8 @@ All tests drive ``SQLColumnParser.parse_column_lineage`` directly — the stable
 
 from __future__ import annotations
 
+import typing as t
+
 from dbt_osmosis_cll.cll_generator.parser import SQLColumnParser
 
 
@@ -120,7 +122,7 @@ class TestMultiSourcePreservation:
 
 
 class TestSchemaAwareResolution:
-    TABLE_COLUMNS = {
+    TABLE_COLUMNS: t.ClassVar[dict[str, set[str]]] = {
         "orders": {"id", "cust_id", "order_date"},
         "customers": {"id", "amount", "region"},
     }
