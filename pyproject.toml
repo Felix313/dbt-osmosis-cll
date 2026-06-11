@@ -36,7 +36,7 @@ dependencies = [
   "rapidfuzz>=3.0.0",
   # vendored column-level-lineage resolver — runtime deps for the osmosis path
   "pydantic>=2.10.6,<3.0.0",
-  "sqlglot>=26.8.0,<27.0.0",
+  "sqlglot>=26.8.0,<31.0.0",
 ]
 
 [project.optional-dependencies]
