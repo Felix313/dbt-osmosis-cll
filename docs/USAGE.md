@@ -133,6 +133,14 @@ run a coding agent directly in the repo and let it drive the deterministic surfa
 
 This keeps generated text out of non-origin layers, so provenance tracking stays truthful.
 
+The doc-health JSON additionally breaks documented columns down by **trust** — per node
+and in the summary: `authored` (human-written at this node), `inherited` (gap-filled from
+the CLL origin, carries `desc-source`), and `glossary` (owned by the central glossary).
+"Documented" alone does not mean "trustworthy": a drop in `inherited` together with a rise
+in `undocumented` between runs means CLL propagation silently stopped reaching columns it
+used to reach — combine with `--check-cll` (which lists models whose lineage extraction
+failed) to catch such regressions in CI.
+
 ## Pre-commit hook
 
 You can run `dbt-osmosis yaml refactor -C` as a pre-commit hook:
@@ -253,6 +261,34 @@ It resolves **per node**, so you can enable it for just the layers an agent cons
 e.g. set `+dbt-osmosis-options: {write-cll-tags-to-meta: true}` on your data-product
 path in `dbt_project.yml` — while leaving intermediate layers untagged. A global default
 can still be set in `.osmosis`.
+
+#### Recommended pattern: machine-readable origins on endpoint / data-product layers
+
+Endpoint (data-product) models are what catalog tools, BI users, and agents actually
+consume — and the layer where column origins are least obvious. The recommended
+configuration turns on full annotation **and** machine-readable meta tags there, while
+keeping intermediate layers lean:
+
+```yaml
+# dbt_project.yml
+models:
+  my_project:
+    staging:
+      +dbt-osmosis-options:
+        inherit-through-renames: true        # staging renames are transparent
+    intermediate: {}                         # default: annotate only if altered, no meta tags
+    marts:                                   # endpoint / data-product layer
+      +dbt-osmosis-options:
+        annotate-column-origin-infos: always        # every column states its origin
+        annotation-include-source-description: false # origin ref only, no text duplication
+        write-cll-tags-to-meta: true                 # col-renamed-from / col-derived-from /
+                                                     # col-computed-in in column meta
+```
+
+With this in place every endpoint column carries a human-readable origin block in its
+description **and** a machine-readable pointer in its meta, so any column on the
+data-product surface traces to its true origin without opening the SQL (goal 3 of the
+CLL roadmap). Downstream catalogs read the meta keys straight from `manifest.json`.
 
 ### Column reference (`column-docs-path`)
 
