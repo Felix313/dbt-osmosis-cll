@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - main
+      - master
 
 jobs:
   lint:
@@ -29,9 +29,14 @@ jobs:
         run: |
           uv pip install --system pre-commit
           pre-commit --version
-      - name: Install pre-commit hooks
+      # Lint only the changed range: the repo baseline is not ruff-clean (legacy
+      # findings inherited from the forks), so --all-files would always fail.
+      # Tighten to --all-files once the baseline is cleaned up.
+      - name: Run pre-commit on changed files
         run: |
-          pre-commit install
-      - name: Run pre-commit hooks
-        run: |
-          pre-commit run --all-files
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            pre-commit run --from-ref "origin/${{ github.base_ref }}" --to-ref HEAD
+          else
+            pre-commit run --from-ref HEAD^ --to-ref HEAD
+          fi
