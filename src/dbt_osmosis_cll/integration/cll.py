@@ -69,6 +69,12 @@ _RESULT_FIELDS = (
     "is_first_in_chain", "is_rename", "source_column",
     "is_aggregate", "is_window", "is_literal", "is_union", "is_generated",
     "literal_value", "generated_value", "unique_id",
+    # NOTE: tuple-valued fields JSON-round-trip as lists of [model, col] lists —
+    # consumers unpack pairs positionally, which works for both shapes.
+    # union_branches was historically MISSING here, silently degrading union
+    # agreement inheritance on warm disk-cache runs; schema_version 4 forces the
+    # one-time rebuild that backfills it.
+    "union_branches", "progenitors",
 )
 
 

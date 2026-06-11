@@ -110,6 +110,19 @@ class ColumnLineageResult:
     ``progenitor_column``) are intentionally left as ``None`` for union columns since
     no single branch can claim canonical status."""
 
+    progenitors: List[Tuple[str, str]] = field(default_factory=list)
+    """ALL direct ``(model, column)`` inputs of this column — the generalization of
+    ``union_branches`` to every transformation kind:
+
+    - single-source columns: ``[(progenitor_model, progenitor_column)]``
+    - multi-source computed columns (``COALESCE(a.x, b.y)``, arithmetic over two
+      tables, …): one pair per contributing source column, sorted by source string
+    - union columns: identical to ``union_branches`` (declaration order)
+
+    Lets consumers state what feeds a computed endpoint column ("Computed here from
+    A.X, B.Y") instead of a bare "no single progenitor". Additive — older cached
+    results deserialize with an empty list."""
+
 
 def get_column_lineage(
     manifest_path: str,
@@ -275,6 +288,22 @@ def get_column_lineage(
                     if "." in branch:
                         m, c = branch.rsplit(".", 1)
                         union_branches.append((m.lower(), c.lower()))
+            # progenitors: ALL direct (model, column) inputs (generalized
+            # union_branches). Unions reuse their branch pairs; everything else
+            # derives from the full source-column set (preserved through CTE
+            # hops by the parser).
+            if is_union:
+                progenitors: List[Tuple[str, str]] = list(union_branches)
+            else:
+                progenitors = []
+                for src in sorted(lin.source_columns):
+                    if src and "." in src:
+                        m, c = src.rsplit(".", 1)
+                        m = m.lower()
+                        # Same ephemeral-prefix strip as _resolve_progenitor.
+                        if m.startswith("__dbt__cte__"):
+                            m = m[len("__dbt__cte__"):]
+                        progenitors.append((m, c.lower()))
             # first-in-chain: only for pure passthroughs (direct/renamed) that reach a terminal node
             is_passthrough = ttype in ("direct", "renamed")
             is_first = (
@@ -299,6 +328,7 @@ def get_column_lineage(
                     generated_value=generated_value,
                     is_first_in_chain=is_first,
                     union_branches=union_branches,
+                    progenitors=progenitors,
                     unique_id=model_obj.unique_id,
                 )
             )

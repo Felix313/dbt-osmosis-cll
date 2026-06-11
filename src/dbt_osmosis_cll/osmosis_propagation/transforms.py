@@ -1886,8 +1886,16 @@ def annotate_column_origins(
             if central_doc and not has_real_desc:
                 node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=central_doc, **_config_kwarg)
             elif _annotate_mode:
-                # Multi-source: born in this model — use short "Computed here" form.
-                computed_tag = format_computed_here_tag()
+                # Multi-source: born in this model — "Computed here", listing the
+                # direct inputs when CLL preserved them (roadmap #5): the endpoint
+                # reader sees what feeds the expression without opening the SQL.
+                _progenitor_pairs = getattr(result, "progenitors", None) or []
+                _inputs = [
+                    f"{str(m).upper()}.{str(c).upper()}"
+                    for m, c in _progenitor_pairs
+                    if m and c
+                ]
+                computed_tag = format_computed_here_tag(inputs=_inputs or None)
                 new_desc = f"{base_desc}\n\n{computed_tag}".strip() if has_real_desc else computed_tag
                 node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
             else:

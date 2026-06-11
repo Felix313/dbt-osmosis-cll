@@ -99,10 +99,18 @@ def format_generated_tag(generated_expr: str, schema: str, model: str) -> str:
     return _wrap_annotation(f"{cfg.annotation_generated} here")
 
 
-def format_computed_here_tag() -> str:
-    """Return annotation for a multi-source computed column born in this model: ``Computed here``."""
+def format_computed_here_tag(inputs: "list[str] | None" = None) -> str:
+    """Return annotation for a multi-source computed column born in this model.
+
+    Without *inputs*: ``Computed here``. With *inputs* (``MODEL.COL`` strings):
+    ``Computed here from A.X, B.Y`` so endpoint readers see what feeds the
+    expression without opening the SQL.
+    """
     cfg = get_config()
-    return _wrap_annotation(f"{cfg.annotation_computed.removesuffix('in:').rstrip()} here")
+    base = f"{cfg.annotation_computed.removesuffix('in:').rstrip()} here"
+    if inputs:
+        base = f"{base} from {', '.join(inputs)}"
+    return _wrap_annotation(base)
 
 
 _WS_NORMALIZE_RE = re.compile(r"\s+")
