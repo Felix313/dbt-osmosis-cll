@@ -16,6 +16,7 @@ This page documents the current `dbt-osmosis` CLI surface area as exposed by `db
 - `test` — suggest dbt tests
 - `diff` — compare YAML definitions with live database schema
 - `lint` — lint SQL strings, models, or a whole project
+- `lineage` — interactive column-level lineage explorer
 
 ## Shared dbt options
 
@@ -149,6 +150,19 @@ Important options:
 - `--detect-column-renames/--no-detect-column-renames`
 
 This command compares YAML definitions with live database schema and reports additions, removals, type changes, and fuzzy-matched renames.
+
+## `dbt-osmosis lineage`
+
+Interactive column-level lineage visualization (requires the `lineage-ui` extra:
+`pip install 'dbt-osmosis-cll[lineage-ui]'`).
+
+- `dbt-osmosis-cll lineage explore`
+  - options: `--project-dir`, `--manifest`, `--host`, `-p/--port`, `--dialect`
+
+Serves the HTML lineage explorer for the whole project. Manifest-only: column lists
+come from source/model YAMLs already in the manifest, compiled SQL from inline
+`compiled_code` or `target/compiled/` — no `catalog.json` and no warehouse
+connection. Run `dbt compile` first so lineage has SQL to trace.
 
 ## `dbt-osmosis lint`
 

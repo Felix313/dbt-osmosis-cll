@@ -906,6 +906,90 @@ def diff():
     """Detect and report schema changes between YAML definitions and database"""
 
 
+@cli.group()
+def lineage():
+    """Explore column-level lineage (CLL) for the project"""
+
+
+@lineage.command(context_settings=_CONTEXT)
+@logging_opts
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, dir_okay=True, file_okay=False),
+    default=discover_project_dir,
+    help="dbt project root. Default is the current working directory and its parents.",
+)
+@click.option(
+    "--manifest",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to manifest.json. Defaults to <project-dir>/target/manifest.json.",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="Host interface to bind the explorer server to.",
+)
+@click.option("--port", "-p", default=8000, type=click.INT, help="Port for the explorer server.")
+@click.option(
+    "--dialect",
+    default=None,
+    help="Override the sqlglot dialect (e.g. snowflake). Defaults to the manifest adapter type.",
+)
+def explore(
+    project_dir: str,
+    manifest: str | None = None,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    dialect: str | None = None,
+) -> None:
+    """Serve the interactive HTML lineage explorer for this project.
+
+    \f
+    Manifest-only: column lists come from the manifest (``ManifestCatalogReader``),
+    compiled SQL from inline ``compiled_code`` or ``target/compiled/`` — no
+    ``catalog.json`` and no warehouse connection. Run ``dbt compile`` first so
+    lineage has SQL to trace.
+    """
+    try:
+        from dbt_osmosis_cll.cll_generator.lineage.display.html.explore import LineageExplorer
+    except ImportError as exc:
+        logger.error(
+            ":x: The lineage explorer needs the 'lineage-ui' extra (missing: %s).\n"
+            "Install it with:  pip install 'dbt-osmosis-cll[lineage-ui]'",
+            exc.name or exc,
+        )
+        sys.exit(1)
+
+    from pathlib import Path as _Path
+
+    from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
+    from dbt_osmosis_cll.cll_generator.lineage.service import LineageService
+
+    manifest_path = _Path(manifest) if manifest else _Path(project_dir) / "target" / "manifest.json"
+    if not manifest_path.exists():
+        logger.error(
+            ":x: No manifest found at %s — run 'dbt compile' (preferred) or 'dbt parse' first.",
+            manifest_path,
+        )
+        sys.exit(1)
+
+    reader = ManifestCatalogReader(manifest_path=str(manifest_path))
+    reader.load()
+    logger.info("Loading project lineage (parses compiled SQL for every model)...")
+    service = LineageService(
+        catalog_path=None,
+        manifest_path=manifest_path,
+        adapter=dialect,
+        catalog_reader=reader,
+        use_target_dir_fallback=True,
+    )
+    logger.info("Lineage ready — serving explorer at http://%s:%d", host, port)
+    explorer = LineageExplorer(host=host, port=port)
+    explorer.set_lineage_service(service)  # pyright: ignore[reportArgumentType]
+    explorer.start()
+
+
 @diff.command(context_settings=_CONTEXT)
 @dbt_opts
 @yaml_opts

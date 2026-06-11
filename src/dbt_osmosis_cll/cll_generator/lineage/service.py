@@ -83,9 +83,24 @@ class LineageReferences:
 class LineageService:
     """Service for handling lineage operations."""
 
-    def __init__(self, catalog_path: Path, manifest_path: Path, adapter: Optional[str] = None):
+    def __init__(
+        self,
+        catalog_path: "Path | None",
+        manifest_path: Path,
+        adapter: "str | None" = None,
+        catalog_reader: "Any | None" = None,
+        use_target_dir_fallback: bool = False,
+    ):
+        """*catalog_reader* lets callers inject a manifest-only reader
+        (``ManifestCatalogReader``) so no ``catalog.json`` / warehouse is needed;
+        *use_target_dir_fallback* reads compiled SQL from ``target/compiled/``
+        when the manifest has none inline."""
         self.registry = ModelRegistry(
-            str(catalog_path), str(manifest_path), adapter_override=adapter
+            str(catalog_path) if catalog_path else None,  # type: ignore[arg-type]
+            str(manifest_path),
+            adapter_override=adapter,
+            _catalog_reader_override=catalog_reader,
+            use_target_dir_fallback=use_target_dir_fallback,
         )
         self.registry.load()
 
