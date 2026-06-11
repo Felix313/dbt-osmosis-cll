@@ -9,26 +9,40 @@ class ManifestReader:
     def __init__(self, manifest_path: Optional[str] = None):
         self.manifest_path = Path(manifest_path) if manifest_path else None
         self.manifest: Dict[str, Any] = {}
+        self._node_index: Optional[Dict[str, Dict[str, Any]]] = None
 
     def load(self) -> None:
         if not self.manifest_path or not self.manifest_path.exists():
             raise FileNotFoundError(f"Manifest file not found: {self.manifest_path}")
         with open(self.manifest_path, "r") as f:
             self.manifest = json.load(f)
+        self._node_index = self._build_node_index()
 
     def get_adapter(self) -> Optional[str]:
         adapter_name = self.manifest.get("metadata", {}).get("adapter_type")
         return normalize_adapter(adapter_name)
 
+    def _build_node_index(self) -> Dict[str, Dict[str, Any]]:
+        """Build a {lowercase node name → node} index over manifest nodes.
+
+        First occurrence wins on name collisions, matching the historical
+        iteration-order behaviour of the linear scan it replaces.
+        """
+        index: Dict[str, Dict[str, Any]] = {}
+        for node in self.manifest.get("nodes", {}).values():
+            name = node.get("name", "").lower()
+            if name and name not in index:
+                index[name] = node
+        return index
+
     def _find_node(self, model_name: str) -> Optional[Dict[str, Any]]:
-        """Find a node in the manifest by model name."""
+        """Find a node in the manifest by model name (indexed lookup)."""
         if not self.manifest:
             return None
-        model_name_lower = model_name.lower()
-        for _, node in self.manifest.get("nodes", {}).items():
-            if node.get("name", "").lower() == model_name_lower:
-                return dict(node)
-        return None
+        if self._node_index is None:
+            self._node_index = self._build_node_index()
+        node = self._node_index.get(model_name.lower())
+        return dict(node) if node is not None else None
 
     def get_model_dependencies(self) -> Dict[str, Set[str]]:
         """Return a dictionary of model dependencies with full model names.

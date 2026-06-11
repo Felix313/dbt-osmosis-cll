@@ -245,11 +245,10 @@ class ModelRegistry:
                 model.downstream = downstream_deps.get(model_name, set())
                 if model_name in model_exposures:
                     model.downstream.update(model_exposures[model_name])
-                model.language = self._manifest_reader.get_model_language(model_name)
-                model.resource_path = self._manifest_reader.get_model_resource_path(model_name)
-
                 node = self._manifest_reader._find_node(model_name)
                 if node:
+                    model.language = node.get("language")
+                    model.resource_path = node.get("original_file_path")
                     model.description = node.get("description")
                     model.tags = node.get("tags", [])
         except Exception as e:
