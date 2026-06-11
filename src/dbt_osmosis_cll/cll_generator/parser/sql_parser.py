@@ -438,26 +438,52 @@ class SQLColumnParser:
 
         final_select = get_final_select(parsed)
         if not final_select and isinstance(parsed, exp.Union):
-            # Top-level UNION ALL / UNION / INTERSECT / EXCEPT: output columns
-            # derive from multiple branches — mark all as union type.
-            first_branch = parsed.this  # first SELECT branch for column names
-            if isinstance(first_branch, exp.Select):
-                col_names: list[str] = []
-                for expr in first_branch.expressions:
-                    name = strip_sql_comments(expr.alias_or_name.lower())
-                    if name and name != "*":
-                        col_names.append(name)
-                # SELECT * FROM cte: resolve actual column names from ephemeral_cte_lineage
-                if not col_names:
-                    from_clause = first_branch.find(exp.From)
-                    if from_clause:
-                        table = from_clause.find(exp.Table)
-                        if table:
-                            source_name = str(table.name).lower()
-                            col_names = list(ephemeral_cte_lineage.get(source_name, {}).keys())
-                for col_name in col_names:
+            # Top-level UNION ALL / UNION: output columns derive from multiple
+            # branches — mark all as union type, with per-branch sources.
+            branch_selects = [
+                b for b in self._flatten_set_operation(parsed) if isinstance(b, exp.Select)
+            ]
+            # Ephemeral boundary first: a star over an injected __dbt__cte__ model
+            # (stop_at_ephemeral mode) resolves names from the collected ephemeral
+            # lineage and must NOT be traced through.
+            ephemeral_star = False
+            if branch_selects:
+                first_branch = branch_selects[0]
+                explicit_names = [
+                    strip_sql_comments(e.alias_or_name.lower())
+                    for e in first_branch.expressions
+                ]
+                if not [n for n in explicit_names if n and n != "*"]:
+                    eph_table = self._branch_from_table(first_branch)
+                    if eph_table and eph_table in ephemeral_cte_lineage:
+                        ephemeral_star = True
+                        for col_name in ephemeral_cte_lineage[eph_table]:
+                            columns[col_name] = [
+                                ColumnLineage(source_columns=set(), transformation_type="union")
+                            ]
+            if branch_selects and not ephemeral_star:
+                # Same machinery as set-op CTEs (_process_union_cte): expand each
+                # branch — including `SELECT * FROM some_cte` branches — into
+                # ordered (name, source) pairs. Without the star expansion such
+                # models produced ZERO columns (real-repo corpus finding).
+                expanded_branches = [
+                    self._expand_branch_columns(bs, cte_sources, cte_to_model)
+                    for bs in branch_selects
+                ]
+                for col_idx, (col_name, _src) in enumerate(expanded_branches[0]):
+                    if not col_name or col_name == "*":
+                        continue
+                    branches = [
+                        branch[col_idx][1]
+                        for branch in expanded_branches
+                        if col_idx < len(branch) and branch[col_idx][1]
+                    ]
                     columns[col_name] = [
-                        ColumnLineage(source_columns=set(), transformation_type="union")
+                        ColumnLineage(
+                            source_columns=set(),
+                            transformation_type="union",
+                            union_branches=branches,
+                        )
                     ]
             return SQLParseResult(
                 column_lineage=columns,

@@ -121,6 +121,67 @@ class TestMultiSourcePreservation:
 # ---------------------------------------------------------------------------
 
 
+class TestTopLevelUnionStarBranches:
+    """Top-level UNION ALL with ``SELECT * FROM <cte>`` branches.
+
+    Sanitized from a real Snowflake repo corpus finding: such models produced
+    ZERO lineage columns because the top-level union handler only knew explicit
+    expression names. Branches must expand against the CTEs' recorded columns,
+    with per-branch sources surfaced via union_branches.
+    """
+
+    SQL = (
+        "WITH base AS ("
+        "  SELECT contract_id, tariff_key, created_dt"
+        "  FROM db.schema_a.stg_contracts"
+        "  WHERE full_dt = (SELECT MAX(full_dt) FROM db.schema_a.stg_contracts)"
+        "), late_rows AS ("
+        "  SELECT contract_id, tariff_key, created_dt"
+        "  FROM db.schema_b.stg_contracts_late AS rdv"
+        "  WHERE NOT EXISTS (SELECT 1 FROM base WHERE rdv.contract_id = base.contract_id)"
+        "  QUALIFY ROW_NUMBER() OVER (PARTITION BY contract_id ORDER BY created_dt) = 1"
+        ") "
+        "SELECT * FROM base UNION ALL SELECT * FROM late_rows"
+    )
+
+    def test_star_union_branches_yield_columns(self):
+        parser = SQLColumnParser(dialect="snowflake")
+        result = parser.parse_column_lineage(self.SQL)
+        assert set(result.column_lineage) == {"contract_id", "tariff_key", "created_dt"}
+
+    def test_star_union_columns_are_union_type_with_branches(self):
+        parser = SQLColumnParser(dialect="snowflake")
+        result = parser.parse_column_lineage(self.SQL)
+        lin = result.column_lineage["contract_id"][0]
+        assert lin.transformation_type == "union"
+        assert lin.union_branches == [
+            "stg_contracts.contract_id",
+            "stg_contracts_late.contract_id",
+        ]
+
+    def test_explicit_top_level_union_now_carries_branches(self):
+        sql = (
+            "SELECT a.x AS val FROM tbl_a a"
+            " UNION ALL SELECT b.y AS val FROM tbl_b b"
+        )
+        parser = SQLColumnParser()
+        result = parser.parse_column_lineage(sql)
+        lin = result.column_lineage["val"][0]
+        assert lin.transformation_type == "union"
+        assert lin.union_branches == ["tbl_a.x", "tbl_b.y"]
+
+    def test_three_branch_nested_union(self):
+        sql = (
+            "SELECT a.x AS val FROM tbl_a a"
+            " UNION ALL SELECT b.y AS val FROM tbl_b b"
+            " UNION ALL SELECT c.z AS val FROM tbl_c c"
+        )
+        parser = SQLColumnParser()
+        result = parser.parse_column_lineage(sql)
+        lin = result.column_lineage["val"][0]
+        assert lin.union_branches == ["tbl_a.x", "tbl_b.y", "tbl_c.z"]
+
+
 class TestSchemaAwareResolution:
     TABLE_COLUMNS: t.ClassVar[dict[str, set[str]]] = {
         "orders": {"id", "cust_id", "order_date"},

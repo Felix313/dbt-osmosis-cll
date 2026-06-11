@@ -91,9 +91,15 @@ Implemented in-place behind `SQLParseResult` (`tests/core/test_cll_parser_harden
   classification (aggregate/window/literal/generated/union) which the annotation layer
   depends on. Recommended future path: adopt `sqlglot.optimizer.scope` for scope
   *resolution only* (replacing the hand-rolled boundary walks) once golden-file tests
-  from a real Snowflake repo exist to gate the swap. Golden-file tests against a real
-  Snowflake repo could not be created in this environment — flagged as the remaining
-  open sub-item of #4.
+  from a real Snowflake repo exist to gate the swap.
+- **Golden corpus gate (added later on 2026-06-11)**: `tests/core/test_cll_golden_corpus.py`,
+  activated by `DBT_OSMOSIS_CLL_GOLDEN_DIR` pointing at a real project's
+  `target/compiled/<package>` dir (no proprietary SQL committed). Invariants: zero parser
+  exceptions, ≥98% of files yield lineage. First run against the real Snowflake repo
+  (463 files) found one real defect — top-level `UNION ALL` over `SELECT * FROM <cte>`
+  branches produced zero columns — fixed by expanding top-level union branches with the
+  set-op-CTE machinery (also populates `union_branches` for top-level unions). Sanitized
+  fixtures in `test_cll_parser_hardening.py::TestTopLevelUnionStarBranches`.
 
 ## Out of scope (cut executed 2026-06-11)
 
