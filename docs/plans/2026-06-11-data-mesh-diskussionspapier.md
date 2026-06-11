@@ -1,7 +1,7 @@
 # dbt-osmosis-cll im Data Mesh — Diskussionspapier für die zentrale Data Governance
 
 **Datum:** 2026-06-11
-**Zweck:** Abstimmungsgrundlage mit dem Governance-Teamlead: Wie funktioniert das Tool,
+**Zweck:** Abstimmungsgrundlage mit dem Governance-Team: Wie funktioniert das Tool,
 wie passt es in unseren Data-Mesh-/Data-Product-Ansatz, und welche Punkte müssen
 teamübergreifend vereinbart werden, bevor andere Domänen es übernehmen.
 **Hinweis:** Dieses Repo ist öffentlich — das Papier ist bewusst frei von internen
@@ -74,7 +74,51 @@ folgenden Vereinbarungen.
 
 ---
 
-## 3. Abstimmungspunkte mit allen Domänen-Teams
+## 3. Zusammenspiel mit Atlan
+
+Die zentrale Governance nimmt die dbt-Manifeste als Input für die Atlan-Lineage auf.
+Das ist kein Konkurrenz-, sondern ein Zulieferverhältnis — **osmosis-cll erzeugt
+Inhalte im dbt-Repo, Atlan verteilt sie an die Organisation.** Alles, was das Tool
+schreibt, landet im `manifest.json` und damit automatisch im bestehenden
+Atlan-Ingest. Konkret greifen die Werkzeuge an vier Stellen ineinander:
+
+1. **Beschreibungen: Docs-as-Code füllt den Katalog.** osmosis-cll dokumentiert
+   Spalten in der Breite (am Ursprung gepflegt, automatisch vererbt) — Atlan zeigt
+   genau diese Beschreibungen aus dem Manifest an. Ohne das Tool wären die meisten
+   Spalten im Katalog leer oder müssten doppelt in Atlan gepflegt werden. Damit keine
+   Drift entsteht, braucht es eine klare Schreibrichtung (→ A5).
+
+2. **Provenienz wird in Atlan sichtbar und filterbar.** Die maschinenlesbaren
+   Meta-Tags (`renamed_from` / `derived_from` / `computed_in`, `desc-source`) stehen
+   im Manifest-`meta` der Spalten und können in Atlan als Custom Metadata gemappt
+   werden. Ergebnis: Katalognutzer sehen pro Spalte nicht nur *was* sie bedeutet,
+   sondern *woher* der Wert stammt und ob die Beschreibung am Knoten verfasst,
+   vererbt oder glossarbasiert ist — Trust-Badges im Katalog (→ A6).
+
+3. **Zwei Lineage-Sichten, zwei Aufgaben.** Atlan baut die mesh- und
+   plattformweite Lineage für Discovery und Governance — die richtige Sicht für
+   alle Datennutzer. Die CLL-Engine von osmosis-cll ist das **Entwicklungszeit**-
+   Pendant: Sie läuft lokal/in CI *vor* dem Merge, ohne Warehouse-Verbindung, und
+   treibt die Doku-Vererbung an. Der mitgelieferte Explorer bleibt das schnelle
+   Engineering-Werkzeug im Repo; für organisationsweite Lineage-Fragen ist Atlan
+   das Zielsystem. (Das relativiert auch den Ausbaubedarf von B4: ein föderierter
+   Explorer ist nice-to-have, wenn Atlan die Mesh-Sicht ohnehin abdeckt.)
+
+4. **Qualität vor Ingest statt Lücken im Katalog.** `doc-health` misst pro Repo,
+   wie vollständig und vertrauenswürdig die Dokumentation ist — *bevor* das Manifest
+   in Atlan landet. Als CI-Gate (`--min-coverage`) stellt es sicher, dass Atlan nur
+   Manifeste mit vereinbartem Mindeststand erhält; das aggregierte Trust-Reporting
+   (B2) liefert der Governance die zugehörige Kennzahl je Domäne.
+
+Ein Punkt zur Gestaltung: Die menschenlesbaren Herkunfts-Annotationen („OSMOSIS →
+Renamed from …") sind Teil des Beschreibungstexts und erscheinen daher auch in
+Atlan. Ob das gewünscht ist (Herkunft direkt im Katalog lesbar) oder ob auf
+Endpoint-Layern stattdessen nur die Meta-Tags zählen sollen, ist Geschmacks- und
+Governance-Frage — beides ist heute pro Layer konfigurierbar (→ A6).
+
+---
+
+## 4. Abstimmungspunkte mit allen Domänen-Teams
 
 ### A. Konventionen (Governance-Entscheidungen, kein/kaum Code)
 
@@ -102,8 +146,29 @@ qualifiziert werden; technischer Schlüssel für das Matching:
 Mesh-weite Standard-/Auditspalten (z. B. technische Batch-Zeitstempel) gehören in ein
 **zentrales Glossar** (eigenes Repo, Ownership bei der Governance), das jedes Team
 zusätzlich zu seinem lokalen Glossar einbindet (lokal gewinnt). Kleine Tool-Anpassung
-nötig (mehrere Glossar-Pfade statt einem).
-*Zu entscheiden: Ownership, Pflegeprozess und Inhalt des zentralen Glossars.*
+nötig (mehrere Glossar-Pfade statt einem). Abgrenzung zum Atlan-Glossar:
+Spaltenbeschreibungs-Glossar lebt als Code im Git (wird von osmosis-cll verarbeitet),
+das Business-Glossar lebt in Atlan; eine Verknüpfung über Namenskonvention oder
+Meta-Tag ist möglich.
+*Zu entscheiden: Ownership, Pflegeprozess, Inhalt — und führendes System je Glossartyp.*
+
+**A5 — Schreibrichtung: dbt-Repo als Single Source of Truth für Spaltenbeschreibungen.**
+Beschreibungen entstehen und ändern sich im dbt-Repo (Docs-as-Code, reviewbar,
+versioniert) und fließen über das Manifest nach Atlan — nicht umgekehrt. Direkte
+Beschreibungs-Edits in Atlan an dbt-Spalten würden beim nächsten Ingest überschrieben
+oder erzeugen Drift.
+*Zu entscheiden: Verbindliche Schreibrichtung; Prozess für Korrekturwünsche aus dem
+Katalog zurück ins Repo (z. B. Ticket/PR statt Katalog-Edit).*
+
+**A6 — Mapping der Provenienz-Metadaten nach Atlan.**
+Die Meta-Tags (`renamed_from` / `derived_from` / `computed_in`, `desc-source`) und
+die Trust-Klassen aus doc-health sollen in Atlan als Custom Metadata / Badges
+erscheinen, damit Katalognutzer Herkunft und Vertrauensgrad sehen. Zusätzlich zu
+klären: Sollen die menschenlesbaren Annotations-Blöcke im Beschreibungstext auch im
+Katalog erscheinen, oder gelten auf Endpoint-Layern nur die Meta-Tags
+(`annotation-include-source-description: false` ist bereits Teil von A1)?
+*Zu entscheiden: Custom-Metadata-Mapping in Atlan; Darstellung der Annotationen;
+optional ein doc-health-Mindeststand als Voraussetzung für den Atlan-Ingest.*
 
 ### B. Tool-Erweiterungen (Code, in Priorisierungsreihenfolge)
 
@@ -128,10 +193,12 @@ einfärben, Trust-/Coverage-Overlay, strukturierte Herkunftsanzeige mit
 „Zum Ursprung springen“, Impact-Liste als CSV-Export für Change Reviews,
 projektweite Spaltensuche, teilbare Links.
 
-**B4 — Föderierter Lineage-Explorer (mittelfristig).**
+**B4 — Föderierter Lineage-Explorer (mittelfristig, durch Atlan relativiert).**
 Mehrere Manifeste laden und Sources mit den produzierenden Modellen über
 `(database, schema, identifier)` verknüpfen → echte mesh-weite Spalten-Lineage in
-einer Ansicht. Gut abgegrenzt, baut auf B1/A2/A3 auf.
+einer Ansicht. Gut abgegrenzt, baut auf B1/A2/A3 auf. **Aber:** Wenn Atlan die
+mesh-weite Lineage-Sicht abdeckt (Abschnitt 3), sinkt die Priorität — der Explorer
+bleibt dann bewusst das repo-lokale Engineering-Werkzeug.
 
 ### C. Betrieb & Verteilung
 
@@ -146,10 +213,14 @@ einer Ansicht. Gut abgegrenzt, baut auf B1/A2/A3 auf.
 
 ---
 
-## 4. Vorschlag für die Reihenfolge
+## 5. Vorschlag für die Reihenfolge
 
-1. **A1 + A2** beschließen (reine Konventionen — schalten alles Weitere frei).
+1. **A1 + A2 + A5** beschließen (reine Konventionen — schalten alles Weitere frei;
+   A5 sichert das Zusammenspiel mit Atlan von Anfang an ab).
 2. **B1** bauen (Source-Sync) — macht das Tool mesh-nativ.
-3. **A3 + A4** parallel ausarbeiten (Namenskonvention, zentrales Glossar).
-4. **B2** (Trust-Aggregation + Source-Coverage) als gemeinsames Governance-Dashboard.
-5. **B3** vor einem gemeinsam gehosteten Explorer; **B4** danach als Ausbaustufe.
+3. **A3 + A4 + A6** parallel ausarbeiten (Namenskonvention, Glossare,
+   Atlan-Custom-Metadata-Mapping).
+4. **B2** (Trust-Aggregation + Source-Coverage) als gemeinsames Governance-Dashboard —
+   optional als Mindeststand vor dem Atlan-Ingest.
+5. **B3** vor einem gemeinsam gehosteten Explorer; **B4** nur, falls Atlan die
+   mesh-weite Spalten-Lineage nicht ausreichend abdeckt.
