@@ -12,11 +12,8 @@ This page documents the current `dbt-osmosis` CLI surface area as exposed by `db
 
 - `yaml` — schema YAML management and documentation inheritance
 - `sql` — compile or run ad-hoc SQL in dbt context
-- `workbench` — launch the Streamlit workbench
-- `generate` — generate sources, staging models, models, and SQL
-- `nl` — natural-language helpers
+- `generate` — generate sources and staging models
 - `test` — suggest dbt tests
-- `test-llm` — validate LLM configuration
 - `diff` — compare YAML definitions with live database schema
 - `lint` — lint SQL strings, models, or a whole project
 
@@ -83,10 +80,6 @@ External formatting:
 
 - `--formatter "prettier --write"` or another CLI formatter command. dbt-osmosis appends written file paths and runs the formatter once after successful writes.
 
-Experimental:
-
-- `--synthesize` requires installing `dbt-osmosis[openai]` and configuring `LLM_PROVIDER` plus the provider-specific environment variables.
-
 Example:
 
 ```bash
@@ -114,42 +107,14 @@ Executes or compiles ad-hoc SQL, including dbt Jinja, against your project.
 - `dbt-osmosis sql run "select ..."`
 - `dbt-osmosis sql compile "select ..."`
 
-## `dbt-osmosis workbench`
-
-Runs the Streamlit workbench.
-
-Core options:
-
-- `--project-dir`
-- `--profiles-dir`
-- `--host` (default `localhost`)
-- `--port` (default `8501`)
-- `--options` passes through to Streamlit help output
-- `--config` prints Streamlit configuration
-
-The workbench runtime requires installing `dbt-osmosis[workbench]`.
-
 ## `dbt-osmosis generate`
 
-Generates dbt artifacts.
+Generates dbt artifacts deterministically (no LLM involved).
 
-- `dbt-osmosis generate model "<description>"`
-  - options: `--model-name`, `--output-path`, `--schema-yml`, `--dry-run`
 - `dbt-osmosis generate sources`
   - options: `--source-name`, `--schema-name`, `--exclude-schemas`, `--exclude-tables`, `--quote-identifiers`, `--output-path`, `--dry-run`
 - `dbt-osmosis generate staging <source_name> <table_name>`
-  - options: `--ai`, `--staging-path`, `--dry-run`
-- `dbt-osmosis generate query "<question>"`
-  - option: `--execute`
-
-LLM-assisted subcommands require `dbt-osmosis[openai]` and a configured `LLM_PROVIDER`.
-
-## `dbt-osmosis nl`
-
-Natural-language helpers.
-
-- `dbt-osmosis nl query "<question>"` optionally adds `--execute`
-- `dbt-osmosis nl generate "<description>"` remains available but is deprecated in favor of `dbt-osmosis generate model`
+  - options: `--staging-path`, `--dry-run`
 
 ## `dbt-osmosis test`
 
@@ -162,21 +127,10 @@ Currently exposed subcommand:
 Important options:
 
 - `-f, --fqn`
-- `--use-ai`
-- `--pattern-only`
-- `--temperature`
 - `-o, --output`
 - `--format [json|yaml|table]`
 
-`--use-ai` requires the OpenAI extra; `--pattern-only` keeps suggestions deterministic.
-
-## `dbt-osmosis test-llm`
-
-Validates LLM client configuration.
-
-- Reads `LLM_PROVIDER`
-- Verifies the provider-specific environment variables are present
-- Prints the configured provider and model engine on success
+Suggestions are deterministic, derived from test conventions already present in the project.
 
 ## `dbt-osmosis diff`
 

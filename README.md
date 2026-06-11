@@ -67,7 +67,7 @@ src/dbt_osmosis_cll/
   cll_generator/       # PILLAR 1 — generate column-level lineage (vendored resolver)
   integration/         # PILLAR 2 — cll cache/bridge + SQL proxy
   osmosis_propagation/ # PILLAR 3 — inherit, annotate, glossary, schema I/O, enrichment
-                       #            (+ commands/ for generate, diff, lint, workbench, …)
+                       #            (+ commands/ for generate, diff, lint, doc_health, …)
 ```
 
 The repo root is the installable package (src-layout, `hatchling`).

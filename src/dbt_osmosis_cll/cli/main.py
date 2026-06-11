@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import subprocess
 import sys
 import typing as t
 from pathlib import Path
@@ -24,7 +23,6 @@ from dbt_osmosis_cll.osmosis_propagation.commands.generators import (
     generate_sources_from_database,
     generate_staging_from_source,
 )
-from dbt_osmosis_cll.osmosis_propagation.commands.llm import generate_dbt_model_from_nl, generate_sql_from_nl
 from dbt_osmosis_cll.osmosis_propagation.path_management import create_missing_source_yamls
 from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
     apply_restructure_plan,
@@ -41,7 +39,6 @@ from dbt_osmosis_cll.osmosis_propagation.transforms import (
     remove_columns_not_in_database,
     sort_columns_as_configured,
     synchronize_data_types,
-    synthesize_missing_documentation_with_openai,
 )
 
 T = t.TypeVar("T")
@@ -54,43 +51,6 @@ _CONTEXT = {"max_content_width": 800}
 @click.version_option()
 def cli() -> None:
     """dbt-osmosis-cll — lineage-aware dbt YAML doc management (dbt-osmosis fused with column-level lineage)."""
-
-
-
-def test_llm_connection(llm_client=None) -> None:
-    """Test the connection to the LLM client."""
-    import os
-
-    from dbt_osmosis_cll.osmosis_propagation.commands.llm import get_llm_client
-
-    llm_client = os.getenv("LLM_PROVIDER")
-    if not llm_client:
-        click.echo(
-            "ERROR: LLM_PROVIDER environment variable is not set. Please set it to one of the available providers."
-        )
-        return
-
-    client, model_engine = get_llm_client()
-    if not client or not model_engine:
-        click.echo(
-            f"Connection ERROR: The environment variables for LLM provider {llm_client} are not set correctly."
-        )
-        return
-
-    click.echo(
-        f"LLM client connection successful. Provider: {llm_client}, Model Engine: {model_engine}"
-    )
-
-
-@cli.command()
-def test_llm() -> None:
-    """Test the connection to the LLM client"""
-    logger.info("INFO: Invoking test_llm_connection...")
-    from dbt_osmosis_cll.osmosis_propagation.commands.llm import get_llm_client
-
-    llm_client = get_llm_client()
-    test_llm_connection(llm_client)
-    click.echo("LLM client connection test completed.")
 
 
 @cli.group()
@@ -344,11 +304,6 @@ def _run_formatter_if_configured(context: YamlRefactorContext) -> None:
     help="Automatically apply the restructure plan without confirmation.",
 )
 @click.option(
-    "--synthesize",
-    is_flag=True,
-    help="Automatically synthesize missing documentation with OpenAI.",
-)
-@click.option(
     "--include-external",
     is_flag=True,
     help="Include models and sources from external dbt packages in the processing.",
@@ -363,7 +318,6 @@ def refactor(
     check: bool = False,
     threads: int | None = None,
     disable_introspection: bool = False,
-    synthesize: bool = False,
     **kwargs: t.Any,
 ) -> None:
     """Executes organize which syncs yaml files with database schema and organizes the dbt models
@@ -413,8 +367,6 @@ def refactor(
             >> sort_columns_as_configured
             >> synchronize_data_types
         )
-        if synthesize:
-            transform >>= synthesize_missing_documentation_with_openai
 
         _ = transform(context=typed_context)
 
@@ -558,11 +510,6 @@ def organize(
     help="Output yaml file columns and data types in uppercase if possible.",
 )
 @click.option(
-    "--synthesize",
-    is_flag=True,
-    help="Automatically synthesize missing documentation with OpenAI.",
-)
-@click.option(
     "--include-external",
     is_flag=True,
     help="Include models and sources from external dbt packages in the processing.",
@@ -576,7 +523,6 @@ def document(
     check: bool = False,
     threads: int | None = None,
     disable_introspection: bool = False,
-    synthesize: bool = False,
     **kwargs: t.Any,
 ) -> None:
     """Column level documentation inheritance for existing models
@@ -615,8 +561,6 @@ def document(
             >> annotate_column_origins
             >> sort_columns_as_configured
         )
-        if synthesize:
-            transform >>= synthesize_missing_documentation_with_openai
 
         _ = transform(context=typed_context)
 
@@ -718,154 +662,8 @@ def doc_health(
 
 
 @cli.group()
-def nl():
-    """Natural language interface for dbt model generation and SQL queries"""
-
-
-@cli.group()
 def generate():
     """Generate dbt artifacts: sources, staging models, and more"""
-
-
-@generate.command(context_settings=_CONTEXT)
-@dbt_opts
-@logging_opts
-@click.argument("query")
-@click.option(
-    "--model-name",
-    type=click.STRING,
-    help="Optional name for the generated model (auto-generated if not provided)",
-)
-@click.option(
-    "--output-path",
-    type=click.Path(),
-    help="Path to save the generated model SQL file",
-)
-@click.option(
-    "--schema-yml",
-    type=click.Path(),
-    help="Path to save the generated schema.yml file",
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Print the generated model without writing to disk",
-)
-def model(
-    query: str = "",
-    model_name: str | None = None,
-    output_path: str | None = None,
-    schema_yml: str | None = None,
-    dry_run: bool = False,
-    project_dir: str | None = None,
-    profiles_dir: str | None = None,
-    target: str | None = None,
-    **kwargs: t.Any,
-) -> None:
-    """Generate a dbt model from a natural language description.
-
-    \f
-    Example:
-        dbt-osmosis-cll generate model "Show me customers who churned in the last 30 days"
-
-    The AI will analyze your query, understand your available models and sources,
-    and generate a complete dbt model with SQL and documentation.
-    """
-    logger.debug("osmosis command invoked")
-    settings = DbtConfiguration(
-        project_dir=t.cast(str, project_dir),
-        profiles_dir=t.cast(str, profiles_dir),
-        target=target,
-        **kwargs,
-    )
-    project = create_dbt_project_context(settings)
-
-    available_sources: list[dict[str, t.Any]] = []
-
-    for node in project.manifest.nodes.values():
-        if hasattr(node, "resource_type") and node.resource_type == "model":
-            columns = list(node.columns.keys()) if hasattr(node, "columns") else []
-            available_sources.append({
-                "name": node.name,
-                "type": "model",
-                "description": getattr(node, "description", ""),
-                "columns": columns,
-            })
-
-    for source in project.manifest.sources.values():
-        if hasattr(source, "resource_type") and source.resource_type == "source":
-            columns = list(source.columns.keys()) if hasattr(source, "columns") else []
-            available_sources.append({
-                "name": f"{source.source_name}.{source.name}",
-                "type": "source",
-                "description": getattr(source, "description", ""),
-                "columns": columns,
-            })
-
-    logger.info(f"Found {len(available_sources)} available sources/models")
-
-    try:
-        model_spec = generate_dbt_model_from_nl(query, available_sources)
-    except Exception as e:
-        logger.error(f"Failed to generate model: {e}")
-        raise
-
-    if model_name:
-        model_spec["model_name"] = model_name
-
-    click.echo(f"\n:sparkles: Generated model: {model_spec['model_name']}")
-    click.echo(f"Description: {model_spec['description']}")
-    click.echo(f"Materialized: {model_spec['materialized']}")
-
-    sql_content = f"-- {model_spec['description']}\n"
-    sql_content += f"-- Materialized: {model_spec['materialized']}\n\n"
-    sql_content += model_spec["sql"]
-
-    if dry_run:
-        click.echo("\n" + "=" * 80)
-        click.echo("SQL:")
-        click.echo("=" * 80)
-        click.echo(sql_content)
-        click.echo("\n" + "=" * 80)
-        click.echo("Columns:")
-        click.echo("=" * 80)
-        for col in model_spec["columns"]:
-            click.echo(f"  - {col['name']}: {col['description']}")
-        return
-
-    if output_path is None:
-        models_dir = Path(project_dir or ".") / "models"
-        output_path = str(models_dir / f"{model_spec['model_name']}.sql")
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(output_path).write_text(sql_content)
-    click.echo(f"\n:white_check_mark: Wrote SQL to: {output_path}")
-
-    if schema_yml or output_path:
-        schema_path = schema_yml or str(
-            Path(output_path).parent / f"{model_spec['model_name']}.yml"
-        )
-
-        import yaml
-
-        schema_content = {
-            "version": 2,
-            "models": [
-                {
-                    "name": model_spec["model_name"],
-                    "description": model_spec["description"],
-                    "columns": [
-                        {"name": col["name"], "description": col["description"]}
-                        for col in model_spec["columns"]
-                    ],
-                }
-            ],
-        }
-
-        Path(schema_path).write_text(
-            yaml.dump(schema_content, default_flow_style=False, sort_keys=False)
-        )
-        click.echo(f":white_check_mark: Wrote schema.yml to: {schema_path}")
 
 
 @generate.command(context_settings=_CONTEXT)
@@ -971,11 +769,6 @@ def sources(
 @click.argument("source_name")
 @click.argument("table_name")
 @click.option(
-    "--ai",
-    is_flag=True,
-    help="Use AI-based generation (intelligent staging with business logic)",
-)
-@click.option(
     "--staging-path",
     type=click.Path(),
     help="Directory where staging models should be written (default: models/staging/)",
@@ -988,7 +781,6 @@ def sources(
 def staging(
     source_name: str = "",
     table_name: str = "",
-    ai: bool = False,
     staging_path: str | None = None,
     dry_run: bool = False,
     project_dir: str | None = None,
@@ -1000,12 +792,10 @@ def staging(
 
     \f
     Example:
-        dbt-osmosis-cll generate staging raw customers --ai
         dbt-osmosis-cll generate staging raw stripe_transactions
 
-    This command generates staging models from source tables. Use --ai flag for
-    intelligent staging with AI-powered business logic, or omit for deterministic
-    generation via dbt-core-interface.
+    This command generates deterministic staging models from source tables
+    via dbt-core-interface.
     """
     logger.debug("osmosis command invoked")
     settings = DbtConfiguration(
@@ -1021,7 +811,6 @@ def staging(
             context=project,
             source_name=source_name,
             table_name=table_name,
-            use_ai=ai,
             staging_path=Path(staging_path) if staging_path else None,
         )
 
@@ -1055,422 +844,6 @@ def staging(
     except Exception as e:
         logger.error(f"Failed to generate staging model: {e}")
         raise
-
-
-@generate.command(context_settings=_CONTEXT, name="query")
-@dbt_opts
-@logging_opts
-@click.argument("query")
-@click.option(
-    "--execute",
-    is_flag=True,
-    help="Execute the generated SQL and display results",
-)
-def generate_query(
-    query: str = "",
-    execute: bool = False,
-    project_dir: str | None = None,
-    profiles_dir: str | None = None,
-    target: str | None = None,
-    **kwargs: t.Any,
-) -> None:
-    """Generate SQL from a natural language query.
-
-    \f
-    Example:
-        dbt-osmosis-cll generate query "Show me the top 10 customers by lifetime value"
-
-    The AI will translate your natural language query into SQL using dbt's ref() syntax.
-    """
-    logger.debug("osmosis command invoked")
-    settings = DbtConfiguration(
-        project_dir=t.cast(str, project_dir),
-        profiles_dir=t.cast(str, profiles_dir),
-        target=target,
-        **kwargs,
-    )
-    project = create_dbt_project_context(settings)
-
-    available_sources: list[dict[str, t.Any]] = []
-
-    for node in project.manifest.nodes.values():
-        if hasattr(node, "resource_type") and node.resource_type == "model":
-            columns = list(node.columns.keys()) if hasattr(node, "columns") else []
-            available_sources.append({
-                "name": node.name,
-                "type": "model",
-                "description": getattr(node, "description", ""),
-                "columns": columns,
-            })
-
-    for source in project.manifest.sources.values():
-        if hasattr(source, "resource_type") and source.resource_type == "source":
-            columns = list(source.columns.keys()) if hasattr(source, "columns") else []
-            available_sources.append({
-                "name": f"{source.source_name}.{source.name}",
-                "type": "source",
-                "description": getattr(source, "description", ""),
-                "columns": columns,
-            })
-
-    logger.info(f"Found {len(available_sources)} available sources/models")
-
-    try:
-        sql = generate_sql_from_nl(query, available_sources)
-    except Exception as e:
-        logger.error(f"Failed to generate SQL: {e}")
-        raise
-
-    click.echo("\n" + "=" * 80)
-    click.echo("Generated SQL:")
-    click.echo("=" * 80)
-    click.echo(sql)
-
-    if execute:
-        click.echo("\n" + "=" * 80)
-        click.echo("Executing SQL...")
-        click.echo("=" * 80)
-        _, table = execute_sql_code(project, sql)
-
-        table.print_table(
-            max_rows=50,
-            max_columns=6,
-            output=sys.stdout,
-            max_column_width=20,
-            locale=None,
-            max_precision=3,
-        )
-
-
-@nl.command(context_settings=_CONTEXT, name="generate")
-@dbt_opts
-@logging_opts
-@click.argument("query")
-@click.option(
-    "--model-name",
-    type=click.STRING,
-    help="Optional name for the generated model (auto-generated if not provided)",
-)
-@click.option(
-    "--output-path",
-    type=click.Path(),
-    help="Path to save the generated model SQL file",
-)
-@click.option(
-    "--schema-yml",
-    type=click.Path(),
-    help="Path to save the generated schema.yml file",
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Print the generated model without writing to disk",
-)
-def nl_generate_deprecated(
-    query: str = "",
-    model_name: str | None = None,
-    output_path: str | None = None,
-    schema_yml: str | None = None,
-    dry_run: bool = False,
-    project_dir: str | None = None,
-    profiles_dir: str | None = None,
-    target: str | None = None,
-    **kwargs: t.Any,
-) -> None:
-    """Generate a dbt model from a natural language description.
-
-    \f
-    DEPRECATED: Use `dbt-osmosis-cll generate model` instead.
-
-    Example:
-        dbt-osmosis-cll nl generate "Show me customers who churned in the last 30 days"
-
-    The AI will analyze your query, understand your available models and sources,
-    and generate a complete dbt model with SQL and documentation.
-    """
-    logger.warning(
-        ":warning: The `nl generate` command is deprecated. "
-        "Use `dbt-osmosis-cll generate model` instead."
-    )
-    logger.debug("osmosis command invoked")
-    settings = DbtConfiguration(
-        project_dir=t.cast(str, project_dir),
-        profiles_dir=t.cast(str, profiles_dir),
-        target=target,
-        **kwargs,
-    )
-    project = create_dbt_project_context(settings)
-
-    # Gather available sources and models from the manifest
-    available_sources: list[dict[str, t.Any]] = []
-
-    # Add models from manifest
-    for node in project.manifest.nodes.values():
-        if hasattr(node, "resource_type") and node.resource_type == "model":
-            columns = list(node.columns.keys()) if hasattr(node, "columns") else []
-            available_sources.append({
-                "name": node.name,
-                "type": "model",
-                "description": getattr(node, "description", ""),
-                "columns": columns,
-            })
-
-    # Add sources from manifest
-    for source in project.manifest.sources.values():
-        if hasattr(source, "resource_type") and source.resource_type == "source":
-            columns = list(source.columns.keys()) if hasattr(source, "columns") else []
-            available_sources.append({
-                "name": f"{source.source_name}.{source.name}",
-                "type": "source",
-                "description": getattr(source, "description", ""),
-                "columns": columns,
-            })
-
-    logger.info(f"Found {len(available_sources)} available sources/models")
-
-    # Generate the model specification
-    try:
-        model_spec = generate_dbt_model_from_nl(query, available_sources)
-    except Exception as e:
-        logger.error(f"Failed to generate model: {e}")
-        raise
-
-    # Override model name if provided
-    if model_name:
-        model_spec["model_name"] = model_name
-
-    click.echo(f"\n:sparkles: Generated model: {model_spec['model_name']}")
-    click.echo(f"Description: {model_spec['description']}")
-    click.echo(f"Materialized: {model_spec['materialized']}")
-
-    # Generate SQL content
-    sql_content = f"-- {model_spec['description']}\n"
-    sql_content += f"-- Materialized: {model_spec['materialized']}\n\n"
-    sql_content += model_spec["sql"]
-
-    if dry_run:
-        click.echo("\n" + "=" * 80)
-        click.echo("SQL:")
-        click.echo("=" * 80)
-        click.echo(sql_content)
-        click.echo("\n" + "=" * 80)
-        click.echo("Columns:")
-        click.echo("=" * 80)
-        for col in model_spec["columns"]:
-            click.echo(f"  - {col['name']}: {col['description']}")
-        return
-
-    # Write SQL file
-    if output_path is None:
-        models_dir = Path(project_dir or ".") / "models"
-        output_path = str(models_dir / f"{model_spec['model_name']}.sql")
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(output_path).write_text(sql_content)
-    click.echo(f"\n:white_check_mark: Wrote SQL to: {output_path}")
-
-    # Write schema.yml if requested
-    if schema_yml or output_path:
-        schema_path = schema_yml or str(
-            Path(output_path).parent / f"{model_spec['model_name']}.yml"
-        )
-
-        import yaml
-
-        schema_content = {
-            "version": 2,
-            "models": [
-                {
-                    "name": model_spec["model_name"],
-                    "description": model_spec["description"],
-                    "columns": [
-                        {"name": col["name"], "description": col["description"]}
-                        for col in model_spec["columns"]
-                    ],
-                }
-            ],
-        }
-
-        Path(schema_path).write_text(
-            yaml.dump(schema_content, default_flow_style=False, sort_keys=False)
-        )
-        click.echo(f":white_check_mark: Wrote schema.yml to: {schema_path}")
-
-
-@nl.command(context_settings=_CONTEXT)
-@dbt_opts
-@logging_opts
-@click.argument("query")
-@click.option(
-    "--execute",
-    is_flag=True,
-    help="Execute the generated SQL and display results",
-)
-def query(
-    query: str = "",
-    execute: bool = False,
-    project_dir: str | None = None,
-    profiles_dir: str | None = None,
-    target: str | None = None,
-    **kwargs: t.Any,
-) -> None:
-    """Generate SQL from a natural language query.
-
-    \f
-    Example:
-        dbt-osmosis-cll nl query "Show me the top 10 customers by lifetime value"
-
-    The AI will translate your natural language query into SQL using dbt's ref() syntax.
-    """
-    logger.debug("osmosis command invoked")
-    settings = DbtConfiguration(
-        project_dir=t.cast(str, project_dir),
-        profiles_dir=t.cast(str, profiles_dir),
-        target=target,
-        **kwargs,
-    )
-    project = create_dbt_project_context(settings)
-
-    # Gather available sources and models from the manifest
-    available_sources: list[dict[str, t.Any]] = []
-
-    for node in project.manifest.nodes.values():
-        if hasattr(node, "resource_type") and node.resource_type == "model":
-            columns = list(node.columns.keys()) if hasattr(node, "columns") else []
-            available_sources.append({
-                "name": node.name,
-                "type": "model",
-                "description": getattr(node, "description", ""),
-                "columns": columns,
-            })
-
-    for source in project.manifest.sources.values():
-        if hasattr(source, "resource_type") and source.resource_type == "source":
-            columns = list(source.columns.keys()) if hasattr(source, "columns") else []
-            available_sources.append({
-                "name": f"{source.source_name}.{source.name}",
-                "type": "source",
-                "description": getattr(source, "description", ""),
-                "columns": columns,
-            })
-
-    logger.info(f"Found {len(available_sources)} available sources/models")
-
-    # Generate SQL
-    try:
-        sql = generate_sql_from_nl(query, available_sources)
-    except Exception as e:
-        logger.error(f"Failed to generate SQL: {e}")
-        raise
-
-    click.echo("\n" + "=" * 80)
-    click.echo("Generated SQL:")
-    click.echo("=" * 80)
-    click.echo(sql)
-
-    if execute:
-        click.echo("\n" + "=" * 80)
-        click.echo("Executing SQL...")
-        click.echo("=" * 80)
-        _, table = execute_sql_code(project, sql)
-
-        table.print_table(
-            max_rows=50,
-            max_columns=6,
-            output=sys.stdout,
-            max_column_width=20,
-            locale=None,
-            max_precision=3,
-        )
-
-
-@cli.command(
-    context_settings={
-        "ignore_unknown_options": True,
-        "allow_extra_args": True,
-    }
-)
-@logging_opts
-@click.option(
-    "--project-dir",
-    default=discover_project_dir,
-    type=click.Path(exists=True, dir_okay=True, file_okay=False),
-    help="Which directory to look in for the dbt_project.yml file. Default is the current working directory and its parents.",
-)
-@click.option(
-    "--profiles-dir",
-    default=discover_profiles_dir,
-    type=click.Path(exists=True, dir_okay=True, file_okay=False),
-    help="Which directory to look in for the profiles.yml file. Defaults to DBT_PROFILES_DIR, the current directory, the discovered project root, or ~/.dbt.",
-)
-@click.option(
-    "--host",
-    type=click.STRING,
-    help="The host to serve the server on",
-    default="localhost",
-)
-@click.option(
-    "--port",
-    type=click.INT,
-    help="The port to serve the server on",
-    default=8501,
-)
-@click.pass_context
-def workbench(
-    ctx: click.Context,
-    profiles_dir: str | None = None,
-    project_dir: str | None = None,
-    host: str = "localhost",
-    port: int = 8501,
-) -> None:
-    """Start the dbt-osmosis-cll workbench
-
-    \f
-    Pass the --options command to see streamlit specific options that can be passed to the app,
-    pass --config to see the output of streamlit config show
-    """
-    logger.debug("osmosis command invoked")
-
-    if "--options" in ctx.args:
-        proc = subprocess.run(["streamlit", "run", "--help"], check=False)
-        ctx.exit(proc.returncode)
-
-    import os
-
-    if "--config" in ctx.args:
-        proc = subprocess.run(
-            ["streamlit", "config", "show"],
-            env=os.environ,
-            cwd=Path.cwd(),
-            check=False,
-        )
-        ctx.exit(proc.returncode)
-
-    script_args = ["--"]
-    if project_dir:
-        script_args.append("--project-dir")
-        script_args.append(project_dir)
-    if profiles_dir:
-        script_args.append("--profiles-dir")
-        script_args.append(profiles_dir)
-
-    proc = subprocess.run(
-        [
-            "streamlit",
-            "run",
-            "--runner.magicEnabled=false",
-            f"--browser.serverAddress={host}",
-            f"--browser.serverPort={port}",
-            Path(__file__).parent.parent / "workbench" / "app.py",
-            *ctx.args,
-            *script_args,
-        ],
-        env=os.environ,
-        cwd=Path.cwd(),
-        check=False,
-    )
-
-    ctx.exit(proc.returncode)
 
 
 @sql.command(context_settings=_CONTEXT)
@@ -1845,23 +1218,6 @@ def _output_diff_markdown(results: dict[str, t.Any], severity_filter: str) -> No
     help="Specify models based on dbt's FQN to analyze.",
 )
 @click.option(
-    "--use-ai",
-    is_flag=True,
-    default=True,
-    help="Use AI for test suggestions (requires OpenAI). Falls back to pattern-based if False.",
-)
-@click.option(
-    "--pattern-only",
-    is_flag=True,
-    help="Use pattern-based suggestions only (no AI).",
-)
-@click.option(
-    "--temperature",
-    type=click.FLOAT,
-    default=0.3,
-    help="LLM temperature for AI suggestions (0.0-1.0). Default is 0.3.",
-)
-@click.option(
     "-o",
     "--output",
     type=click.Path(),
@@ -1882,23 +1238,20 @@ def suggest(
     threads: int | None = None,
     disable_introspection: bool = False,
     fqn: tuple[str, ...] = (),
-    use_ai: bool = True,
-    pattern_only: bool = False,
-    temperature: float = 0.3,
     output: str | None = None,
     format: str = "table",
     models: tuple[str, ...] = (),
 ) -> None:
-    """Suggest dbt tests for models based on patterns and AI analysis.
+    """Suggest dbt tests for models based on patterns learned from the project.
 
     \f
-    This command analyzes your dbt project and suggests appropriate tests for each model.
-    It can use AI-powered analysis (requires OpenAI) or pattern-based analysis.
+    This command analyzes your dbt project's existing test conventions and suggests
+    appropriate tests for each model.
 
     Examples:
         dbt-osmosis-cll test suggest
-        dbt-osmosis-cll test suggest --fqn my_project.my_model --use-ai
-        dbt-osmosis-cll test suggest --pattern-only --format json
+        dbt-osmosis-cll test suggest --fqn my_project.my_model
+        dbt-osmosis-cll test suggest --format json
         dbt-osmosis-cll test suggest --output suggestions.json
     """
     logger.debug("osmosis command invoked")
@@ -1914,9 +1267,6 @@ def suggest(
     )
 
     project = create_dbt_project_context(settings)
-
-    # Determine if we should use AI
-    use_ai_for_suggestions = use_ai and not pattern_only
 
     # Check if specific models are requested via FQN or models args
     if fqn or models:
@@ -1949,8 +1299,6 @@ def suggest(
                         settings=YamlRefactorSettings(),
                     ),
                     node=node,
-                    use_ai=use_ai_for_suggestions,
-                    temperature=temperature,
                 )
                 results[model_name] = analysis
             except Exception as e:  # noqa: BLE001 — per-model failure should not abort the loop
@@ -1962,11 +1310,7 @@ def suggest(
                 project=project,
                 settings=YamlRefactorSettings(),
             )
-            results = suggest_tests_for_project(
-                context=context,
-                use_ai=use_ai_for_suggestions,
-                temperature=temperature,
-            )
+            results = suggest_tests_for_project(context=context)
         except Exception as e:
             logger.error(f"Failed to suggest tests: {e}")
             raise

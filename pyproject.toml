@@ -52,18 +52,6 @@ lineage-ui = [
   "dbt-sqlite>=1.6.0",
 ]
 
-workbench = [
-  "streamlit>=1.20.0,<1.42.0",
-  "streamlit-ace~=0.1.1",
-  "ydata-profiling>=4.17.0",
-  "feedparser~=6.0.12",
-  "streamlit-elements-fluence>=0.1.4",
-  "dbt-duckdb>=1,<2",
-  "setuptools>=70",
-]
-
-openai = ["openai~=1.58.1"]
-
 dev = [
   "basedpyright~=1.38.4",
   "ruff~=0.8.4",
@@ -111,7 +99,6 @@ exclude = [
   "**/_deps/**",
   "**/.venv/**",
   "demo_duckdb/target/**",
-  "src/dbt_osmosis_cll/osmosis_propagation/commands/workbench/**",
   "src/dbt_osmosis_cll/cll_generator/**",
   "tests/**",
 ]
@@ -170,6 +157,5 @@ skip_covered = false
 dev = [
     "basedpyright>=1.38.4",
     "dbt-duckdb>=1,<2",
-    "openai>=1.58.1",
     "pytest>=8.3.5",
 ]

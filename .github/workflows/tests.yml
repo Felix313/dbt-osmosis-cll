@@ -40,8 +40,8 @@ jobs:
           uv --version
 
       - name: Install required packages
-        run: | # install dev and openai extras to be able to parse manifest and run all tests
-          uv sync --extra dev --extra openai
+        run: | # install the dev extra to be able to parse manifest and run all tests
+          uv sync --extra dev
 
       - name: Install dbt runtime
         run: |
@@ -92,7 +92,7 @@ jobs:
         run: |
           SMOKE_ENV=$(mktemp -d)/dbt-osmosis-smoke
           uv venv "$SMOKE_ENV"
-          uv pip install --python "$SMOKE_ENV/bin/python" "dbt-core~=1.11.0" "dbt-duckdb~=1.10.1" basedpyright pytest pytest-cov hypothesis openai .
+          uv pip install --python "$SMOKE_ENV/bin/python" "dbt-core~=1.11.0" "dbt-duckdb~=1.10.1" basedpyright pytest pytest-cov hypothesis .
           export VIRTUAL_ENV="$SMOKE_ENV"
           export PATH="$SMOKE_ENV/bin:$PATH"
           basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true

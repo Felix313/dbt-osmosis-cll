@@ -15,7 +15,7 @@ For full workflow details: `bd prime`
 
 ## Repository Overview
 
-**dbt-osmosis-cll** is a CLI tool that enhances the dbt developer experience through automated YAML schema management, column-level documentation inheritance, and a Streamlit-based workbench for interactive dbt SQL development. The tool operates as both a dbt utility and standalone Python package.
+**dbt-osmosis-cll** is a CLI tool that enhances the dbt developer experience through automated YAML schema management and column-level documentation inheritance driven by an embedded column-level-lineage (CLL) resolver. The tool operates as both a dbt utility and standalone Python package. It deliberately ships no LLM client and no UI: AI-assisted documentation is done by coding agents working in the repo against `yaml doc-health --format json` and `yaml document` (see "Using with coding agents" in docs/USAGE.md).
 
 ## Development Commands
 
@@ -70,7 +70,6 @@ uv sync
 
 # Sync with extras
 uv sync --extra dev
-uv sync --extra workbench
 
 # Install package in editable mode
 uv pip install -e .
@@ -93,27 +92,14 @@ uv run dbt-osmosis-cll yaml document --project-dir <path> --profiles-dir <path>
 # Run with external YAML formatter (prettier, yamlfmt, yq, etc.)
 uv run dbt-osmosis-cll yaml refactor --formatter "prettier --write" --project-dir <path> --profiles-dir <path>
 
-# Start workbench (requires workbench extra)
-uv run dbt-osmosis-cll workbench --project-dir <path> --profiles-dir <path>
-
 # Compile SQL
 uv run dbt-osmosis-cll sql compile "SELECT * FROM {{ ref('my_model') }}"
 
 # Execute SQL
 uv run dbt-osmosis-cll sql run "SELECT 1"
 
-# Natural language interface (NEW)
-# Generate SQL from natural language
-uv run dbt-osmosis-cll nl query "Show me the top 10 customers by lifetime value"
-
-# Generate a complete dbt model from natural language
-uv run dbt-osmosis-cll generate model "Show me customers who churned in the last 30 days"
-
-# Generate model with custom name and dry-run preview
-uv run dbt-osmosis-cll generate model "Monthly revenue by region" --model-name monthly_revenue --dry-run
-
-# Validate LLM connectivity and provider configuration
-uv run dbt-osmosis-cll test-llm
+# Documentation coverage report (the JSON shape is the agent/CI contract)
+uv run dbt-osmosis-cll yaml doc-health --format json --project-dir <path> --profiles-dir <path>
 ```
 
 ### Demo Project
@@ -127,7 +113,7 @@ dbt test --profiles-dir . --target test
 ## Code Architecture
 
 ### Entry Points
-- **CLI**: `src/dbt_osmosis_cll/cli/main.py` - Click-based CLI with `yaml`, `sql`, `workbench`, `generate`, `nl`, `diff`, `lint`, `test`, and `test-llm` command families
+- **CLI**: `src/dbt_osmosis_cll/cli/main.py` - Click-based CLI with `yaml`, `sql`, `generate`, `diff`, `lint`, and `test` command families
 - **Core API**: `src/dbt_osmosis_cll/osmosis_propagation/osmosis.py` - Re-exports all public APIs for backwards compatibility
 
 ### Core Module Structure (`src/dbt_osmosis_cll/osmosis_propagation/`)
@@ -154,7 +140,6 @@ The core functionality is split into specialized modules:
    - `inherit_upstream_column_knowledge`: Propagates docs/tags/meta from upstream
    - `sort_columns_as_configured`: Orders columns
    - `synchronize_data_types`: Updates data types from database
-   - `synthesize_missing_documentation_with_openai`: AI-generated docs (requires OpenAI)
 
 ### Configuration Resolution System
 
@@ -375,7 +360,7 @@ value = resolver.resolve(
 - **node_filters.py**: Filters dbt nodes by FQN/path, topological sorting
 - **sync_operations.py**: Syncs individual nodes to YAML
 - **sql_operations.py**: Compiles and executes dbt SQL via dbt's internal APIs
-- **llm.py**: OpenAI integration for AI-generated documentation
+- **commands/doc_health.py**: Documentation coverage report with a stable JSON shape for agents/CI
 - **plugins.py**: Pluggy-based plugin system for fuzzy matching (FuzzyCaseMatching, FuzzyPrefixMatching)
 
 ### Transform Pipeline Pattern
@@ -393,11 +378,6 @@ result = transform(context=context)
 ```
 
 Each transform function takes a `YamlRefactorContext` and returns it for chaining.
-
-### Workbench (`src/dbt_osmosis_cll/osmosis_propagation/commands/workbench/`)
-- **app.py**: Main Streamlit app
-- **components/**: Modular UI components (editor, preview, profiler, dashboard, feed)
-- Provides real-time dbt compilation, query execution, and pandas profiling
 
 ### Configuration in dbt_project.yml
 Users configure YAML organization via node properties:
@@ -601,7 +581,6 @@ repos:
 
 - **Official Docs**: https://z3z1ma.github.io/dbt-osmosis-cll/
 - **Migration Guide**: https://z3z1ma.github.io/dbt-osmosis-cll/docs/migrating (for 0.x.x → 1.x.x)
-- **Workbench Demo**: https://dbt-osmosis-playground.streamlit.app/
 - **Quickstart Guide**: `specs/001-unified-config-resolution/quickstart.md` - Developer quickstart for the unified configuration resolution system
 
 ## Landing the Plane (Session Completion)

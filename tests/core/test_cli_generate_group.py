@@ -22,8 +22,6 @@ def test_generate_group_shows_help():
     )
     assert "sources" in result.output, "Should list sources command"
     assert "staging" in result.output, "Should list staging command"
-    assert "model" in result.output, "Should list model command"
-    assert "query" in result.output, "Should list query command"
 
 
 def test_generate_staging_dry_run_does_not_write_files(tmp_path: Path):

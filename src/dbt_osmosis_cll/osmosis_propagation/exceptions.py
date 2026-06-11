@@ -11,9 +11,6 @@ __all__ = [
     "ConfigurationError",
     "DatabaseError",
     "IntrospectionError",
-    "LLMConfigurationError",
-    "LLMError",
-    "LLMResponseError",
     "MissingOsmosisConfig",
     "OsmosisError",
     "PathResolutionError",
@@ -110,28 +107,4 @@ class TransformError(OsmosisError):
 
     This covers errors in the transform pipeline, including
     invalid operations, chaining errors, or transformation failures.
-    """
-
-
-class LLMError(OsmosisError):
-    """Raised when LLM (Large Language Model) operations fail.
-
-    This includes API errors, invalid responses, configuration issues,
-    or failures in AI-generated documentation.
-    """
-
-
-class LLMConfigurationError(LLMError, ConfigurationError):
-    """Raised when LLM configuration is invalid or missing.
-
-    Specifically raised for missing API keys, invalid provider settings,
-    or improperly configured LLM endpoints.
-    """
-
-
-class LLMResponseError(LLMError):
-    """Raised when LLM returns an invalid or unexpected response.
-
-    This includes empty responses, malformed JSON, or responses that
-    don't match the expected format.
     """

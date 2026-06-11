@@ -22,7 +22,7 @@ const sidebars = {
         'tutorial-yaml/selection',
         'how-to/manage-sources',
         'how-to/review-changes',
-        'tutorial-yaml/synthesize',
+        'tutorial-yaml/agents',
         'migrating',
       ],
     },

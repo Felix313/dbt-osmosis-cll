@@ -109,7 +109,7 @@ Below are some relevant flags to refine how much doc merges:
 
 - **Robust Fuzzy Matching**: Extending column name matching to handle more patterns or partial renames.
 - **External Data Dictionary**: Ingest a CSV or JSON dictionary of columns and doc them as if they were an upstream node.
-- **Integration with LLMs**: Combining the knowledge graph with an LLM to automatically fill out doc for columns that have none—**dbt-osmosis** already supports `--synthesize` for OpenAI, but deeper integration is possible.
+- **Integration with coding agents**: Combining the knowledge graph with an in-repo coding agent to fill out docs for columns that have none — see [Documenting with coding agents](./agents).
 - **Ignoring Common Prefixes**: For example, ignoring “stg_” or “dim_” while linking columns between child and parent.
 
 ---

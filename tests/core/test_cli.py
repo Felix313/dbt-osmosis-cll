@@ -20,7 +20,6 @@ def test_cli_group(runner: CliRunner) -> None:
     assert "yaml" in result.output
     assert "sql" in result.output
     assert "test" in result.output
-    assert "workbench" in result.output
 
 
 def test_yaml_group(runner: CliRunner) -> None:
@@ -50,7 +49,6 @@ def test_yaml_refactor_help(runner: CliRunner) -> None:
     assert "--profiles-dir" in result.output
     assert "--dry-run" in result.output
     assert "--check" in result.output
-    assert "--synthesize" in result.output
     assert "--fusion-compat" in result.output
     assert "discovered project root" in result.output
 
@@ -78,7 +76,6 @@ def test_yaml_document_help(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["yaml", "document", "--help"])
     assert result.exit_code == 0
     assert "--project-dir" in result.output
-    assert "--synthesize" in result.output
     assert "--use-unrendered-descriptions" in result.output
 
 
@@ -102,8 +99,6 @@ def test_test_suggest_help(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["test", "suggest", "--help"])
     assert result.exit_code == 0
     assert "--project-dir" in result.output
-    assert "--use-ai" in result.output
-    assert "--pattern-only" in result.output
     assert "--format" in result.output
 
 
@@ -114,24 +109,11 @@ def test_sql_compile_help(runner: CliRunner) -> None:
     assert "SQL" in result.output
 
 
-def test_workbench_help(runner: CliRunner) -> None:
-    """Test that the workbench command shows help."""
-    result = runner.invoke(cli, ["workbench", "--help"])
-    assert result.exit_code == 0
-    assert "discovered project root" in result.output
-    assert "--host" in result.output
-    assert "--port" in result.output
-
-
-def test_test_llm_command(runner: CliRunner) -> None:
-    """Test the test_llm command exists and is callable."""
-    result = runner.invoke(cli, ["test-llm"])
-    # Should not crash, should provide helpful output about missing env vars
-    assert (
-        result.exit_code in [0, 1]
-        or "LLM_PROVIDER" in result.output
-        or "openai" in result.output.lower()
-    )
+def test_removed_commands_are_gone(runner: CliRunner) -> None:
+    """The workbench and LLM-backed commands were removed entirely."""
+    for cmd in (["workbench"], ["test-llm"], ["nl"], ["generate", "model"], ["generate", "query"]):
+        result = runner.invoke(cli, [*cmd, "--help"])
+        assert result.exit_code != 0, f"command {' '.join(cmd)} should no longer exist"
 
 
 def test_version_option(runner: CliRunner) -> None:

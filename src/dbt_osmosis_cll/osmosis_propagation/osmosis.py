@@ -4,10 +4,6 @@
 
 from __future__ import annotations
 
-# LLM functions (require openai extra)
-import importlib.util
-from typing import TYPE_CHECKING
-
 # Import SqlCompileRunner for test compatibility
 from dbt.task.sql import SqlCompileRunner
 
@@ -54,68 +50,6 @@ from dbt_osmosis_cll.osmosis_propagation.commands.diff import (
     SchemaDiff,
     SchemaDiffResult,
 )
-
-# Natural language generation (from llm.py) - conditional on openai availability
-_llm_available = importlib.util.find_spec("openai") is not None
-
-if TYPE_CHECKING:
-    from dbt_osmosis_cll.osmosis_propagation.commands.llm import (
-        DocumentationSuggestion,
-        generate_dbt_model_from_nl,
-        generate_sql_from_nl,
-        generate_style_aware_column_doc,
-        generate_style_aware_table_doc,
-        suggest_documentation_improvements,
-    )
-else:
-    if _llm_available:
-        from dbt_osmosis_cll.osmosis_propagation.commands.llm import (
-            DocumentationSuggestion,
-            generate_dbt_model_from_nl,
-            generate_sql_from_nl,
-            generate_style_aware_column_doc,
-            generate_style_aware_table_doc,
-            suggest_documentation_improvements,
-        )
-    else:
-        # Stub functions that raise helpful errors
-        class DocumentationSuggestion:
-            def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-                raise ImportError(
-                    "Natural language features require OpenAI. "
-                    "Install with: pip install 'dbt-osmosis[openai]'"
-                )
-
-        def generate_dbt_model_from_nl(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise ImportError(
-                "Natural language features require OpenAI. "
-                "Install with: pip install 'dbt-osmosis[openai]'"
-            )
-
-        def generate_sql_from_nl(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise ImportError(
-                "Natural language features require OpenAI. "
-                "Install with: pip install 'dbt-osmosis[openai]'"
-            )
-
-        def generate_style_aware_column_doc(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise ImportError(
-                "Natural language features require OpenAI. "
-                "Install with: pip install 'dbt-osmosis[openai]'"
-            )
-
-        def generate_style_aware_table_doc(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise ImportError(
-                "Natural language features require OpenAI. "
-                "Install with: pip install 'dbt-osmosis[openai]'"
-            )
-
-        def suggest_documentation_improvements(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise ImportError(
-                "Natural language features require OpenAI. "
-                "Install with: pip install 'dbt-osmosis[openai]'"
-            )
-
 
 # Node filtering and sorting
 from dbt_osmosis_cll.osmosis_propagation.node_filters import (
@@ -190,46 +124,11 @@ from dbt_osmosis_cll.osmosis_propagation.commands.sql_lint import (
     lint_sql_code,
 )
 
-# Staging operations - conditional on openai availability
-if TYPE_CHECKING:
-    from dbt_osmosis_cll.osmosis_propagation.commands.staging import (
-        StagingGenerationResult,
-        generate_staging_for_all_sources,
-        generate_staging_for_source,
-        write_staging_files,
-    )
-else:
-    if _llm_available:
-        from dbt_osmosis_cll.osmosis_propagation.commands.staging import (
-            StagingGenerationResult,
-            generate_staging_for_all_sources,
-            generate_staging_for_source,
-            write_staging_files,
-        )
-    else:
-        # Stub classes/functions
-        class StagingGenerationResult:
-            def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-                raise ImportError(
-                    "Staging generation requires OpenAI. "
-                    "Install with: pip install 'dbt-osmosis[openai]'"
-                )
-
-        def generate_staging_for_all_sources(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise ImportError(
-                "Staging generation requires OpenAI. Install with: pip install 'dbt-osmosis[openai]'"
-            )
-
-        def generate_staging_for_source(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise ImportError(
-                "Staging generation requires OpenAI. Install with: pip install 'dbt-osmosis[openai]'"
-            )
-
-        def write_staging_files(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise ImportError(
-                "Staging generation requires OpenAI. Install with: pip install 'dbt-osmosis[openai]'"
-            )
-
+# Staging generation (deterministic, via dbt-core-interface)
+from dbt_osmosis_cll.osmosis_propagation.commands.generators import (
+    StagingGenerationResult,
+    generate_staging_from_source,
+)
 
 # Sync operations
 from dbt_osmosis_cll.osmosis_propagation.sync_operations import (
@@ -240,6 +139,7 @@ from dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions import (
     AITestSuggester,
     ModelTestAnalysis,
     TestPatternExtractor,
+    TestSuggester,
     TestSuggestion,
     suggest_tests_for_model,
     suggest_tests_for_project,
@@ -248,7 +148,6 @@ from dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions import (
 
 # Transform operations
 from dbt_osmosis_cll.osmosis_propagation.transforms import (
-    apply_semantic_analysis,
     inherit_upstream_column_knowledge,
     inherit_upstream_column_knowledge_cll,
     inject_missing_columns,
@@ -256,17 +155,7 @@ from dbt_osmosis_cll.osmosis_propagation.transforms import (
     sort_columns_alphabetically,
     sort_columns_as_configured,
     sort_columns_as_in_database,
-    suggest_improved_documentation,
     synchronize_data_types,
-    synthesize_missing_documentation_with_openai,
-)
-
-# Voice learning and AI co-pilot
-from dbt_osmosis_cll.osmosis_propagation.commands.voice_learning import (
-    ProjectStyleProfile,
-    analyze_project_documentation_style,
-    extract_style_examples,
-    find_similar_documented_nodes,
 )
 
 # Note: process_node is imported in sql_operations.py where it's used
@@ -318,8 +207,6 @@ __all__ = list(
         "sort_columns_alphabetically",
         "sort_columns_as_configured",
         "synchronize_data_types",
-        "synthesize_missing_documentation_with_openai",
-        "suggest_improved_documentation",
         "config_to_namespace",
         "_reload_manifest",
         "_find_first",
@@ -353,6 +240,7 @@ __all__ = list(
         "SqlCompileRunner",
         "StagingGenerationResult",
         "TestPatternExtractor",
+        "TestSuggester",
         "TestSuggestion",
         "YamlRefactorContext",
         "YamlRefactorSettings",
@@ -368,7 +256,6 @@ __all__ = list(
         "AITestSuggester",
         "ModelTestAnalysis",
         "apply_restructure_plan",
-        "apply_semantic_analysis",
         "build_yaml_file_mapping",
         "commit_yamls",
         "compile_sql_code",
@@ -380,10 +267,7 @@ __all__ = list(
         "discover_project_dir",
         "draft_restructure_delta_plan",
         "execute_sql_code",
-        "generate_dbt_model_from_nl",
-        "generate_sql_from_nl",
-        "generate_staging_for_all_sources",
-        "generate_staging_for_source",
+        "generate_staging_from_source",
         "get_columns",
         "prefetch_columns",
         "get_current_yaml_path",
@@ -401,13 +285,6 @@ __all__ = list(
         "suggest_tests_for_project",
         "sync_node_to_yaml",
         "synchronize_data_types",
-        "synthesize_missing_documentation_with_openai",
-        "write_staging_files",
-        # Voice learning and AI co-pilot
-        "ProjectStyleProfile",
-        "analyze_project_documentation_style",
-        "extract_style_examples",
-        "find_similar_documented_nodes",
         # Schema diff functionality
         "ChangeCategory",
         "ChangeSeverity",
@@ -432,13 +309,3 @@ __all__ = list(
         "QuotedIdentifierRule",
     ])
 )
-
-# Add LLM exports if available
-if _llm_available:
-    __all__.extend([
-        "DocumentationSuggestion",
-        "generate_style_aware_column_doc",
-        "generate_style_aware_table_doc",
-        "suggest_documentation_improvements",
-    ])
-    __all__ = list(dict.fromkeys(__all__))

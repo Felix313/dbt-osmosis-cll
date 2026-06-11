@@ -11,11 +11,10 @@ Core transformation engine with config resolution, YAML handling, column inherit
 core/
 ├── schema/           # YAML parsing (ruamel.yaml), reading, writing, validation
 ├── formats/          # Empty (reserved for future YAML format variants)
-├── transforms.py     # TransformPipeline with >> operator, 1059 lines
-├── introspection.py  # SettingsResolver, PropertyAccessor, 1647 lines
-├── inheritance.py    # Column knowledge graph builder, 624 lines
-├── llm.py           # LLM integration for documentation, 1863 lines
-├── config.py        # Configuration management, 618 lines
+├── transforms.py     # TransformPipeline with >> operator
+├── introspection.py  # SettingsResolver, PropertyAccessor
+├── inheritance.py    # Column knowledge graph builder
+├── config.py        # Configuration management
 ├── exceptions.py    # OsmosisError hierarchy (base class)
 └── plugins.py       # Pluggy system (FuzzyCaseMatching, FuzzyPrefixMatching)
 ```
@@ -67,8 +66,8 @@ core/
 - **Thread-safe caches**: Global dicts with dedicated locks for concurrent YAML/DB access
 
 ## NOTES
-- **Large files**: llm.py (1863 lines), introspection.py (1647 lines), transforms.py (1059 lines)
+- **No LLM integration**: the former llm.py / OpenAI synthesis layer was removed; agent-assisted docs flow through `yaml doc-health --format json` + `yaml document`
 - **Caching**: _COLUMN_LIST_CACHE (column metadata), _YAML_BUFFER_CACHE (LRUCache, maxsize=256)
 - **Plugin hooks**: get_candidates() for column name matching (case variants, prefix removal)
-- **Exception hierarchy**: OsmosisError base with 12 subclasses (ConfigurationError, LLMError, etc.)
+- **Exception hierarchy**: OsmosisError base with subclasses (ConfigurationError, TransformError, etc.)
 - **dbt integration**: Loads via `dbt.cli.main.dbtRunner`, accesses manifest at target/manifest.json

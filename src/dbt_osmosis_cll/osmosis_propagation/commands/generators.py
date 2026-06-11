@@ -10,23 +10,42 @@ from __future__ import annotations
 import typing as t
 from dataclasses import dataclass
 from pathlib import Path
-from textwrap import dedent
 
 from dbt.contracts.graph.nodes import SourceDefinition
 
 import dbt_osmosis_cll.osmosis_propagation.logger as logger
 from dbt_osmosis_cll.osmosis_propagation.config import DbtProjectContext
-from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorSettings
-from dbt_osmosis_cll.osmosis_propagation.commands.staging import (
-    StagingGenerationResult,
-    generate_staging_for_source,
-)
 
 __all__ = [
-    "check_documentation",
     "DocumentationCheckResult",
+    "StagingGenerationResult",
+    "check_documentation",
     "generate_sources_from_database",
+    "generate_staging_from_source",
 ]
+
+
+@dataclass
+class StagingGenerationResult:
+    """Result of staging model generation.
+
+    Attributes:
+        source_name: Name of the source table
+        staging_name: Name of the generated staging model
+        sql_content: Generated SQL content
+        yaml_content: Generated YAML content
+        sql_path: Path where the SQL file will be written
+        yaml_path: Path where the YAML file will be written
+        error: Any error that occurred during generation
+    """
+
+    source_name: str
+    staging_name: str | None = None
+    sql_content: str | None = None
+    yaml_content: str | None = None
+    sql_path: Path | None = None
+    yaml_path: Path | None = None
+    error: Exception | None = None
 
 
 @dataclass
@@ -187,20 +206,16 @@ def generate_staging_from_source(
     context: DbtProjectContext,
     source_name: str,
     table_name: str,
-    use_ai: bool = False,
     staging_path: Path | None = None,
 ) -> StagingGenerationResult:
     """Generate a staging model from a source table.
 
-    This function can use either dbt-core-interface's StagingGenerator
-    (for deterministic generation) or dbt-osmosis's AI-based generation
-    (for intelligent staging with business logic).
+    Uses dbt-core-interface's StagingGenerator for deterministic generation.
 
     Args:
         context: The dbt project context
         source_name: Name of the source (e.g., "raw")
         table_name: Name of the table in the source
-        use_ai: If True, use AI-based generation; otherwise use interface generator
         staging_path: Directory where staging models should be written
                      (default: models/staging/)
 
@@ -216,9 +231,7 @@ def generate_staging_from_source(
         generate_staging_model_from_source,
     )
 
-    logger.info(
-        ":robot: Generating staging model for %s.%s (AI=%s)...", source_name, table_name, use_ai
-    )
+    logger.info("Generating staging model for %s.%s...", source_name, table_name)
 
     try:
         # Get source definition from manifest
@@ -226,100 +239,44 @@ def generate_staging_from_source(
         if source_def is None:
             raise ValueError(f"Source {source_name}.{table_name} not found in manifest")
 
-        if use_ai:
-            # Generate with AI
-            staging_spec = generate_staging_for_source(
-                project=context,
-                settings=YamlRefactorSettings(
-                    output_to_lower=False,
-                    output_to_upper=False,
-                ),
-                source_name=source_name,
-                table_name=table_name,
-                source_type="source",
-                temperature=0.3,
-            )
+        config = StagingModelConfig(
+            source_name=source_name,
+            table_name=table_name,
+            materialization="view",
+            naming_convention=NamingConvention.SNAKE_CASE,
+            generate_tests=False,  # Don't auto-generate tests
+            generate_documentation=True,
+        )
 
-            if staging_spec.error or not staging_spec.spec:
-                raise staging_spec.error or Exception("Failed to generate staging spec")
+        result_dict = generate_staging_model_from_source(
+            source=source_def,
+            manifest=context.manifest,
+            config=config,
+        )
 
-            spec = staging_spec.spec
-            sql_path, yaml_path = _resolve_staging_output_paths(
-                context, spec.staging_name, staging_path
-            )
+        staging_name_value = result_dict.get("staging_name")
+        staging_name = (
+            staging_name_value
+            if isinstance(staging_name_value, str) and staging_name_value
+            else f"stg_{table_name}"
+        )
+        sql_content = result_dict.get("sql")
+        yaml_content = result_dict.get("yaml")
+        sql_path, yaml_path = _resolve_staging_output_paths(context, staging_name, staging_path)
 
-            columns_yaml = "\n".join(
-                f"  - name: {col.new_name}\n    description: {col.description}"
-                for col in spec.columns
-            )
+        logger.info(
+            ":white_check_mark: Generated staging model %s (interface-based, no files written yet)",
+            staging_name,
+        )
 
-            yaml_content = dedent(f"""\
-            version: 2
-
-            models:
-              - name: {spec.staging_name}
-                description: {spec.description}
-                columns:
-            {columns_yaml}
-            """)
-
-            result = StagingGenerationResult(
-                source_name=f"{source_name}.{table_name}",
-                staging_name=spec.staging_name,
-                spec=spec,
-                sql_content=spec.to_sql(),
-                yaml_content=yaml_content,
-                sql_path=sql_path,
-                yaml_path=yaml_path,
-            )
-
-            logger.info(
-                ":white_check_mark: Generated staging model %s (AI-based, no files written yet)",
-                spec.staging_name,
-            )
-
-            return result
-        else:
-            # Use dbt-core-interface generator
-            config = StagingModelConfig(
-                source_name=source_name,
-                table_name=table_name,
-                materialization="view",
-                naming_convention=NamingConvention.SNAKE_CASE,
-                generate_tests=False,  # Don't auto-generate tests
-                generate_documentation=True,
-            )
-
-            result_dict = generate_staging_model_from_source(
-                source=source_def,
-                manifest=context.manifest,
-                config=config,
-            )
-
-            staging_name_value = result_dict.get("staging_name")
-            staging_name = (
-                staging_name_value
-                if isinstance(staging_name_value, str) and staging_name_value
-                else f"stg_{table_name}"
-            )
-            sql_content = result_dict.get("sql")
-            yaml_content = result_dict.get("yaml")
-            sql_path, yaml_path = _resolve_staging_output_paths(context, staging_name, staging_path)
-
-            logger.info(
-                ":white_check_mark: Generated staging model %s (interface-based, no files written yet)",
-                staging_name,
-            )
-
-            return StagingGenerationResult(
-                source_name=f"{source_name}.{table_name}",
-                staging_name=staging_name,
-                spec=None,
-                sql_content=sql_content if isinstance(sql_content, str) else "",
-                yaml_content=yaml_content if isinstance(yaml_content, str) else "",
-                sql_path=sql_path,
-                yaml_path=yaml_path,
-            )
+        return StagingGenerationResult(
+            source_name=f"{source_name}.{table_name}",
+            staging_name=staging_name,
+            sql_content=sql_content if isinstance(sql_content, str) else "",
+            yaml_content=yaml_content if isinstance(yaml_content, str) else "",
+            sql_path=sql_path,
+            yaml_path=yaml_path,
+        )
 
     except Exception as e:
         logger.error("Error generating staging model: %s", e)

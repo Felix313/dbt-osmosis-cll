@@ -7,9 +7,8 @@
 - schema YAML management (`yaml organize`, `yaml document`, `yaml refactor`)
 - column-level documentation inheritance across dbt lineage
 - ad-hoc SQL compile/run helpers
-- an optional Streamlit workbench for interactive dbt SQL development
 
-Other CLI families (`diff`, `lint`, `test`, `generate`, `nl`, `test-llm`) reuse the same project/bootstrap spine rather than defining separate runtimes.
+Other CLI families (`diff`, `lint`, `test`, `generate`) reuse the same project/bootstrap spine rather than defining separate runtimes. There is intentionally no in-package LLM client: developers run coding agents (e.g. Claude Code) in the repo for doc authoring, and the package supplies the deterministic surfaces those agents need (`yaml doc-health --format json`, `yaml document`).
 
 Primary entrypoint: `src/dbt_osmosis_cll/cli/main.py`
 Package entrypoint: `src/dbt_osmosis_cll/__main__.py`
@@ -29,9 +28,8 @@ Package entrypoint: `src/dbt_osmosis_cll/__main__.py`
 - `src/dbt_osmosis_cll/osmosis_propagation/introspection.py` is the configuration and property-resolution center. Prefer `SettingsResolver` and `PropertyAccessor` over ad hoc config lookups.
 - `src/dbt_osmosis_cll/osmosis_propagation/path_management.py` owns YAML routing and project-root safety checks.
 - `src/dbt_osmosis_cll/osmosis_propagation/inheritance.py` builds the column knowledge graph used for documentation inheritance.
-- `src/dbt_osmosis_cll/osmosis_propagation/commands/sql_operations.py` is the shared SQL compile/execute path used by CLI, workbench, and proxy code.
+- `src/dbt_osmosis_cll/osmosis_propagation/commands/sql_operations.py` is the shared SQL compile/execute path used by CLI and proxy code.
 - `src/dbt_osmosis_cll/osmosis_propagation/schema/parser.py`, `reader.py`, and `writer.py` split YAML concerns deliberately: filter dbt-osmosis-owned sections, cache reads, then restore preserved sections on atomic write.
-- `src/dbt_osmosis_cll/osmosis_propagation/commands/workbench/app.py` reuses the same dbt context but owns Streamlit state and dashboard composition.
 
 ### Public vs. internal surfaces
 - `src/dbt_osmosis_cll/osmosis_propagation/osmosis.py` is the compatibility/public facade. `src/dbt_osmosis_cll/osmosis_propagation/__init__.py` is no longer a re-export surface; internal code should import concrete submodules directly.
@@ -43,7 +41,6 @@ Package entrypoint: `src/dbt_osmosis_cll/__main__.py`
 - `src/dbt_osmosis_cll/osmosis_propagation/` — dbt context setup, config resolution, transforms, YAML I/O, inheritance, plugins
 - `src/dbt_osmosis_cll/osmosis_propagation/schema/` — round-trip YAML parsing, caching, writing, validation
 - `src/dbt_osmosis_cll/integration/` — SQL proxy and related helpers
-- `src/dbt_osmosis_cll/osmosis_propagation/commands/workbench/` — Streamlit workbench and dashboard components
 - `tests/` — pytest suite; `tests/core/` mirrors core modules, root tests cover higher-level YAML behavior
 - `demo_duckdb/` — canonical dbt fixture project used by tests and examples
 - `docs/` — Docusaurus docs site; actual content lives under `docs/docs/`
@@ -57,7 +54,7 @@ Package entrypoint: `src/dbt_osmosis_cll/__main__.py`
 | `pyproject.toml` | Source of truth for Python support, dependencies, console script, Ruff, pytest, pyright |
 | `Taskfile.yml` | Canonical developer workflow (`task format`, `task lint`, `task test`, `task dev`) |
 | `.pre-commit-config.yaml` / `.pre-commit-hooks.yaml` | Repo hygiene policy plus packaged `dbt-osmosis-cll yaml refactor -C` pre-commit hook contract |
-| `src/dbt_osmosis_cll/cli/main.py` | Complete CLI surface: `yaml`, `sql`, `workbench`, `generate`, `nl`, `test`, `test-llm`, `lint`, `diff` |
+| `src/dbt_osmosis_cll/cli/main.py` | Complete CLI surface: `yaml`, `sql`, `generate`, `test`, `lint`, `diff` |
 | `docs/package.json` / `docs/docusaurus.config.js` | Source of truth for docs-site tooling and Docusaurus 3 configuration |
 | `demo_duckdb/dbt_project.yml` / `demo_duckdb/dbt-osmosis-cll.yml` | Best concrete examples of routing rules, config precedence, and YAML formatting defaults |
 | `src/dbt_osmosis_cll/osmosis_propagation/config.py` | dbt project/bootstrap and manifest loading |
@@ -68,7 +65,6 @@ Package entrypoint: `src/dbt_osmosis_cll/__main__.py`
 | `src/dbt_osmosis_cll/osmosis_propagation/inheritance.py` | column lineage and inheritance logic |
 | `src/dbt_osmosis_cll/osmosis_propagation/commands/sql_operations.py` | Shared SQL compile/execute helpers used outside just the CLI |
 | `src/dbt_osmosis_cll/osmosis_propagation/path_management.py` | YAML routing, source YAML bootstrapping, root-path validation |
-| `src/dbt_osmosis_cll/osmosis_propagation/commands/workbench/app.py` | Streamlit workbench bootstrap and state initialization |
 | `tests/conftest.py` | expensive shared dbt fixture builders and `yaml_context` |
 | `tests/core/conftest.py` | ensures `demo_duckdb/target/manifest.json` exists before core tests |
 | `demo_duckdb/integration_tests.sh` | integration smoke sequence; resets fixture files with `git checkout`/`git clean` |
@@ -99,7 +95,7 @@ uv run pytest tests/test_yaml_inheritance.py
 # CLI examples
 uv run dbt-osmosis-cll yaml refactor --project-dir demo_duckdb --profiles-dir demo_duckdb
 uv run dbt-osmosis-cll sql compile "select 1"
-uv run dbt-osmosis-cll workbench --project-dir demo_duckdb --profiles-dir demo_duckdb
+uv run dbt-osmosis-cll yaml doc-health --format json --project-dir demo_duckdb --profiles-dir demo_duckdb
 ```
 
 Docs site commands use the separate Node toolchain in `docs/`:
@@ -119,7 +115,6 @@ npm --prefix docs run serve
 - Test runner: `pytest`
 - Type checking: pyright only covers `src/dbt_osmosis_cll/osmosis_propagation` and `src/dbt_osmosis_cll/cli`
 - Docs toolchain: Docusaurus 3 in `docs/`, Node `>=18`
-- Streamlit config exists in both `config.toml` and `.streamlit/config.toml`; check both before documenting runtime behavior
 
 Important nuance: `task` is not a pure verification command; it formats, lints, tests, and defers `task dev`.
 
@@ -152,15 +147,8 @@ Important nuance: `task` is not a pure verification command; it formats, lints, 
 - Do not bypass cache helpers or mutate cache state casually in production code.
 - Tests explicitly reset caches; keep new tests isolated when touching cache-sensitive code.
 
-### Workbench patterns
-- Workbench state belongs under `st.session_state.app`, not arbitrary top-level session keys.
-- Components inherit from `Dashboard.Item` and expose `initial_state()`.
-- Prefer `lazy()` for non-critical editor updates and `sync()`/explicit actions for compile-run flows.
-- Do not add raw Streamlit layout patterns when the existing dashboard system already covers the feature.
-
-### Optional AI paths
-- OpenAI-backed features are optional extras. Missing dependencies should fail clearly, not silently degrade.
-- The workbench AI assistant is still partially stubbed; do not assume it already performs real writeback or generation.
+### No in-package LLM client
+- The Streamlit workbench and the OpenAI/LLM synthesis layer (`commands/llm.py`, `--synthesize`, `nl`/`generate model`/`generate query`, voice learning) were removed deliberately. Do not reintroduce API-key-driven LLM calls; agent-assisted documentation flows through `yaml doc-health --format json` + authored origin descriptions + `yaml document`.
 
 ## Testing & QA
 
@@ -168,14 +156,12 @@ Important nuance: `task` is not a pure verification command; it formats, lints, 
 - `tests/core/` mirrors `src/dbt_osmosis_cll/osmosis_propagation/` for focused unit coverage.
 - Root-level `tests/test_yaml_*.py` files exercise higher-level YAML, manifest, and inheritance behavior against a real dbt fixture.
 - CLI tests use `click.testing.CliRunner` and mostly validate command surfaces and help text.
-- There is no dedicated `tests/workbench/` suite today; workbench coverage is limited to CLI/smoke-level checks.
 
 ### Fixture expectations
 - `demo_duckdb/` is the canonical integration fixture.
 - Many tests require `demo_duckdb/target/manifest.json`; generate it with `dbt parse` if missing.
 - `tests/conftest.py` builds temp DuckDB projects via `dbt seed`, `dbt run`, and `dbt docs generate`.
 - The earlier PostgreSQL fixture branch was removed because it was unexercised; test fixture support is DuckDB-only today.
-- Some LLM-related paths are also optional and may skip when extras such as `openai` or `azure.identity` are unavailable.
 
 ### QA cautions
 - dbt-version differences change manifest shape; avoid brittle assertions when adding tests.
@@ -188,7 +174,7 @@ Important nuance: `task` is not a pure verification command; it formats, lints, 
 - Root `README.md` is a lightweight landing page, not the full reference.
 - Canonical CLI/config docs live in `docs/docs/`, especially `docs/docs/reference/cli.md` and the YAML workflow/configuration guides.
 - `docs/README.md` is boilerplate and currently stale; it still references Docusaurus 2 even though the site runs on Docusaurus 3.
-- The README intentionally omits some newer CLI families; use the Docusaurus CLI reference for `generate`, `nl`, and `test-llm` details.
+- The README intentionally omits some newer CLI families; use the Docusaurus CLI reference for `generate` details.
 - `screenshots/` is illustrative only.
 - Generated/disposable artifacts include `docs/build/`, `demo_duckdb/target/`, `logs/`, and DuckDB database outputs.
 

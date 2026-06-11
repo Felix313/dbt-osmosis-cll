@@ -1,30 +1,26 @@
 # pyright: reportUnknownVariableType=false, reportPrivateImportUsage=false, reportUnknownMemberType=false
-"""AI-powered test suggestion and generation for dbt models.
+"""Pattern-based test suggestion for dbt models.
 
 This module provides functionality to:
 1. Analyze existing test patterns in a dbt project
 2. Learn team conventions from existing tests
-3. Suggest appropriate tests for models based on patterns
-4. Generate test YAML using AI
+3. Suggest appropriate tests for models based on those patterns
 """
 
 from __future__ import annotations
 
-import json
 import typing as t
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from textwrap import dedent
 
-from dbt_osmosis_cll.osmosis_propagation.exceptions import LLMResponseError
 from dbt_osmosis_cll.osmosis_propagation.introspection import PropertyAccessor
-from dbt_osmosis_cll.osmosis_propagation.commands.llm import get_llm_client
 from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext
 
 __all__ = [
-    "TestPatternExtractor",
-    "TestSuggestion",
     "AITestSuggester",
+    "TestPatternExtractor",
+    "TestSuggester",
+    "TestSuggestion",
     "suggest_tests_for_model",
     "suggest_tests_for_project",
 ]
@@ -339,21 +335,17 @@ class TestPatternExtractor:
         return suggestions
 
 
-class AITestSuggester:
-    """AI-powered test suggestion using LLM analysis.
+class TestSuggester:
+    """Pattern-based test suggestion using learned project conventions."""
 
-    This class uses an LLM to:
-    1. Analyze model SQL and structure
-    2. Consider existing project test patterns
-    3. Generate contextually appropriate test suggestions
-    """
+    __test__ = False
 
     def __init__(
         self,
         context: YamlRefactorContext,
         pattern_extractor: TestPatternExtractor | None = None,
     ) -> None:
-        """Initialize the AI test suggester.
+        """Initialize the test suggester.
 
         Args:
             context: The YamlRefactorContext containing project information
@@ -363,18 +355,11 @@ class AITestSuggester:
         self.pattern_extractor = pattern_extractor
         self.accessor = PropertyAccessor(context=context)
 
-    def suggest_tests_for_node(
-        self,
-        node: t.Any,
-        use_ai: bool = True,
-        temperature: float = 0.3,
-    ) -> ModelTestAnalysis:
+    def suggest_tests_for_node(self, node: t.Any) -> ModelTestAnalysis:
         """Generate test suggestions for a single node.
 
         Args:
             node: The dbt model node
-            use_ai: Whether to use AI for suggestions (falls back to pattern-based)
-            temperature: LLM temperature for generation
 
         Returns:
             ModelTestAnalysis with existing and suggested tests
@@ -389,14 +374,7 @@ class AITestSuggester:
             existing_tests=existing_tests,
         )
 
-        if use_ai:
-            # Use AI for smart suggestions
-            suggestions = self._ai_suggest_tests(node, temperature)
-        else:
-            # Use pattern-based suggestions
-            suggestions = self._pattern_suggest_tests(node)
-
-        analysis.suggested_tests = suggestions
+        analysis.suggested_tests = self._pattern_suggest_tests(node)
         return analysis
 
     def _pattern_suggest_tests(self, node: t.Any) -> dict[str, list[TestSuggestion]]:
@@ -420,171 +398,13 @@ class AITestSuggester:
 
         return dict(suggestions)
 
-    def _ai_suggest_tests(
-        self, node: t.Any, temperature: float = 0.3
-    ) -> dict[str, list[TestSuggestion]]:
-        """Generate test suggestions using AI."""
-        client, model_engine = get_llm_client()
-
-        # Build the prompt
-        prompt = self._create_test_suggestion_prompt(node)
-
-        try:
-            if hasattr(client, "chat"):
-                response = client.chat.completions.create(
-                    model=model_engine,
-                    messages=prompt,
-                    temperature=temperature,
-                )
-            else:
-                response = client.ChatCompletion.create(
-                    engine=model_engine,
-                    messages=prompt,
-                    temperature=temperature,
-                )
-
-            content = response.choices[0].message.content
-            if not content:
-                raise LLMResponseError("LLM returned empty response")
-
-            return self._parse_ai_response(content)
-
-        except Exception:
-            # Fallback to pattern-based suggestions
-            return self._pattern_suggest_tests(node)
-
-    def _create_test_suggestion_prompt(self, node: t.Any) -> list[dict[str, str]]:
-        """Create the LLM prompt for test suggestions."""
-        model_name = getattr(node, "name", "unknown")
-        raw_sql = getattr(node, "raw_sql", getattr(node, "compiled_sql", ""))
-        description = self.accessor.get_description(node) or "No description"
-        existing_tests = _get_existing_tests_for_node(self.context.project.manifest, node)
-
-        # Gather column info
-        column_info = []
-        for col_name, col in _iter_node_columns(node):
-            col_desc = self.accessor.get_description(node, column_name=col_name) or ""
-            col_type = getattr(col, "data_type", "unknown")
-
-            column_info.append({
-                "name": col_name,
-                "type": col_type,
-                "description": col_desc,
-                "existing_tests": [
-                    test.to_yaml_dict() for test in existing_tests.get(col_name, [])
-                ],
-            })
-
-        # Build context from learned patterns
-        patterns_context = ""
-        if self.pattern_extractor:
-            patterns = self.pattern_extractor.learned_patterns
-            patterns_context = f"""
-Project Test Patterns:
-- ID columns typically use: {", ".join(patterns.get("id_column_tests", ["unique, not_null"]))}
-- Status columns typically use: {", ".join(patterns.get("status_column_tests", ["accepted_values"]))}
-- Amount columns typically use: {", ".join(patterns.get("amount_column_tests", ["not_null"]))}
-"""
-
-        system_prompt = dedent("""
-            You are a dbt testing expert. Your job is to suggest appropriate tests for dbt models.
-
-            Common dbt test types:
-            - unique: ensures all values in a column are unique
-            - not_null: ensures a column has no null values
-            - relationships: ensures referential integrity (e.g., foreign key to another table)
-            - accepted_values: ensures values are from a specific set
-            - dbt_utils expressions: various utility tests from dbt_utils package
-
-            Guidelines for test suggestions:
-            1. *_id columns: suggest 'unique' and 'not_null', optionally 'relationships'
-            2. Foreign key columns (*_id referencing other tables): suggest 'relationships'
-            3. Status/type columns with known values: suggest 'accepted_values'
-            4. Numeric/amount columns: suggest 'not_null'
-            5. Date columns: suggest 'not_null' if required
-            6. Don't suggest tests that already exist
-
-            Return ONLY a valid JSON object with this structure:
-            {
-              "column_name": [
-                {"test_type": "unique", "reason": "explanation", "config": {}},
-                {"test_type": "not_null", "reason": "explanation", "config": {}}
-              ]
-            }
-
-            For relationship tests, include config:
-            {"test_type": "relationships", "reason": "...", "config": {"to": "ref('other_model')", "field": "id"}}
-
-            For accepted_values tests, include config:
-            {"test_type": "accepted_values", "reason": "...", "config": {"values": ["a", "b", "c"]}}
-        """)
-
-        user_prompt = dedent(f"""
-            Model: {model_name}
-            Description: {description}
-
-            SQL:
-            {raw_sql[:2000]}...
-
-            Columns:
-            {json.dumps(column_info, indent=2)}
-
-            {patterns_context}
-
-            Suggest appropriate tests for each column. Return only valid JSON.
-        """)
-
-        return [
-            {"role": "system", "content": system_prompt.strip()},
-            {"role": "user", "content": user_prompt.strip()},
-        ]
-
-    def _parse_ai_response(self, content: str) -> dict[str, list[TestSuggestion]]:
-        """Parse the AI response into TestSuggestion objects."""
-        # Remove markdown code blocks if present
-        content = content.strip()
-        if content.startswith("```"):
-            content = content[content.find("{") : content.rfind("}") + 1]
-
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            # Fallback to empty suggestions
-            return {}
-
-        suggestions: dict[str, list[TestSuggestion]] = defaultdict(list)
-
-        for col_name, test_list in data.items():
-            for test_data in test_list:
-                if isinstance(test_data, str):
-                    # Simple test name
-                    suggestion = TestSuggestion(
-                        test_type=test_data,
-                        column_name=col_name,
-                        reason="AI suggested",
-                    )
-                elif isinstance(test_data, dict):
-                    # Full test data
-                    suggestion = TestSuggestion(
-                        test_type=test_data.get("test_type", ""),
-                        column_name=col_name,
-                        reason=test_data.get("reason", "AI suggested"),
-                        config=test_data.get("config", {}),
-                        confidence=0.8,
-                    )
-                else:
-                    continue
-
-                suggestions[col_name].append(suggestion)
-
-        return dict(suggestions)
+# Backwards-compatible alias from when this class had an LLM-backed mode.
+AITestSuggester = TestSuggester
 
 
 def suggest_tests_for_model(
     context: YamlRefactorContext,
     node: t.Any,
-    use_ai: bool = True,
-    temperature: float = 0.3,
 ) -> ModelTestAnalysis:
     """Suggest tests for a single model.
 
@@ -594,8 +414,6 @@ def suggest_tests_for_model(
     Args:
         context: The YamlRefactorContext containing project information
         node: The dbt model node to analyze
-        use_ai: Whether to use AI for suggestions
-        temperature: LLM temperature for generation
 
     Returns:
         ModelTestAnalysis with existing and suggested tests
@@ -603,14 +421,12 @@ def suggest_tests_for_model(
     extractor = TestPatternExtractor(context)
     extractor.extract_patterns()
 
-    suggester = AITestSuggester(context, extractor)
-    return suggester.suggest_tests_for_node(node, use_ai=use_ai, temperature=temperature)
+    suggester = TestSuggester(context, extractor)
+    return suggester.suggest_tests_for_node(node)
 
 
 def suggest_tests_for_project(
     context: YamlRefactorContext,
-    use_ai: bool = True,
-    temperature: float = 0.3,
 ) -> dict[str, ModelTestAnalysis]:
     """Suggest tests for all models in a project.
 
@@ -619,8 +435,6 @@ def suggest_tests_for_project(
 
     Args:
         context: The YamlRefactorContext containing project information
-        use_ai: Whether to use AI for suggestions
-        temperature: LLM temperature for generation
 
     Returns:
         Dictionary mapping model names to ModelTestAnalysis objects
@@ -629,7 +443,7 @@ def suggest_tests_for_project(
     extractor = TestPatternExtractor(context)
     extractor.extract_patterns()
 
-    suggester = AITestSuggester(context, extractor)
+    suggester = TestSuggester(context, extractor)
 
     from dbt.artifacts.resources.types import NodeType
 
@@ -640,7 +454,7 @@ def suggest_tests_for_project(
         if getattr(node, "resource_type", None) != NodeType.Model:
             continue
         model_name = getattr(node, "name", "unknown")
-        analysis = suggester.suggest_tests_for_node(node, use_ai=use_ai, temperature=temperature)
+        analysis = suggester.suggest_tests_for_node(node)
         results[model_name] = analysis
 
     return results

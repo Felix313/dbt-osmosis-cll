@@ -1,7 +1,7 @@
 """Behavior-focused tests for the legacy name-match column inheritance.
 
 These tests exercise ``inherit_upstream_column_knowledge`` (the original
-name-match transform, still used as a pre-pass before LLM synthesis). The
+name-match transform). The
 CLL-driven inheritance that the pipeline uses by default is covered separately
 in ``test_inheritance_cll.py``.
 

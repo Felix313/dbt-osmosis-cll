@@ -12,5 +12,5 @@ How-to guides are **goal-oriented**: they assume you know the basics and want to
 - [Select a subset of nodes to process](../tutorial-yaml/selection)
 - [Manage source YAML files](./manage-sources)
 - [Review changes safely before applying](./review-changes)
-- [Generate missing documentation with `--synthesize`](../tutorial-yaml/synthesize)
+- [Document with coding agents (no built-in LLM)](../tutorial-yaml/agents)
 - [Migrate to dbt-osmosis 1.x](../migrating)

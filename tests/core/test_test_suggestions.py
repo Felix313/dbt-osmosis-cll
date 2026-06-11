@@ -1,17 +1,15 @@
 # pyright: reportPrivateImportUsage=false, reportUnknownVariableType=false, reportUnknownMemberType=false
 
-"""Tests for AI-powered test suggestion and generation.
+"""Tests for pattern-based test suggestion.
 
 This module contains tests for the test_suggestions module, which provides:
 - TestPatternExtractor: Extracts and learns test patterns from dbt projects
-- AITestSuggester: AI-powered test suggestion using LLM analysis
+- TestSuggester: Pattern-based test suggestion using learned project conventions
 - Convenience functions for model and project-wide test suggestions
 """
 
 from __future__ import annotations
 
-import importlib
-import json
 from collections import Counter
 from unittest import mock
 
@@ -21,6 +19,7 @@ from dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions import (
     AITestSuggester,
     ModelTestAnalysis,
     TestPatternExtractor,
+    TestSuggester,
     TestSuggestion,
     suggest_tests_for_model,
     suggest_tests_for_project,
@@ -290,31 +289,35 @@ class TestTestPatternExtractor:
         assert len(suggestions) == 0
 
 
-class TestAITestSuggester:
-    """Tests for the AITestSuggester class."""
+class TestTestSuggester:
+    """Tests for the TestSuggester class."""
 
     def test_suggester_initialization(self, mock_context):
-        """Test initializing the AI test suggester."""
-        suggester = AITestSuggester(mock_context)
+        """Test initializing the test suggester."""
+        suggester = TestSuggester(mock_context)
 
         assert suggester.context == mock_context
         assert suggester.pattern_extractor is None
         assert suggester.accessor is not None
 
+    def test_backwards_compatible_alias(self):
+        """The old AITestSuggester name still resolves to TestSuggester."""
+        assert AITestSuggester is TestSuggester
+
     def test_suggester_with_pattern_extractor(self, mock_context):
         """Test initializing suggester with pattern extractor."""
         extractor = TestPatternExtractor(mock_context)
-        suggester = AITestSuggester(mock_context, extractor)
+        suggester = TestSuggester(mock_context, extractor)
 
         assert suggester.pattern_extractor == extractor
 
-    def test_suggest_tests_for_node_without_ai(self, mock_context, sample_node):
-        """Test generating suggestions without AI (pattern-based only)."""
+    def test_suggest_tests_for_node(self, mock_context, sample_node):
+        """Test generating pattern-based suggestions."""
         extractor = TestPatternExtractor(mock_context)
         extractor.extract_patterns()
 
-        suggester = AITestSuggester(mock_context, extractor)
-        analysis = suggester.suggest_tests_for_node(sample_node, use_ai=False)
+        suggester = TestSuggester(mock_context, extractor)
+        analysis = suggester.suggest_tests_for_node(sample_node)
 
         assert isinstance(analysis, ModelTestAnalysis)
         assert analysis.model_name == sample_node.name
@@ -327,9 +330,7 @@ class TestAITestSuggester:
         extractor = TestPatternExtractor(mock_context)
         extractor.extract_patterns()
 
-        analysis = AITestSuggester(mock_context, extractor).suggest_tests_for_node(
-            node, use_ai=False
-        )
+        analysis = TestSuggester(mock_context, extractor).suggest_tests_for_node(node)
 
         assert "customer_id" in analysis.columns
         assert "" not in analysis.columns
@@ -343,125 +344,10 @@ class TestAITestSuggester:
         extractor = TestPatternExtractor(mock_context)
         extractor.extract_patterns()
 
-        suggester = AITestSuggester(mock_context, extractor)
+        suggester = TestSuggester(mock_context, extractor)
         suggestions = suggester._pattern_suggest_tests(sample_node)
 
         assert isinstance(suggestions, dict)
-
-    def test_create_test_suggestion_prompt(self, mock_context, sample_node):
-        """Test creating LLM prompt for test suggestions."""
-        suggester = AITestSuggester(mock_context)
-        prompt = suggester._create_test_suggestion_prompt(sample_node)
-
-        assert isinstance(prompt, list)
-        assert len(prompt) == 2
-        assert prompt[0]["role"] == "system"
-        assert prompt[1]["role"] == "user"
-        assert sample_node.name in prompt[1]["content"]
-
-    def test_parse_ai_response_simple(self, mock_context, sample_node):
-        """Test parsing AI response with simple test names."""
-        suggester = AITestSuggester(mock_context)
-
-        response = json.dumps({
-            "user_id": ["unique", "not_null"],
-            "status": ["accepted_values"],
-        })
-
-        suggestions = suggester._parse_ai_response(response)
-
-        assert "user_id" in suggestions
-        assert "status" in suggestions
-        assert len(suggestions["user_id"]) == 2
-        assert len(suggestions["status"]) == 1
-
-    def test_parse_ai_response_with_config(self, mock_context):
-        """Test parsing AI response with test configurations."""
-        suggester = AITestSuggester(mock_context)
-
-        response = json.dumps({
-            "customer_id": [
-                {
-                    "test_type": "relationships",
-                    "reason": "Foreign key to customers",
-                    "config": {"to": "ref('customers')", "field": "id"},
-                }
-            ],
-        })
-
-        suggestions = suggester._parse_ai_response(response)
-
-        assert "customer_id" in suggestions
-        assert len(suggestions["customer_id"]) == 1
-        assert suggestions["customer_id"][0].test_type == "relationships"
-        assert suggestions["customer_id"][0].config == {"to": "ref('customers')", "field": "id"}
-
-    def test_parse_ai_response_markdown_wrapped(self, mock_context):
-        """Test parsing AI response wrapped in markdown code blocks."""
-        suggester = AITestSuggester(mock_context)
-
-        response = """```json
-        {
-            "user_id": ["unique", "not_null"]
-        }
-        ```"""
-
-        suggestions = suggester._parse_ai_response(response)
-
-        assert "user_id" in suggestions
-        assert len(suggestions["user_id"]) == 2
-
-    def test_parse_ai_response_invalid_json(self, mock_context):
-        """Test parsing invalid AI response."""
-        suggester = AITestSuggester(mock_context)
-
-        suggestions = suggester._parse_ai_response("not valid json")
-
-        assert suggestions == {}
-
-    def test_ai_suggest_with_mock_client(self, mock_context, sample_node):
-        """Test AI suggestion with mocked LLM client."""
-        extractor = TestPatternExtractor(mock_context)
-        extractor.extract_patterns()
-
-        suggester = AITestSuggester(mock_context, extractor)
-
-        # Mock the LLM response
-        mock_response = mock.MagicMock()
-        mock_response.choices = [mock.MagicMock()]
-        mock_response.choices[0].message.content = json.dumps({
-            "id": ["unique"],
-        })
-
-        mock_client = mock.MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-
-        with mock.patch(
-            "dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions.get_llm_client", return_value=(mock_client, "gpt-4")
-        ):
-            suggestions = suggester._ai_suggest_tests(sample_node)
-
-            # Should fall back to pattern-based if AI fails
-            assert isinstance(suggestions, dict)
-
-    def test_ai_suggest_fallback_to_pattern(self, mock_context, sample_node):
-        """Test that AI suggestion falls back to pattern-based on error."""
-        extractor = TestPatternExtractor(mock_context)
-        extractor.extract_patterns()
-
-        suggester = AITestSuggester(mock_context, extractor)
-
-        # Mock get_llm_client to return a client that raises an exception
-        mock_client = mock.MagicMock()
-        mock_client.chat.completions.create.side_effect = Exception("LLM error")
-
-        with mock.patch(
-            "dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions.get_llm_client", return_value=(mock_client, "gpt-4")
-        ):
-            suggestions = suggester._ai_suggest_tests(sample_node)
-
-            # Should fall back to pattern-based
-            assert isinstance(suggestions, dict)
 
 
 class TestConvenienceFunctions:
@@ -469,14 +355,14 @@ class TestConvenienceFunctions:
 
     def test_suggest_tests_for_model(self, mock_context, sample_node):
         """Test suggest_tests_for_model convenience function."""
-        analysis = suggest_tests_for_model(mock_context, sample_node, use_ai=False)
+        analysis = suggest_tests_for_model(mock_context, sample_node)
 
         assert isinstance(analysis, ModelTestAnalysis)
         assert analysis.model_name == sample_node.name
 
     def test_suggest_tests_for_project(self, mock_context):
         """Test suggest_tests_for_project convenience function."""
-        results = suggest_tests_for_project(mock_context, use_ai=False)
+        results = suggest_tests_for_project(mock_context)
 
         assert isinstance(results, dict)
         # Should have at least one model
@@ -490,7 +376,7 @@ class TestConvenienceFunctions:
         """Test that pattern-only suggestions work for real manifest nodes with no tests."""
         node = mock_context.project.manifest.nodes["model.jaffle_shop_duckdb.orders_prefix"]
 
-        analysis = suggest_tests_for_model(mock_context, node, use_ai=False)
+        analysis = suggest_tests_for_model(mock_context, node)
 
         assert {test.test_type for test in analysis.suggested_tests["o_order_id"]} >= {
             "not_null",
@@ -504,34 +390,21 @@ class TestConvenienceFunctions:
 class TestOsmosisFacade:
     """Tests for the public core.osmosis facade."""
 
-    def test_osmosis_exports_test_suggestions_without_openai(self):
-        """Test that pattern-based test suggestions stay available without openai installed."""
+    def test_osmosis_exports_test_suggestions(self):
+        """Test that pattern-based test suggestions are exported by the facade."""
         import dbt_osmosis_cll.osmosis_propagation.osmosis as osmosis_module
         import dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions as test_suggestions_module
 
-        original_find_spec = importlib.util.find_spec
-
-        def fake_find_spec(name, package=None):
-            if name == "openai":
-                return None
-            return original_find_spec(name, package)
-
-        try:
-            with mock.patch("importlib.util.find_spec", side_effect=fake_find_spec):
-                reloaded = importlib.reload(osmosis_module)
-
-                assert reloaded.TestPatternExtractor is test_suggestions_module.TestPatternExtractor
-                assert reloaded.TestSuggestion is test_suggestions_module.TestSuggestion
-                assert (
-                    reloaded.suggest_tests_for_model
-                    is test_suggestions_module.suggest_tests_for_model
-                )
-                assert (
-                    reloaded.suggest_tests_for_project
-                    is test_suggestions_module.suggest_tests_for_project
-                )
-        finally:
-            importlib.reload(osmosis_module)
+        assert osmosis_module.TestPatternExtractor is test_suggestions_module.TestPatternExtractor
+        assert osmosis_module.TestSuggestion is test_suggestions_module.TestSuggestion
+        assert (
+            osmosis_module.suggest_tests_for_model
+            is test_suggestions_module.suggest_tests_for_model
+        )
+        assert (
+            osmosis_module.suggest_tests_for_project
+            is test_suggestions_module.suggest_tests_for_project
+        )
 
 
 class TestEdgeCases:
@@ -546,9 +419,9 @@ class TestEdgeCases:
         mock_node.raw_sql = "select 1 as id"
 
         extractor = TestPatternExtractor(mock_context)
-        suggester = AITestSuggester(mock_context, extractor)
+        suggester = TestSuggester(mock_context, extractor)
 
-        analysis = suggester.suggest_tests_for_node(mock_node, use_ai=False)
+        analysis = suggester.suggest_tests_for_node(mock_node)
 
         assert analysis.model_name == "empty_model"
         assert analysis.columns == []

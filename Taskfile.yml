@@ -98,7 +98,7 @@ tasks:
         export UV_PYTHON=3.13
         SMOKE_ENV=$(mktemp -d)/dbt-osmosis-smoke
         uv venv "$SMOKE_ENV"
-        uv pip install --python "$SMOKE_ENV/bin/python" "dbt-core~=1.11.0" "dbt-duckdb~=1.10.1" basedpyright pytest pytest-cov hypothesis openai .
+        uv pip install --python "$SMOKE_ENV/bin/python" "dbt-core~=1.11.0" "dbt-duckdb~=1.10.1" basedpyright pytest pytest-cov hypothesis .
         export VIRTUAL_ENV="$SMOKE_ENV"
         export PATH="$SMOKE_ENV/bin:$PATH"
         basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true

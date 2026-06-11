@@ -190,41 +190,6 @@ class TestGenerateSourcesFromDatabase:
 class TestGenerateStagingFromSource:
     """Tests for the generate_staging_from_source function."""
 
-    def test_generate_staging_ai_enabled(self, yaml_context):
-        """Test generating staging model with AI."""
-        # Mock the source definition
-        mock_source = mock.MagicMock()
-        mock_source.source_name = "raw"
-        mock_source.name = "users"
-
-        # Mock _get_source_definition
-        with mock.patch(
-            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition", return_value=mock_source
-        ):
-            # Mock generate_staging_for_source
-            mock_spec = mock.MagicMock()
-            mock_spec.staging_name = "stg_users"
-            mock_spec.description = "Staging users model"
-            mock_spec.columns = []
-            mock_spec.error = None
-
-            mock_result = mock.MagicMock()
-            mock_result.spec = mock_spec
-            mock_result.error = None
-
-            with mock.patch(
-                "dbt_osmosis_cll.osmosis_propagation.commands.generators.generate_staging_for_source", return_value=mock_result
-            ):
-                result = generate_staging_from_source(
-                    context=yaml_context.project,
-                    source_name="raw",
-                    table_name="users",
-                    use_ai=True,
-                )
-
-                assert result.staging_name == "stg_users"
-                assert result.spec == mock_spec
-
     def test_generate_staging_interface_based(self, yaml_context):
         """Test interface-based staging generation returns content without writing files."""
         # Mock the source definition
@@ -252,7 +217,6 @@ class TestGenerateStagingFromSource:
                     context=yaml_context.project,
                     source_name="raw",
                     table_name="orders",
-                    use_ai=False,
                     staging_path=custom_path,
                 )
 
@@ -298,35 +262,10 @@ class TestGenerateStagingFromSource:
                     context=yaml_context.project,
                     source_name="raw",
                     table_name="users",
-                    use_ai=False,
                     staging_path=custom_path,
                 )
 
                 assert result.yaml_path.parent == custom_path
-
-    def test_generate_staging_ai_error_fallback(self, yaml_context):
-        """Test that AI generation errors are propagated."""
-        mock_source = mock.MagicMock()
-        mock_source.source_name = "raw"
-        mock_source.name = "users"
-
-        with mock.patch(
-            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition", return_value=mock_source
-        ):
-            mock_result = mock.MagicMock()
-            mock_result.error = Exception("AI generation failed")
-            mock_result.spec = None
-
-            with mock.patch(
-                "dbt_osmosis_cll.osmosis_propagation.commands.generators.generate_staging_for_source", return_value=mock_result
-            ):
-                with pytest.raises(Exception, match="AI generation failed"):
-                    generate_staging_from_source(
-                        context=yaml_context.project,
-                        source_name="raw",
-                        table_name="users",
-                        use_ai=True,
-                    )
 
 
 class TestCheckDocumentation:
@@ -571,7 +510,6 @@ class TestEdgeCases:
                     context=yaml_context.project,
                     source_name="raw",
                     table_name="empty_table",
-                    use_ai=False,
                 )
 
                 assert result.staging_name == "stg_empty_table"

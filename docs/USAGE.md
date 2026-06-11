@@ -3,18 +3,16 @@
 ![PyPI](https://img.shields.io/pypi/v/dbt-osmosis)
 [![Downloads](https://static.pepy.tech/badge/dbt-osmosis)](https://pepy.tech/project/dbt-osmosis)
 ![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://dbt-osmosis-playground.streamlit.app/)
 
 `dbt-osmosis` is a Python CLI and package for dbt development workflows.
 
-It centers on four primary surfaces:
+It centers on three primary surfaces:
 
 - schema YAML management (`yaml organize`, `yaml document`, `yaml refactor`)
 - column-level documentation inheritance across dbt lineage
 - ad-hoc SQL compile/run helpers
-- an optional Streamlit workbench for interactive dbt SQL development
 
-The repository also ships additional command families for generation, natural-language helpers, schema diffing, SQL linting, and test suggestions.
+The repository also ships additional command families for generation, schema diffing, SQL linting, and test suggestions.
 
 The Docusaurus site is the canonical reference for the current CLI, configuration model, support matrix, and workflow guides:
 
@@ -34,11 +32,6 @@ The Docusaurus site is the canonical reference for the current CLI, configuratio
 - a dbt adapter version compatible with the dbt Core runtime in that environment
 
 Repository-managed DuckDB fixture coverage is explicitly exercised through the published DuckDB-backed matrix in CI today (1.8-1.10) plus a latest-core compatibility job that runs basedpyright, `dbt parse`, and the full pytest suite under `dbt-core` 1.11 with the latest published `dbt-duckdb` adapter (currently 1.10.1). Package metadata and install paths are not capped at dbt Core 1.10.
-
-Optional extras:
-
-- `dbt-osmosis[workbench]` for the Streamlit workbench and related UI dependencies
-- `dbt-osmosis[openai]` for LLM-assisted synthesis and natural-language generation features
 
 ## Install
 
@@ -90,11 +83,8 @@ Top-level commands currently exposed by `dbt-osmosis --help`:
 
 - `yaml` — manage schema YAML files and documentation inheritance
 - `sql` — compile or run ad-hoc SQL in dbt context
-- `workbench` — launch the Streamlit workbench
-- `generate` — generate sources, staging models, models, and SQL
-- `nl` — natural-language query/model helpers
+- `generate` — generate sources and staging models
 - `test` — suggest dbt tests
-- `test-llm` — validate LLM client configuration
 - `diff` — report schema drift between YAML and the database
 - `lint` — lint SQL strings, models, or a whole project
 
@@ -125,18 +115,23 @@ npm --prefix docs run build
 npm --prefix docs run serve
 ```
 
-## Workbench
+## Using with coding agents (Claude Code, etc.)
 
-The optional workbench is a Streamlit app for interactive dbt SQL development.
+dbt-osmosis-cll deliberately ships no LLM client. When AI-generated documentation is wanted,
+run a coding agent directly in the repo and let it drive the deterministic surfaces:
 
-Install the extra and launch it with:
+1. Find the documentation gaps: `dbt-osmosis-cll yaml doc-health --format json` reports,
+   per model, which columns lack real authored descriptions (as opposed to inherited or
+   annotation-only ones).
+2. Author descriptions at the **origin** of each column (the model or source where the
+   column first appears, or the central glossary configured via `column-docs-path`). The
+   agent has full repo context — SQL, upstream YAML, business docs — which produces far
+   better descriptions than one-shot prompt synthesis ever did.
+3. Propagate: `dbt-osmosis-cll yaml document` inherits the new origin descriptions across
+   the lineage via CLL, records provenance (`desc-source`), and rewrites annotations.
+4. Gate in CI with `yaml doc-health --min-coverage <pct>`.
 
-```bash
-pip install "dbt-osmosis[workbench]"
-dbt-osmosis workbench
-```
-
-The hosted demo is linked from the badge at the top of this README.
+This keeps generated text out of non-origin layers, so provenance tracking stays truthful.
 
 ## Pre-commit hook
 
