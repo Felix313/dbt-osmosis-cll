@@ -2,10 +2,11 @@
 
 ## Issue Tracking
 
-Open work is tracked in `docs/plans/` (currently `2026-06-10-phase1-cll-roadmap.md`).
-Record follow-ups there — update the item's Status column or add a dated note.
-(The repo previously referenced the `bd`/beads tracker, but it was never installed
-or used here; do not attempt `bd` commands.)
+This project uses **bd (beads)** for issue tracking (initialized 2026-06-11; installed
+via `npm install -g @beads/bd` — NOT the unrelated PyPI "beads" package). See the
+managed Beads block at the bottom of this file for the quick reference, and run
+`bd prime` for full workflow context. `docs/plans/` holds longer-form design notes
+and the executed Phase-2 roadmap; new follow-ups go into beads.
 
 ## Repository Overview
 
@@ -583,17 +584,20 @@ repos:
 
 **MANDATORY WORKFLOW:**
 
-1. **Record remaining work** - Note follow-ups in the active plan under `docs/plans/`
+1. **Record remaining work** - File beads (`bd create`) for anything needing follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **PUSH TO REMOTE** - This is MANDATORY:
+3. **Update issue status** - `bd close` finished work, update in-progress beads
+4. **PUSH TO REMOTE** - This is MANDATORY (repo policy; overrides the conservative
+   default in the managed Beads block below). Beads syncs itself via the installed
+   git hooks (`refs/dolt/data` on push) — there is no `bd sync` command in bd 1.x:
    ```bash
    git pull --rebase
    git push
    git status  # MUST show "up to date with origin"
    ```
-4. **Clean up** - Clear stashes, prune remote branches
-5. **Verify** - All changes committed AND pushed
-6. **Hand off** - Provide context for next session
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
 - Work is NOT complete until `git push` succeeds
