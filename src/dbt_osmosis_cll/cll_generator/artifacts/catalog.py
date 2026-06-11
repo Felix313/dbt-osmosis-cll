@@ -16,6 +16,10 @@ class CatalogReader:
             self.catalog = json.load(f)
 
     def get_models_nodes(self) -> Dict[str, Model]:
+        """Return all catalog nodes keyed by ``unique_id`` (collision-safe).
+
+        ``ModelRegistry`` resolves SQL relation names through its alias map.
+        """
         models = {}
         nodes = self.catalog.get("nodes", {})
         sources = self.catalog.get("sources", {})
@@ -29,6 +33,7 @@ class CatalogReader:
                 "database": model_data.get("database") or "main",
                 "columns": {},
                 "resource_type": resource_type,
+                "unique_id": node_id,
             }
 
             for col_name, col_data in model_data.get("columns", {}).items():
@@ -42,7 +47,7 @@ class CatalogReader:
                 }
 
             model = Model(**processed_data)
-            models[model.name] = model
+            models[node_id] = model
 
         for source_id, source_data in sources.items():
             metadata = source_data.get("metadata", {})
@@ -65,6 +70,7 @@ class CatalogReader:
                 "resource_type": "source",
                 "source_identifier": normalized_source_identifier,
                 "source_name": normalized_source_name,
+                "unique_id": source_id,
             }
 
             for col_name, col_data in source_data.get("columns", {}).items():
@@ -78,9 +84,9 @@ class CatalogReader:
                 }
 
             model = Model(**processed_data)
-            key = normalized_source_identifier or model.name
-            models[key] = model
+            lookup_name = normalized_source_identifier or model.name
+            models[source_id] = model
             for col in model.columns.values():
-                col.model_name = key
+                col.model_name = lookup_name
 
         return models

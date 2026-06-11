@@ -92,6 +92,13 @@ class ColumnLineageResult:
     False (pure unknowns from parse failures also land here, so treat as a soft signal).
     """
 
+    unique_id: Optional[str] = None
+    """Manifest unique_id of *model* (e.g. ``model.my_pkg.stg_orders``), when known.
+
+    Lets consumers disambiguate results when two manifest entries share a short
+    name (cross-package models, model vs source identifier). Additive — older
+    cached results deserialize with ``None``."""
+
     union_branches: List[Tuple[str, str]] = field(default_factory=list)
     """When ``is_union`` is True: one ``(progenitor_model, progenitor_column)`` tuple per
     UNION / INTERSECT / EXCEPT branch in declaration order. Empty when the column is
@@ -206,19 +213,23 @@ def get_column_lineage(
         catalog_reader_override=_catalog_reader_override,
     )
 
-    all_nodes = registry.get_models()
+    all_nodes = registry.get_models_by_id()
 
     model_filter = {m.lower() for m in models} if models else None
     results: List[ColumnLineageResult] = []
 
     # When a model filter is supplied, iterate only the requested models instead of
     # every node in the project — keeps per-call work proportional to the request.
-    if model_filter:
-        iter_items = [
-            (name, all_nodes[name]) for name in sorted(model_filter) if name in all_nodes
-        ]
-    else:
-        iter_items = sorted(all_nodes.items())
+    # Names that collide across packages match EVERY model with that name; each
+    # result row carries its unique_id so consumers can disambiguate.
+    iter_items = sorted(
+        (
+            (model_obj.name.lower(), model_obj)
+            for model_obj in all_nodes.values()
+            if model_filter is None or model_obj.name.lower() in model_filter
+        ),
+        key=lambda kv: (kv[0], kv[1].unique_id or ""),
+    )
 
     for model_name, model_obj in iter_items:
         if model_obj.resource_type not in ("model",):
@@ -236,6 +247,7 @@ def get_column_lineage(
                         source_column=None,
                         is_computed=False,
                         is_first_in_chain=True,
+                        unique_id=model_obj.unique_id,
                     )
                 )
                 continue
@@ -287,6 +299,7 @@ def get_column_lineage(
                     generated_value=generated_value,
                     is_first_in_chain=is_first,
                     union_branches=union_branches,
+                    unique_id=model_obj.unique_id,
                 )
             )
 

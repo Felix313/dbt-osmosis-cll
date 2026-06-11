@@ -38,6 +38,12 @@ class ManifestCatalogReader:
             self.manifest = json.load(f)
 
     def get_models_nodes(self) -> Dict[str, Model]:
+        """Return all models/seeds/sources keyed by manifest ``unique_id``.
+
+        Name collisions (cross-package models, model-vs-source-identifier) no
+        longer drop nodes: every manifest entry survives under its unique_id.
+        ``ModelRegistry`` builds the SQL-name alias map on top of this dict.
+        """
         models: Dict[str, Model] = {}
 
         for node_id, node_data in self.manifest.get("nodes", {}).items():
@@ -55,13 +61,14 @@ class ManifestCatalogReader:
                     "data_type": col_data.get("data_type") or col_data.get("type"),
                     "lineage": [],
                 }
-            models[model_name] = Model(
+            models[node_id] = Model(
                 **{
                     "name": model_name,
                     "schema": node_data.get("schema") or "main",
                     "database": node_data.get("database") or "main",
                     "columns": columns,
                     "resource_type": resource_type,
+                    "unique_id": node_id,
                 }
             )
 
@@ -94,9 +101,10 @@ class ManifestCatalogReader:
                     "resource_type": "source",
                     "source_identifier": source_identifier or None,
                     "source_name": source_name or None,
+                    "unique_id": source_id,
                 }
             )
-            models[source_identifier] = model
+            models[source_id] = model
             for col in model.columns.values():
                 col.model_name = source_identifier
 

@@ -31,7 +31,7 @@ if t.TYPE_CHECKING:
     from dbt.contracts.graph.nodes import ResultNode
     from dbt_osmosis_cll.osmosis_propagation.dbt_protocols import YamlRefactorContextProtocol
 
-_CACHE_SCHEMA_VERSION = 3
+_CACHE_SCHEMA_VERSION = 4
 
 # (project_dir, model_name) → List[result]  in-memory, process-scoped
 _LINEAGE_CACHE: dict[tuple[str, str], list[t.Any]] = {}
@@ -68,7 +68,7 @@ _RESULT_FIELDS = (
     "model", "column", "is_computed", "progenitor_model", "progenitor_column",
     "is_first_in_chain", "is_rename", "source_column",
     "is_aggregate", "is_window", "is_literal", "is_union", "is_generated",
-    "literal_value", "generated_value",
+    "literal_value", "generated_value", "unique_id",
 )
 
 
@@ -258,6 +258,15 @@ def get_cll_results(
         results = []
         with _FAILURES_LOCK:
             _CLL_FAILURES.setdefault(project_dir, set()).add(node.name)
+
+    # When another manifest entry shares this node's short name, the name-filtered
+    # call returns rows for every same-named model. Keep only the rows whose
+    # unique_id matches *node* (rows without unique_id pass through untouched).
+    node_uid = getattr(node, "unique_id", None)
+    if results and node_uid:
+        matched = [r for r in results if getattr(r, "unique_id", None) in (None, node_uid)]
+        if matched:
+            results = matched
 
     # Update both caches.
     # Never persist empty results: an empty list means CLL failed or the model

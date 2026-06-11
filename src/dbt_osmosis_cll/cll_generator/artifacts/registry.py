@@ -1,5 +1,5 @@
 from typing import Dict, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import re
 
@@ -161,11 +161,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RegistryState:
-    """Immutable state of the registry."""
+    """Immutable state of the registry.
+
+    ``models`` is keyed by manifest ``unique_id`` so name collisions
+    (cross-package models, model vs source identifier) never drop nodes.
+    ``name_alias`` maps the SQL relation lookup name (lowercase model name, or
+    source identifier for sources) to the winning unique_id; collisions resolve
+    last-wins in reader insertion order — nodes first, then sources — which is
+    exactly the overwrite order of the old name-keyed dict.
+    """
 
     models: Dict[str, Model]
     exposures: Dict[str, Exposure]
     is_loaded: bool = False
+    name_alias: Dict[str, str] = field(default_factory=dict)
 
 
 class ModelRegistry:
@@ -203,6 +212,35 @@ class ModelRegistry:
     def is_loaded(self) -> bool:
         return self._state.is_loaded
 
+    @staticmethod
+    def _lookup_name(model: Model) -> str:
+        """SQL relation lookup name: source identifier for sources, else model name."""
+        return ((model.source_identifier or model.name) or "").lower()
+
+    @staticmethod
+    def _normalize_models(raw: Dict[str, Model]) -> tuple[Dict[str, Model], Dict[str, str]]:
+        """Normalize a reader's output into (models_by_unique_id, name_alias).
+
+        Readers return unique_id-keyed dicts; older/custom readers that still key
+        by name are handled by falling back to the dict key as identity. The alias
+        map is built last-wins in insertion order, replicating the overwrite
+        semantics of the historical name-keyed dict.
+        """
+        by_id: Dict[str, Model] = {}
+        alias: Dict[str, str] = {}
+        for key, model in raw.items():
+            uid = model.unique_id or key
+            by_id[uid] = model
+            alias[ModelRegistry._lookup_name(model) or key.lower()] = uid
+        return by_id, alias
+
+    def _resolve_model(self, name: str) -> Optional[Model]:
+        """Resolve a SQL relation name (or a unique_id) to a Model, or None."""
+        uid = self._state.name_alias.get(name.lower())
+        if uid is not None:
+            return self._state.models.get(uid)
+        return self._state.models.get(name)
+
     def get_ephemeral_lineage(self) -> Dict[str, Dict]:
         """Return collected ephemeral CTE lineage (only populated when stop_at_ephemeral=True).
 
@@ -236,16 +274,23 @@ class ModelRegistry:
                     else source_node.get("name", "").lower()
                 )
 
-                source_model = models.get(source_identifier)
+                source_model = models.get(source_id) or self._resolve_model(source_identifier)
                 if source_model and source_model.resource_type == "source" and source_name:
                     source_model.source_name = source_name.lower()
 
-            for model_name, model in models.items():
+            for model in models.values():
+                model_name = self._lookup_name(model)
                 model.upstream = upstream_deps.get(model_name, set())
                 model.downstream = downstream_deps.get(model_name, set())
                 if model_name in model_exposures:
                     model.downstream.update(model_exposures[model_name])
-                node = self._manifest_reader._find_node(model_name)
+                # Exact node lookup by unique_id when available; name-indexed fallback
+                # for models built by readers that did not set unique_id.
+                node = None
+                if model.unique_id:
+                    node = self._manifest_reader.get_node(model.unique_id)
+                if node is None:
+                    node = self._manifest_reader._find_node(model_name)
                 if node:
                     model.language = node.get("language")
                     model.resource_path = node.get("original_file_path")
@@ -296,13 +341,16 @@ class ModelRegistry:
         skipped_model_names = []
 
         # First pass: Process explicit column references
-        for model_name, model in models.items():
+        for model in models.values():
             if model.language != "sql":
                 continue
 
-            sql = self._manifest_reader.get_compiled_sql(model_name)
+            model_name = self._lookup_name(model)
+            sql = self._manifest_reader.get_compiled_sql(model_name, unique_id=model.unique_id)
             if not sql and self._use_target_dir_fallback:
-                sql = self._manifest_reader.get_compiled_sql_from_disk(model_name)
+                sql = self._manifest_reader.get_compiled_sql_from_disk(
+                    model_name, unique_id=model.unique_id
+                )
             if not sql:
                 skipped_models += 1
                 skipped_model_names.append(model_name)
@@ -389,8 +437,9 @@ class ModelRegistry:
                 continue
 
             for source_name in model.metadata["star_sources"]:
-                if source_name in models:
-                    self._apply_star_columns(model, source_name, models[source_name])
+                star_source = self._resolve_model(source_name)
+                if star_source is not None:
+                    self._apply_star_columns(model, source_name, star_source)
                 elif source_name in self._ephemeral_lineage:
                     # Ephemeral model: source_name is __dbt__cte__<model> — emit
                     # child.col ← __dbt__cte__<model>.col so the ephemeral remains
@@ -468,26 +517,46 @@ class ModelRegistry:
 
             self._sql_parser = SQLColumnParser(dialect=self._dialect)
 
-            models = self._initialize_models()
+            models, name_alias = self._normalize_models(self._initialize_models())
+            # Interim state so _resolve_model works during the load phases below.
+            self._state = RegistryState(
+                models=models, exposures={}, is_loaded=False, name_alias=name_alias
+            )
             self._apply_dependencies(models)
             self._process_lineage(models)
             exposures = self._load_exposures()
-            self._state = RegistryState(models=models, exposures=exposures, is_loaded=True)
+            self._state = RegistryState(
+                models=models, exposures=exposures, is_loaded=True, name_alias=name_alias
+            )
         except Exception as e:
             raise RegistryError(f"Failed to load registry: {e}")
 
     def get_models(self) -> Dict[str, Model]:
-        """Get all models in the registry."""
+        """Get all models keyed by SQL relation name (backwards-compatible view).
+
+        On name collisions this view shows the alias-map winner only; use
+        :meth:`get_models_by_id` for the complete, collision-safe dict.
+        """
+        if not self.is_loaded:
+            raise RegistryNotLoadedError("Registry must be loaded before accessing models")
+        return {
+            name: self._state.models[uid]
+            for name, uid in self._state.name_alias.items()
+            if uid in self._state.models
+        }
+
+    def get_models_by_id(self) -> Dict[str, Model]:
+        """Get ALL models keyed by manifest unique_id (collision-safe)."""
         if not self.is_loaded:
             raise RegistryNotLoadedError("Registry must be loaded before accessing models")
         return self._state.models
 
     def get_model(self, model_name: str) -> Model:
-        """Get a specific model by name."""
+        """Get a specific model by SQL relation name or manifest unique_id."""
         if not self.is_loaded:
             raise RegistryNotLoadedError("Registry must be loaded before accessing models")
 
-        model = self._state.models.get(model_name.lower())
+        model = self._resolve_model(model_name)
         if model is None:
             raise ModelNotFoundError(f"Model '{model_name}' not found")
         return model
@@ -516,8 +585,7 @@ class ModelRegistry:
     def _find_compiled_sql(self, model_name: str) -> Optional[str]:
         """Find compiled SQL for a model from manifest or target file."""
         self._check_loaded()
-        model_name_lower = model_name.lower()
-        model = self._state.models.get(model_name_lower)
+        model = self._resolve_model(model_name)
         if model is None:
             raise ModelNotFoundError(f"Model '{model_name}' not found in registry")
 
@@ -543,8 +611,7 @@ class ModelRegistry:
     def get_compiled_sql(self, model_name: str) -> str:
         """Get compiled SQL for a model, trying manifest first then target file."""
         self._check_loaded()
-        model_name_lower = model_name.lower()
-        model = self._state.models.get(model_name_lower)
+        model = self._resolve_model(model_name)
         if model is None:
             raise ModelNotFoundError(f"Model '{model_name}' not found in registry")
 

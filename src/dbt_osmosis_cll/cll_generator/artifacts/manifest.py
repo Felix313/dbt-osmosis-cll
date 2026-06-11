@@ -108,7 +108,7 @@ class ManifestReader:
 
         return downstream
 
-    def get_compiled_sql(self, model_name: str) -> Optional[str]:
+    def get_compiled_sql(self, model_name: str, unique_id: Optional[str] = None) -> Optional[str]:
         """Return compiled SQL embedded in the manifest node, or None.
 
         ``dbt compile`` and ``dbt run`` embed compiled SQL directly in every
@@ -117,12 +117,14 @@ class ManifestReader:
         ``None`` in that case.  Callers that need a fallback should call
         :meth:`get_compiled_sql_from_disk` explicitly.
         """
-        node = self._find_node(model_name)
+        node = (self.get_node(unique_id) if unique_id else None) or self._find_node(model_name)
         if not node:
             return None
         return node.get("compiled_sql") or node.get("compiled_code") or None
 
-    def get_compiled_sql_from_disk(self, model_name: str) -> Optional[str]:
+    def get_compiled_sql_from_disk(
+        self, model_name: str, unique_id: Optional[str] = None
+    ) -> Optional[str]:
         """Return compiled SQL from ``target/compiled/`` on disk, or None.
 
         This is an *explicit* fallback for when the manifest has no inline
@@ -135,7 +137,7 @@ class ManifestReader:
             the compiled files are up-to-date, or when approximate lineage is
             acceptable.
         """
-        node = self._find_node(model_name)
+        node = (self.get_node(unique_id) if unique_id else None) or self._find_node(model_name)
         if not node:
             return None
         compiled_path = self._compiled_sql_path(node)

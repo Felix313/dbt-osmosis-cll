@@ -187,12 +187,13 @@ class LiveDbCatalogReader:
                     normalized = col_name.lower()
                     columns[normalized] = Column(name=normalized, model_name=model_name)
 
-            models[model_name] = Model(
+            models[node_id] = Model(
                 name=model_name,
                 schema=schema or "main",
                 database=database or "main",
                 columns=columns,
                 resource_type=resource_type,
+                unique_id=node_id,
             )
 
         for source_id, source in self._manifest.get("sources", {}).items():
@@ -224,11 +225,11 @@ class LiveDbCatalogReader:
                 resource_type="source",
                 source_identifier=source_identifier,
                 source_name=source_name_val or None,
+                unique_id=source_id,
             )
-            key = source_identifier or model.name
-            models[key] = model
+            models[source_id] = model
             for col in model.columns.values():
-                col.model_name = key
+                col.model_name = source_identifier or model.name
 
         return models
 
