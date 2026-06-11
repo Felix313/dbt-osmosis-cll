@@ -5,7 +5,8 @@ from sqlglot import parse_one, exp
 from typing import Dict, List, Set, Optional, Any, Callable, Literal, cast
 from dbt_osmosis_cll.cll_generator.models.schema import ColumnLineage, SQLParseResult
 from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import (
-    get_table_aliases,
+    get_scoped_table_aliases,
+    get_scoped_tables_from_select,
     get_table_context,
     get_all_tables_from_select,
     get_final_select,
@@ -33,6 +34,15 @@ class ParserContext:
     one entry per set-operation branch in declaration order. Populated only when
     the CTE's body is a set operation; used downstream by consumers (dbt-osmosis
     description inheritance) to apply agreement-aware description propagation."""
+    cte_source_sets: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)
+    """Full source-column sets for multi-source CTE columns.
+    cte_sources stores a single string per column and collapses multi-source
+    expressions (COALESCE(a.x, b.y)) to the "" sentinel; this parallel map keeps
+    the complete sorted source list so the sets survive CTE hops instead of
+    degrading to an empty source_columns set at the final SELECT."""
+    scope_tables: List[str] = field(default_factory=list)
+    """FROM + JOIN tables in the current select scope, in declaration order.
+    Used for schema-aware resolution of unqualified column references."""
     column_definitions: Optional[Dict[str, Any]] = None
     ephemeral_cte_names: Set[str] = field(default_factory=set)
     """CTE names that represent injected ephemeral models (__dbt__cte__ prefix).
@@ -139,9 +149,16 @@ class StarExpressionHandler:
                                 if trans_type == "union"
                                 else []
                             )
+                            if col_source:
+                                source_columns = {col_source}
+                            else:
+                                source_set = SQLColumnParser._get_source_set(
+                                    join_table, col_name, context
+                                )
+                                source_columns = set(source_set) if source_set else set()
                             columns[col_name.lower()] = [
                                 ColumnLineage(
-                                    source_columns={col_source} if col_source else set(),
+                                    source_columns=source_columns,
                                     transformation_type=cast(
                                         Literal["direct", "renamed", "derived", "union"], trans_type
                                     ),
@@ -186,12 +203,16 @@ class StarExpressionHandler:
                             else []
                         )
                         if not stop_at_boundary and effective_source == "":
-                            # Multi-source / zero-source sentinel: emit empty source_columns so
-                            # api.py gets no single traceable progenitor. Preserve the stored
-                            # trans_type so "generated", "aggregate", etc. survive CTE hops.
+                            # Multi-source / zero-source sentinel: no single traceable
+                            # progenitor. Preserve the stored trans_type so "generated",
+                            # "aggregate", etc. survive CTE hops — and surface the FULL
+                            # source set when recorded (multi-source preservation).
+                            source_set = SQLColumnParser._get_source_set(
+                                source_table, col_name, context
+                            )
                             columns[col_name.lower()] = [
                                 ColumnLineage(
-                                    source_columns=set(),
+                                    source_columns=set(source_set) if source_set else set(),
                                     transformation_type=trans_type,  # type: ignore[arg-type]
                                     sql_expression=sql_expr,
                                     union_branches=branches,
@@ -313,12 +334,47 @@ class ExpressionAnalyzer:
 
 
 class SQLColumnParser:
-    def __init__(self, dialect: Optional[str] = None):
+    def __init__(
+        self,
+        dialect: Optional[str] = None,
+        table_columns: Optional[Dict[str, Set[str]]] = None,
+    ):
+        """*table_columns* optionally maps relation name → known column names
+        (e.g. from ManifestCatalogReader). When provided, unqualified column
+        references in multi-table scopes resolve to the table that actually has
+        the column instead of blindly to the first FROM table."""
         self.dialect = dialect
+        self._table_columns: Optional[Dict[str, Set[str]]] = (
+            {str(tbl).lower(): {str(c).lower() for c in cols} for tbl, cols in table_columns.items()}
+            if table_columns
+            else None
+        )
         self._cte_handler = CTEHandler()
         self._star_handler = StarExpressionHandler()
         self._star_handler._cte_handler = self._cte_handler
         self._expression_analyzer = ExpressionAnalyzer(self)
+
+    def _pick_table_for_unqualified(self, col_name: str, context: ParserContext) -> str:
+        """Schema-aware table choice for an unqualified column reference.
+
+        Active only when the parser was constructed with *table_columns*. When
+        exactly one in-scope table is known to have the column, that table wins;
+        ambiguous or unknown columns keep the historical first-FROM-table answer.
+        CTE columns recorded in cte_sources participate as known column lists.
+        """
+        if self._table_columns is None or len(context.scope_tables) < 2:
+            return context.table_context
+        col = col_name.lower()
+        candidates = []
+        for tbl in context.scope_tables:
+            cols = self._table_columns.get(tbl)
+            if cols is None and tbl in context.cte_sources:
+                cols = {c.lower() for c in context.cte_sources[tbl]}
+            if cols and col in cols:
+                candidates.append(tbl)
+        if len(candidates) == 1:
+            return candidates[0]
+        return context.table_context
 
     def parse_column_lineage(self, sql: str, stop_at_ephemeral: bool = False) -> SQLParseResult:
         # Snowflake's GROUP BY ALL confuses sqlglot's parser state after
@@ -335,6 +391,7 @@ class SQLColumnParser:
         cte_sql_expressions: Dict[str, Dict[str, Optional[str]]] = {}
         cte_base_tables: Dict[str, Set[str]] = {}
         cte_union_branches: Dict[str, Dict[str, List[str]]] = {}
+        cte_source_sets: Dict[str, Dict[str, List[str]]] = {}
 
         # Detect injected ephemeral CTEs (dbt convention: __dbt__cte__<model_name>)
         ephemeral_cte_names: Set[str] = set()
@@ -344,7 +401,6 @@ class SQLColumnParser:
                 if cte.alias.lower().startswith("__dbt__cte__")
             }
 
-        aliases = get_table_aliases(parsed)
         for cte in ctes:
             cte_base_tables[cte.alias.lower()] = set()
 
@@ -355,6 +411,7 @@ class SQLColumnParser:
             cte_sql_expressions,
             cte_base_tables,
             cte_union_branches,
+            cte_source_sets,
         )
 
         # Collect ephemeral CTE lineage — the fully-traced column sources for
@@ -442,6 +499,9 @@ class SQLColumnParser:
 
         for select in selects_to_process:
             table_context = get_table_context(select)
+            # Per-scope alias map: aliases declared inside CTEs / subqueries must
+            # not shadow this select's own aliases (roadmap #4: wrong-edge fix).
+            aliases = get_scoped_table_aliases(select)
 
             column_definitions = {}
             for expr in select.expressions:
@@ -459,8 +519,10 @@ class SQLColumnParser:
                 cte_sql_expressions=cte_sql_expressions,
                 cte_base_tables=cte_base_tables,
                 cte_union_branches=cte_union_branches,
+                cte_source_sets=cte_source_sets,
                 column_definitions=column_definitions,
                 ephemeral_cte_names=ephemeral_cte_names,
+                scope_tables=get_scoped_tables_from_select(select),
             )
 
             for expr in select.expressions:
@@ -554,10 +616,13 @@ class SQLColumnParser:
         cte_sql_expressions: Dict[str, Dict[str, Optional[str]]],
         cte_base_tables: Dict[str, Set[str]],
         cte_union_branches: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        cte_source_sets: Optional[Dict[str, Dict[str, List[str]]]] = None,
     ) -> Dict[str, Dict[str, str]]:
         cte_sources: Dict[str, Dict[str, str]] = {}
         if cte_union_branches is None:
             cte_union_branches = {}
+        if cte_source_sets is None:
+            cte_source_sets = {}
 
         for cte in ctes:
             cte_name = cte.alias.lower()
@@ -587,7 +652,7 @@ class SQLColumnParser:
             select = cte.this.find(exp.Select)
             if select:
                 table_context = get_table_context(select)
-                aliases = get_table_aliases(select)
+                aliases = get_scoped_table_aliases(select)
 
                 column_definitions = {}
                 for expr in select.expressions:
@@ -605,7 +670,9 @@ class SQLColumnParser:
                     cte_sql_expressions=cte_sql_expressions,
                     cte_base_tables=cte_base_tables,
                     cte_union_branches=cte_union_branches,
+                    cte_source_sets=cte_source_sets,
                     column_definitions=column_definitions,
+                    scope_tables=get_scoped_tables_from_select(select),
                 )
 
                 for expr in select.expressions:
@@ -876,6 +943,9 @@ class SQLColumnParser:
             for src_col_name, src_col_source in sorted(context.cte_sources[from_table].items()):
                 if src_col_name.lower() not in excluded_col_names:
                     context.cte_sources[cte_name][src_col_name] = src_col_source
+                    src_set = context.cte_source_sets.get(from_table, {}).get(src_col_name)
+                    if src_set:
+                        context.cte_source_sets.setdefault(cte_name, {})[src_col_name] = src_set
                     if from_table in context.cte_transformation_types:
                         context.cte_transformation_types[cte_name][src_col_name] = (
                             context.cte_transformation_types[from_table].get(src_col_name, "direct")
@@ -891,6 +961,20 @@ class SQLColumnParser:
             if from_table in context.cte_base_tables:
                 context.cte_base_tables[cte_name].update(context.cte_base_tables[from_table])
 
+    @staticmethod
+    def _get_source_set(table: str, col_name: str, context: ParserContext) -> Optional[List[str]]:
+        """Case-insensitive lookup of a stored multi-source set for a CTE column."""
+        table_map = context.cte_source_sets.get(table)
+        if not table_map:
+            return None
+        if col_name in table_map:
+            return table_map[col_name]
+        col_lower = col_name.lower()
+        for key, val in table_map.items():
+            if key.lower() == col_lower:
+                return val
+        return None
+
     def _store_column_lineage_in_cte(
         self,
         cte_name: str,
@@ -902,8 +986,12 @@ class SQLColumnParser:
             sorted_sources = sorted(lineage.source_columns)
             if len(sorted_sources) > 1:
                 # Multiple upstream columns — store sentinel so downstream expansion
-                # emits an empty source_columns set (→ is_computed=True, progenitor=None).
+                # emits no single traceable progenitor, but record the full set in
+                # the parallel map so it survives CTE hops (roadmap #4).
                 context.cte_sources[cte_name][col_name] = ""
+                full_set = [s for s in sorted_sources if s]
+                if len(full_set) > 1:
+                    context.cte_source_sets.setdefault(cte_name, {})[col_name] = full_set
             else:
                 context.cte_sources[cte_name][col_name] = sorted_sources[0]
         else:
@@ -992,11 +1080,17 @@ class SQLColumnParser:
         context: ParserContext,
         is_aliased: bool,
     ) -> List[ColumnLineage]:
+        if not expr.table:
+            # Unqualified reference: schema-aware table choice when column lists
+            # are available (no-op without table_columns — historical behaviour).
+            effective_context = self._pick_table_for_unqualified(col_name, context)
+        else:
+            effective_context = context.table_context
         source_col = self._normalize_table_ref(
-            strip_sql_comments(str(expr)), context.aliases, context.table_context
+            strip_sql_comments(str(expr)), context.aliases, effective_context
         )
         table_part, col = split_qualified_name(source_col)
-        table = table_part if table_part else context.table_context
+        table = table_part if table_part else effective_context
         resolved_source = self._resolve_column_source(
             source_col, table, context.cte_sources, context.cte_to_model,
             context.ephemeral_cte_names,
@@ -1024,11 +1118,13 @@ class SQLColumnParser:
         # Multi-source / zero-source sentinel propagated through explicit column reference.
         # Use trans_type (looked up from cte_transformation_types above) so that semantic
         # types like "generated", "aggregate", "literal" are preserved across CTE hops
-        # rather than being flattened to "derived".
+        # rather than being flattened to "derived". Surface the full recorded source set
+        # when present (multi-source preservation, roadmap #4).
         if resolved_source == "":
+            source_set = self._get_source_set(table, col_name, context)
             return [
                 ColumnLineage(
-                    source_columns=set(),
+                    source_columns=set(source_set) if source_set else set(),
                     transformation_type=trans_type if trans_type != "direct" else "derived",
                     sql_expression=sql_expr,
                     union_branches=union_branches,
@@ -1117,15 +1213,26 @@ class SQLColumnParser:
                 columns.update(forward_cols)
                 continue
 
+            if not col.table:
+                effective_context = self._pick_table_for_unqualified(col_name, context)
+            else:
+                effective_context = context.table_context
             source_col_raw = strip_sql_comments(str(col))
             source_col = self._normalize_table_ref(
-                source_col_raw, context.aliases, context.table_context
+                source_col_raw, context.aliases, effective_context
             )
             table_part, _ = split_qualified_name(source_col)
-            table = table_part if table_part else context.table_context
+            table = table_part if table_part else effective_context
             resolved = self._resolve_column_source(
                 source_col, table, context.cte_sources, context.cte_to_model,
                 context.ephemeral_cte_names,
             )
+            if resolved == "":
+                # Upstream multi-source sentinel — expand to the recorded set when
+                # available so derived expressions keep their full input lineage.
+                source_set = self._get_source_set(table, col_name, context)
+                if source_set:
+                    columns.update(source_set)
+                    continue
             columns.add(resolved)
         return columns

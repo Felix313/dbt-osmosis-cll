@@ -33,6 +33,33 @@ def get_table_aliases(parsed: Any) -> Dict[str, str]:
     return aliases
 
 
+def get_scoped_table_aliases(scope_root: Any) -> Dict[str, str]:
+    """Collect table aliases belonging to *scope_root*'s own SQL scope.
+
+    Unlike :func:`get_table_aliases`, aliases declared inside nested scopes —
+    CTE definitions and subqueries below *scope_root* — are skipped, so an
+    inner ``FROM customers o`` can neither shadow nor leak into the outer
+    SELECT's alias map (the "global alias map" wrong-edge bug).
+    """
+    aliases: Dict[str, str] = {}
+    for table in scope_root.find_all((exp.Table, exp.From, exp.Join)):
+        if not table.alias:
+            continue
+        parent = table.parent
+        nested = False
+        while parent is not None and parent is not scope_root:
+            # Any intermediate SELECT (a WHERE/SELECT-clause subquery is a bare
+            # exp.Select under e.g. exp.Exists), derived table, or CTE definition
+            # opens a nested scope whose aliases must not leak out.
+            if isinstance(parent, (exp.CTE, exp.Subquery, exp.Select)):
+                nested = True
+                break
+            parent = parent.parent
+        if not nested:
+            aliases[table.alias] = str(table.name).lower()
+    return aliases
+
+
 def get_table_context(select: Any) -> str:
     from_clause = select.find(exp.From)
     if from_clause:
@@ -64,6 +91,25 @@ def get_all_tables_from_select(select: Any) -> List[str]:
             elif hasattr(join_table, "name"):
                 tables.append(str(join_table.name).lower())
 
+    return tables
+
+
+def get_scoped_tables_from_select(select: Any) -> List[str]:
+    """FROM + JOIN table names belonging to *select*'s own scope, in order.
+
+    Reads the select's own ``from`` / ``joins`` args directly instead of
+    ``find_all``, so tables inside CTE definitions or subqueries are excluded.
+    """
+    tables: List[str] = []
+    from_clause = select.args.get("from")
+    if from_clause is not None and isinstance(from_clause.this, exp.Table):
+        tables.append(str(from_clause.this.name).lower())
+    for join in select.args.get("joins") or []:
+        join_table = join.this
+        if isinstance(join_table, exp.Table):
+            tables.append(str(join_table.name).lower())
+        elif hasattr(join_table, "name"):
+            tables.append(str(join_table.name).lower())
     return tables
 
 

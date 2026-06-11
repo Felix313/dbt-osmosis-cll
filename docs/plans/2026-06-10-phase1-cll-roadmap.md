@@ -58,13 +58,42 @@ Coupling is narrow (everything funnels through `integration/cll.py` → `cll_gen
 | # | Item | Pain removed | Files | Effort | Status |
 |---|---|---|---|---|---|
 | 1 | Single source of truth for engine | hand-syncing two forks | (repo deletion done) README claim fix; optional GitHub archive | S | ~done |
-| 2 | Manifest node index: `{name → node}` dict built once in `ManifestReader.load()`, kill `_find_node` linear scans | O(N²) cold-run cost | `cll_generator/artifacts/manifest.py`, `registry.py` | S | next |
-| 3 | Identity by `unique_id`: registry keyed on manifest unique_id w/ name-alias map (additive `unique_id` field on `ColumnLineageResult`) | name-collision misresolution | `registry.py`, `manifest_catalog.py`, `api.py` | M | |
-| 4 | Parser core hardening (in-place, behind `SQLParseResult`): per-scope alias resolution, preserve multi-source sets through CTE hops, schema-aware unqualified-column resolution via `ManifestCatalogReader` column lists; evaluate sqlglot `qualify`+scope as backbone; golden-file tests from real Snowflake repo as gate | silently wrong edges → wrong docs | `parser/sql_parser.py`, `sql_parser_utils.py`, tests | L | |
+| 2 | Manifest node index: `{name → node}` dict built once in `ManifestReader.load()`, kill `_find_node` linear scans | O(N²) cold-run cost | `cll_generator/artifacts/manifest.py`, `registry.py` | S | done 2026-06-11 |
+| 3 | Identity by `unique_id`: registry keyed on manifest unique_id w/ name-alias map (additive `unique_id` field on `ColumnLineageResult`) | name-collision misresolution | `registry.py`, `manifest_catalog.py`, `api.py` | M | done 2026-06-11 |
+| 4 | Parser core hardening (in-place, behind `SQLParseResult`): per-scope alias resolution, preserve multi-source sets through CTE hops, schema-aware unqualified-column resolution via `ManifestCatalogReader` column lists; evaluate sqlglot `qualify`+scope as backbone; golden-file tests from real Snowflake repo as gate | silently wrong edges → wrong docs | `parser/sql_parser.py`, `sql_parser_utils.py`, tests | L | done 2026-06-11 (see notes) |
 | 5 | Multi-source origins end-to-end: `progenitors: list[(model, col)]` on `ColumnLineageResult` (generalize `union_branches`); annotate "Computed in: MODEL from A.x, B.y" | computed endpoint columns don't say what feeds them | `api.py`, parser (depends #4), `annotations.py`, `transforms.py` annotate pass | M | |
 | 6 | Ship visualizer: `dbt-osmosis-cll lineage explore` wiring existing HTML explorer to `ManifestCatalogReader` + CLL disk cache | goal-4 visualization not in product | `cli/main.py`, `cll_generator/lineage/display/html/`, `integration/cll.py` | M | |
 | 7 | Machine-readable origins by default on endpoint/DP layers (`write-cll-tags-to-meta: true` + `annotate: always` pattern, docs) | catalog tools don't see origins | `config.py`, `docs/USAGE.md` | S | |
 | 8 | Endpoint trust report: extend `doc_health` with per-model authored / inherited(origin) / glossary / annotation-only / CLL-failed breakdown, JSON for CI | "documented" ≠ "trustworthy"; CI gate vs silent CLL regressions | `commands/doc_health.py`, `cli/main.py` | S/M | |
+
+### Item 4 execution notes (2026-06-11)
+
+Implemented in-place behind `SQLParseResult` (`tests/core/test_cll_parser_hardening.py` is the gate):
+
+- **Per-scope aliases**: `get_scoped_table_aliases()` — any intermediate `Select` /
+  `Subquery` / `CTE` between a table and the scope root opens a nested scope; its aliases
+  no longer leak into or shadow the outer map. Final-select processing now builds its
+  alias map per select instead of from the whole statement.
+- **Multi-source preservation**: `ParserContext.cte_source_sets` parallels the
+  single-string `cte_sources` map; `COALESCE(a.x, b.y)` through any number of CTE hops
+  now surfaces `{a.x, b.y}` at the final SELECT instead of an empty sentinel set.
+  Single-progenitor API semantics unchanged (progenitor stays None for multi-source) —
+  item 5 exposes the set as `progenitors`.
+- **Schema-aware unqualified columns**: `SQLColumnParser(table_columns=...)` — the
+  registry feeds relation→column-list maps from the catalog reader; an unqualified
+  column in a multi-table scope resolves to the unique table that has it, falling back
+  to first-FROM-table on ambiguity or missing schema info. Opt-in by construction:
+  passing no table_columns preserves historical behaviour exactly.
+- **sqlglot qualify/scope evaluation**: NOT adopted as backbone now. `qualify` requires
+  a full schema mapping and rewrites the AST (would invalidate the incremental
+  cte_sources bookkeeping and the placeholder/self-union preprocessing contracts);
+  `sqlglot.lineage()` returns per-column node graphs but loses our semantic
+  classification (aggregate/window/literal/generated/union) which the annotation layer
+  depends on. Recommended future path: adopt `sqlglot.optimizer.scope` for scope
+  *resolution only* (replacing the hand-rolled boundary walks) once golden-file tests
+  from a real Snowflake repo exist to gate the swap. Golden-file tests against a real
+  Snowflake repo could not be created in this environment — flagged as the remaining
+  open sub-item of #4.
 
 ## Out of scope (cut executed 2026-06-11)
 

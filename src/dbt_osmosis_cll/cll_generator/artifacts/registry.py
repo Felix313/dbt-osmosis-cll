@@ -515,12 +515,23 @@ class ModelRegistry:
             else:
                 logger.warning("No dialect detected, the sql parser will be less accurate")
 
-            self._sql_parser = SQLColumnParser(dialect=self._dialect)
-
             models, name_alias = self._normalize_models(self._initialize_models())
             # Interim state so _resolve_model works during the load phases below.
             self._state = RegistryState(
                 models=models, exposures={}, is_loaded=False, name_alias=name_alias
+            )
+
+            # Known column lists per SQL relation name (from the catalog reader) —
+            # lets the parser resolve unqualified columns in joins to the table
+            # that actually has the column (roadmap #4). Colliding names merge
+            # their column sets; ambiguity then falls back to first-FROM-table.
+            table_columns: Dict[str, set] = {}
+            for m in models.values():
+                lookup = self._lookup_name(m)
+                if lookup and m.columns:
+                    table_columns.setdefault(lookup, set()).update(m.columns.keys())
+            self._sql_parser = SQLColumnParser(
+                dialect=self._dialect, table_columns=table_columns or None
             )
             self._apply_dependencies(models)
             self._process_lineage(models)
