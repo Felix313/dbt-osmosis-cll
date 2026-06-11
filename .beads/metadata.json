@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "dbt_osmosis_cll",
+  "project_id": "eb5cd9a5-ac49-4bd3-a464-e38ae8ab2a2e"
+}
