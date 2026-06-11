@@ -15,6 +15,20 @@ A column is classified as:
   metadata) with no human-authored content; counts against coverage.
 - ``undocumented``    — empty or a configured placeholder.
 
+Documented columns are further broken down by TRUST — where the text comes from
+("documented" alone does not mean "trustworthy"):
+
+- ``glossary``  — the column name is in the central glossary (``column-docs-path``);
+  the glossary is authoritative and recomputed every run.
+- ``inherited`` — the column carries the managed ``desc-source`` provenance meta key,
+  i.e. the text was gap-filled from its CLL origin and is recomputed every run.
+- ``authored``  — documented with neither marker: a human wrote it at this node
+  (origins, anchors, and frozen ``desc-owner: this`` columns land here).
+
+Combined with ``cll_failures`` (``--check-cll``), this gives CI a way to catch
+silent CLL regressions: a drop in ``inherited`` + a rise in ``undocumented``
+means propagation stopped reaching columns it used to reach.
+
 This is an *in-repo* report.  Cross-repo / mesh-wide propagation is intentionally
 out of scope (see project notes).
 """
@@ -39,6 +53,10 @@ class NodeHealth:
     documented: int
     annotation_only: int
     undocumented_columns: list[str] = field(default_factory=list)
+    # Trust breakdown of *documented* columns (authored + inherited + glossary == documented).
+    authored: int = 0
+    inherited: int = 0
+    glossary: int = 0
 
     @property
     def undocumented(self) -> int:
@@ -71,6 +89,18 @@ class DocHealthReport:
         return sum(n.annotation_only for n in self.nodes)
 
     @property
+    def authored_columns(self) -> int:
+        return sum(n.authored for n in self.nodes)
+
+    @property
+    def inherited_columns(self) -> int:
+        return sum(n.inherited for n in self.nodes)
+
+    @property
+    def glossary_columns(self) -> int:
+        return sum(n.glossary for n in self.nodes)
+
+    @property
     def undocumented_columns(self) -> int:
         return sum(n.undocumented for n in self.nodes)
 
@@ -86,6 +116,10 @@ class DocHealthReport:
                 "nodes": len(self.nodes),
                 "total_columns": self.total_columns,
                 "documented_columns": self.documented_columns,
+                # Trust breakdown of documented columns (additive keys).
+                "authored_columns": self.authored_columns,
+                "inherited_columns": self.inherited_columns,
+                "glossary_columns": self.glossary_columns,
                 "annotation_only_columns": self.annotation_only_columns,
                 "undocumented_columns": self.undocumented_columns,
                 "coverage_pct": round(self.coverage, 2),
@@ -110,6 +144,7 @@ def compute_doc_health(
     """
     from dbt.artifacts.resources.types import NodeType
 
+    from dbt_osmosis_cll.config import get_column_docs, get_config
     from dbt_osmosis_cll.integration.cll import (
         get_cll_failures,
         get_cll_results,
@@ -120,8 +155,30 @@ def compute_doc_health(
     placeholders = set(context.placeholders)
     report = DocHealthReport(cll_checked=check_cll)
 
+    desc_source_key = get_config().desc_source_key
+    glossary_cols = frozenset(get_column_docs().keys())
+
+    def _is_inherited(col: t.Any) -> bool:
+        """True when the column carries the managed desc-source provenance key
+        (top-level meta in classic mode, config.meta in fusion mode)."""
+        if not desc_source_key:
+            return False
+        meta = getattr(col, "meta", None) or {}
+        if desc_source_key in meta:
+            return True
+        col_config = getattr(col, "config", None)
+        if col_config is None:
+            return False
+        config_meta = (
+            col_config.get("meta", {})
+            if isinstance(col_config, dict)
+            else getattr(col_config, "meta", None) or {}
+        )
+        return desc_source_key in config_meta
+
     for _uid, node in _iter_candidate_nodes(context):
         total = documented = annotation_only = 0
+        authored = inherited = glossary = 0
         undocumented: list[str] = []
         for col_name, col in node.columns.items():
             total += 1
@@ -132,8 +189,15 @@ def compute_doc_health(
             stripped = strip_annotation_tags(raw).strip()
             if not stripped or stripped in placeholders:
                 annotation_only += 1
+            elif col_name.lower() in glossary_cols:
+                documented += 1
+                glossary += 1
+            elif _is_inherited(col):
+                documented += 1
+                inherited += 1
             else:
                 documented += 1
+                authored += 1
 
         report.nodes.append(
             NodeHealth(
@@ -144,6 +208,9 @@ def compute_doc_health(
                 documented=documented,
                 annotation_only=annotation_only,
                 undocumented_columns=undocumented,
+                authored=authored,
+                inherited=inherited,
+                glossary=glossary,
             )
         )
 
@@ -165,6 +232,9 @@ def format_report(report: DocHealthReport, *, verbose: bool = False) -> str:
     lines.append(f"Nodes:               {len(report.nodes)}")
     lines.append(f"Columns:             {report.total_columns}")
     lines.append(f"  documented:        {report.documented_columns}")
+    lines.append(f"    authored:        {report.authored_columns}")
+    lines.append(f"    inherited:       {report.inherited_columns}")
+    lines.append(f"    glossary:        {report.glossary_columns}")
     lines.append(f"  annotation-only:   {report.annotation_only_columns}")
     lines.append(f"  undocumented:      {report.undocumented_columns}")
     lines.append(f"Coverage:            {report.coverage:.1f}%")

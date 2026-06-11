@@ -14,9 +14,10 @@ from dbt_osmosis_cll.osmosis_propagation.commands.doc_health import compute_doc_
 
 
 class FakeColumn:
-    def __init__(self, name, description=""):
+    def __init__(self, name, description="", meta=None):
         self.name = name
         self.description = description
+        self.meta = meta or {}
 
 
 class FakeNode:
@@ -144,3 +145,61 @@ def test_format_report_contains_summary_and_attention_section():
     assert "Coverage:" in text
     assert "child" in text
     assert "missing: B" in text
+
+
+def test_trust_breakdown_authored_inherited_glossary():
+    """Documented columns split by provenance: glossary > inherited (desc-source) > authored."""
+    desc_source_key = get_config().desc_source_key
+    node = FakeNode(
+        "m",
+        {
+            "A": FakeColumn("A", "hand-written description"),
+            "B": FakeColumn("B", "gap-filled text", meta={desc_source_key: "STG_X.B"}),
+            "C": FakeColumn("C", "glossary text"),
+            "D": FakeColumn("D", ""),
+        },
+    )
+    ctx = make_context()
+    with patched([node]), mock.patch(
+        "dbt_osmosis_cll.config.get_column_docs", lambda *a, **k: {"c": "glossary text"}
+    ):
+        report = compute_doc_health(ctx)
+
+    nh = report.nodes[0]
+    assert nh.documented == 3
+    assert nh.authored == 1
+    assert nh.inherited == 1
+    assert nh.glossary == 1
+    assert nh.authored + nh.inherited + nh.glossary == nh.documented
+
+    data = report.to_dict()
+    assert data["summary"]["authored_columns"] == 1
+    assert data["summary"]["inherited_columns"] == 1
+    assert data["summary"]["glossary_columns"] == 1
+    assert data["nodes"][0]["authored"] == 1
+    assert data["nodes"][0]["inherited"] == 1
+    assert data["nodes"][0]["glossary"] == 1
+
+
+def test_trust_breakdown_reads_desc_source_from_config_meta():
+    """Fusion mode writes managed keys to config.meta — inherited must be detected there too."""
+    desc_source_key = get_config().desc_source_key
+    col = FakeColumn("B", "gap-filled text")
+    col.config = {"meta": {desc_source_key: "STG_X.B"}}
+    node = FakeNode("m", {"B": col})
+    ctx = make_context()
+    with patched([node]):
+        report = compute_doc_health(ctx)
+    assert report.nodes[0].inherited == 1
+    assert report.nodes[0].authored == 0
+
+
+def test_trust_breakdown_in_text_report():
+    node = FakeNode("m", {"A": FakeColumn("A", "authored text")})
+    ctx = make_context()
+    with patched([node]):
+        report = compute_doc_health(ctx)
+    text = format_report(report)
+    assert "authored:" in text
+    assert "inherited:" in text
+    assert "glossary:" in text
