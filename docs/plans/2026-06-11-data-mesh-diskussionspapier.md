@@ -77,7 +77,7 @@ folgenden Vereinbarungen.
 ## 3. Zusammenspiel mit Atlan
 
 Die zentrale Governance nimmt die dbt-Manifeste als Input für die Atlan-Lineage auf.
-Das ist kein Konkurrenz-, sondern ein Zulieferverhältnis — **osmosis-cll erzeugt
+Das ist ein Zulieferverhältnis — **osmosis-cll erzeugt
 Inhalte im dbt-Repo, Atlan verteilt sie an die Organisation.** Alles, was das Tool
 schreibt, landet im `manifest.json` und damit automatisch im bestehenden
 Atlan-Ingest. Konkret greifen die Werkzeuge an vier Stellen ineinander:
@@ -86,7 +86,9 @@ Atlan-Ingest. Konkret greifen die Werkzeuge an vier Stellen ineinander:
    Spalten in der Breite (am Ursprung gepflegt, automatisch vererbt) — Atlan zeigt
    genau diese Beschreibungen aus dem Manifest an. Ohne das Tool wären die meisten
    Spalten im Katalog leer oder müssten doppelt in Atlan gepflegt werden. Damit keine
-   Drift entsteht, braucht es eine klare Schreibrichtung (→ A5).
+   Drift entsteht, braucht es eine klare Schreibrichtung (→ A5) — insbesondere
+   gegenüber Atlans eigenem Description Propagation Agent, der Beschreibungen nur
+   katalogseitig verteilt und auf dbt-Assets deshalb ausgenommen werden muss (→ A5).
 
 2. **Provenienz wird in Atlan sichtbar und filterbar.** Die maschinenlesbaren
    Meta-Tags (`renamed_from` / `derived_from` / `computed_in`, `desc-source`) stehen
@@ -156,9 +158,15 @@ Meta-Tag ist möglich.
 Beschreibungen entstehen und ändern sich im dbt-Repo (Docs-as-Code, reviewbar,
 versioniert) und fließen über das Manifest nach Atlan — nicht umgekehrt. Direkte
 Beschreibungs-Edits in Atlan an dbt-Spalten würden beim nächsten Ingest überschrieben
-oder erzeugen Drift.
-*Zu entscheiden: Verbindliche Schreibrichtung; Prozess für Korrekturwünsche aus dem
-Katalog zurück ins Repo (z. B. Ticket/PR statt Katalog-Edit).*
+oder erzeugen Drift. Das gilt ausdrücklich auch für Atlans **Description Propagation
+Agent** (MCP): Er verteilt Beschreibungen entlang der Katalog-Lineage, schreibt aber
+nur in die Atlan-DB — nicht zurück ins Git. Auf dbt-eigenen Assets muss er daher
+deaktiviert oder ausgenommen werden; sinnvoll einsetzbar bleibt er für
+Nicht-dbt-Assets (z. B. BI-Dashboards, Warehouse-Objekte ohne Repo), wo Docs-as-Code
+nicht hinreicht.
+*Zu entscheiden: Verbindliche Schreibrichtung; Scope-Regel für den Atlan Propagation
+Agent (dbt-Assets ausgenommen); Prozess für Korrekturwünsche aus dem Katalog zurück
+ins Repo (z. B. Ticket/PR statt Katalog-Edit).*
 
 **A6 — Mapping der Provenienz-Metadaten nach Atlan.**
 Die Meta-Tags (`renamed_from` / `derived_from` / `computed_in`, `desc-source`) und
