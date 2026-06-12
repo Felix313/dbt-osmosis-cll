@@ -450,7 +450,9 @@ def _resolve_cll_description(
       every downstream copy. The walk passes *through* same-text copies (force-inherit or
       gap-filled) and stops only where the text changes (a re-definition / anchor), at a
       source, computed wall, union, or chain end. ``origin_ref`` is ``None`` when no
-      description resolves, and for unions (no single origin).
+      description resolves, and for unions whose text comes from the agreeing branches
+      (no single origin). A union node that owns a description differing from the branch
+      agreement re-defines the text like any other anchor — then it IS the origin.
 
     Because the walk resolves from origins/anchors via the stable buffer rather than from
     intermediate copies, propagation is a pure function of {origins, anchors, config} and
@@ -469,7 +471,10 @@ def _resolve_cll_description(
         is_computation_wall,
         record_cll_walk_soft_fail,
     )
-    from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
+    from dbt_osmosis_cll.osmosis_propagation.annotations import (
+        descriptions_equivalent,
+        strip_annotation_tags,
+    )
     from dbt_osmosis_cll.osmosis_propagation.inheritance import _read_ancestor_yaml_description
     from dbt_osmosis_cll.osmosis_propagation.introspection import _get_setting_for_node
 
@@ -568,7 +573,6 @@ def _resolve_cll_description(
         union_branches = getattr(parent_result, "union_branches", []) or []
         if not union_branches:
             return _own()
-        from dbt_osmosis_cll.osmosis_propagation.annotations import descriptions_equivalent
 
         branch_descs: list[str] = []
         for branch_model, branch_col in union_branches:
@@ -589,6 +593,19 @@ def _resolve_cll_description(
             return _own()
         first = branch_descs[0]
         if all(descriptions_equivalent(first, other) for other in branch_descs[1:]):
+            # Anchor parity with step 8: a union node that OWNS its description and stores
+            # text that differs from the branch agreement RE-DEFINES it — the new truth and
+            # the origin are HERE. Without this check the union node's re-definition was
+            # ignored (branch text won, origin None) and the NEXT downstream copy became the
+            # first node whose text "differed from upstream", mis-crediting a passthrough
+            # copy as the desc-source anchor.
+            own = _own_description()
+            if (
+                own is not None
+                and not descriptions_equivalent(own, first)
+                and _owns_description(context, model_node, parent_col_name)
+            ):
+                return own, here_ref
             return first, None
         # Real conflict — must be authored at the union node itself.
         return _own()
@@ -660,9 +677,10 @@ def _resolve_cll_description(
         )
     owns = _owns_description(context, model_node, parent_col_name)
     own = _own_description()
-    if owns and own is not None and own != parent_text:
+    if owns and own is not None and not descriptions_equivalent(own, parent_text):
         # Anchored re-definition — the new truth begins here (origin = here), even if the
-        # upstream is empty/different. An anchor re-authoring text identical to upstream is
+        # upstream is empty/different. An anchor re-authoring text identical to upstream
+        # (whitespace/wrap differences included, same predicate as union agreement) is
         # NOT a re-definition; it falls through and the deeper origin is kept.
         return own, here_ref
     if parent_text is not None:

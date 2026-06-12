@@ -1035,3 +1035,90 @@ def test_origin_carries_renamed_name_at_computation_wall():
     assert origin_model == "IDENT"
     assert origin_col == ""  # computed-in sentinel
     assert entry_col == "BAR"  # name at the wall — feeds the "(as BAR)" annotation
+
+
+# ---------------------------------------------------------------------------
+# Union anchor re-definition (desc-source origin at union nodes)
+#
+# Regression for the real-repo case where a union node (KWM) owned a description
+# that differed from its agreeing branches (stg spelled "gueltig", KWM "gültig"):
+# the union step ignored the union node's own text, so the NEXT downstream copy
+# was mis-credited as the desc-source anchor. The union path must apply the same
+# re-definition semantics as the single-progenitor path.
+# ---------------------------------------------------------------------------
+
+
+def _union_anchor_fixture(union_own_desc):
+    """child.col ← mid.col ← union(kwm).col ← {stg1.col, stg2.col} (branches agree).
+
+    ``union_own_desc`` is the text stored at the union node; mid carries a copy of it.
+    Returns (ctx, child, node_index, results).
+    """
+    ctx = make_context()
+    branch_desc = "Branch text"
+    stg1 = FakeNode("stg1", {"COL": FakeColumn("COL", branch_desc)})
+    stg2 = FakeNode("stg2", {"COL": FakeColumn("COL", branch_desc)})
+    kwm = FakeNode("kwm", {"COL": FakeColumn("COL", union_own_desc)})
+    mid = FakeNode("mid", {"COL": FakeColumn("COL", union_own_desc)})
+    child = FakeNode("child", {"COL": FakeColumn("COL", "")})
+    results = {
+        "child": [cll("child", "col", progenitor_model="mid", progenitor_column="col")],
+        "mid": [cll("mid", "col", progenitor_model="kwm", progenitor_column="col")],
+        "kwm": [
+            cll(
+                "kwm",
+                "col",
+                is_union=True,
+                union_branches=[("stg1", "col"), ("stg2", "col")],
+            )
+        ],
+    }
+    node_index = {"stg1": stg1, "stg2": stg2, "kwm": kwm, "mid": mid, "child": child}
+    return ctx, child, node_index, results
+
+
+def test_union_node_redefining_text_is_the_origin_not_its_downstream_copy():
+    """A union node owning a description that DIFFERS from the branch agreement re-defines
+    the text — it is the origin, and the downstream copy (mid) is walked through instead of
+    being mis-credited as the anchor."""
+    ctx, child, node_index, results = _union_anchor_fixture("Curated text")
+    with patched(results=results, node_index=node_index):
+        desc, origin = _resolve_cll_description(ctx, "mid", "col")
+        assert desc == "Curated text"
+        assert origin == "KWM.COL"  # the union node, NOT MID.COL
+
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["COL"]
+    assert col.description == "Curated text"
+    assert col.meta.get("desc-source") == "KWM.COL"
+
+
+def test_union_node_matching_branch_agreement_still_yields_no_origin():
+    """A union node whose own text matches the agreeing branches does NOT anchor: the text
+    inherits with origin None (a union has no single origin), so no desc-source is written."""
+    ctx, child, node_index, results = _union_anchor_fixture("Branch text")
+    with patched(results=results, node_index=node_index):
+        desc, origin = _resolve_cll_description(ctx, "mid", "col")
+        assert desc == "Branch text"
+        assert origin is None
+
+        inherit_upstream_column_knowledge_cll(ctx, child)
+    col = child.columns["COL"]
+    assert col.description == "Branch text"
+    assert "desc-source" not in col.meta
+
+
+def test_whitespace_only_difference_is_not_a_redefinition_anchor():
+    """The step-8 anchor check uses the same whitespace-robust equivalence as union
+    agreement: a copy that differs from upstream only in line-wrap is walked through,
+    keeping the deeper origin instead of becoming a spurious anchor."""
+    ctx = make_context()
+    origin_node = FakeNode("origin", {"COL": FakeColumn("COL", "Some long description text")})
+    copy = FakeNode("copy", {"COL": FakeColumn("COL", "Some long\ndescription   text")})
+    results = {
+        "copy": [cll("copy", "col", progenitor_model="origin", progenitor_column="col")],
+    }
+    with patched(results=results, node_index={"origin": origin_node, "copy": copy}):
+        desc, origin = _resolve_cll_description(ctx, "copy", "col")
+    assert desc == "Some long description text"
+    assert origin == "ORIGIN.COL"  # wrap-only difference → not a re-definition at COPY
