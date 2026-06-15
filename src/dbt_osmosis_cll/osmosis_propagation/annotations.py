@@ -115,22 +115,32 @@ def format_computed_here_tag(inputs: "list[str] | None" = None) -> str:
 
 _WS_NORMALIZE_RE = re.compile(r"\s+")
 
+_UMLAUT_TABLE = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
+
+
+def _normalize_desc(text: str) -> str:
+    """Collapse whitespace, lowercase, and fold German umlaut spellings to ASCII."""
+    return _WS_NORMALIZE_RE.sub(" ", text).strip().lower().translate(_UMLAUT_TABLE)
+
 
 def descriptions_equivalent(a: str | None, b: str | None) -> bool:
-    """True when two descriptions differ only in whitespace / line-wrap.
+    """True when two descriptions carry the same semantic content.
 
-    Database comments come back as single-line strings while YAML stores them
-    wrapped at a fixed width — they describe the same content but are not
-    byte-equal. Collapsing internal whitespace before compare makes the
-    "is this a real change?" check robust to wrap differences and prevents
-    spurious source refresh updates that would in turn flap the annotation
-    layer on the very next run (idempotency bug).
+    Normalises before comparing:
+    - internal whitespace collapsed, leading/trailing stripped
+    - case-folded to lowercase
+    - German umlaut spellings unified (ä/ae, ö/oe, ü/ue, ß/ss treated as equal)
+
+    This prevents spurious anchors when upstream and downstream models use
+    different umlaut conventions (e.g. source DB writes "gültig", YAML stores
+    "gueltig") and stops case differences in DB comments from flapping the
+    annotation layer on every source-refresh run.
     """
     if not a and not b:
         return True
     if not a or not b:
         return False
-    return _WS_NORMALIZE_RE.sub(" ", a).strip() == _WS_NORMALIZE_RE.sub(" ", b).strip()
+    return _normalize_desc(a) == _normalize_desc(b)
 
 
 def strip_annotation_tags(description: str) -> str:
