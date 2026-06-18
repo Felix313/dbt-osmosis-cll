@@ -15,6 +15,15 @@ from dbt_osmosis_cll.cll_generator.artifacts.exceptions import CompiledSqlMissin
 
 logger = logging.getLogger(__name__)
 
+# dbt Jinja context objects that can appear as table qualifiers in compiled SQL
+# (e.g. `{{ target.schema }}.TABLE` compiles to a raw table reference whose alias
+# may be left as `target` or `tar`).  These are never dbt model names, so any
+# progenitor that resolves to one of these strings is a phantom node and must be
+# dropped.
+_JINJA_RESERVED: frozenset[str] = frozenset(
+    {"target", "this", "model", "config", "var", "env_var", "builtins", "flags"}
+)
+
 # Process-level cache of fully-loaded registries.  Building a registry parses the
 # compiled SQL of EVERY model in the project, so without this cache a per-model
 # caller (e.g. dbt-osmosis resolving lineage one node at a time) re-parses the
@@ -303,6 +312,9 @@ def get_column_lineage(
                         # Same ephemeral-prefix strip as _resolve_progenitor.
                         if m.startswith("__dbt__cte__"):
                             m = m[len("__dbt__cte__"):]
+                        # Drop phantom nodes from Jinja context leakage.
+                        if m in _JINJA_RESERVED:
+                            continue
                         progenitors.append((m, c.lower()))
             # first-in-chain: only for pure passthroughs (direct/renamed) that reach a terminal node
             is_passthrough = ttype in ("direct", "renamed")
@@ -533,4 +545,8 @@ def _resolve_progenitor(lin) -> tuple[Optional[str], Optional[str]]:
     # Strip dbt's ephemeral CTE injection prefix
     if model_part.startswith("__dbt__cte__"):
         model_part = model_part[len("__dbt__cte__"):]
+    # Reject Jinja context objects that leak into compiled SQL as table qualifiers
+    # (e.g. `target`, `this`).  They are never real dbt model names.
+    if model_part in _JINJA_RESERVED:
+        return None, None
     return model_part, parts[1].lower()
