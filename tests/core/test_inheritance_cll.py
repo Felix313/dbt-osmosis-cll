@@ -551,14 +551,12 @@ def test_anchor_acts_as_wall_for_downstream_inheritance():
 
 
 # ---------------------------------------------------------------------------
-# desc-owner: upstream injection (replaces legacy desc-source provenance tag)
+# desc-owner: upstream injection
 # ---------------------------------------------------------------------------
 #
 # NOTE: ``desc-owner: upstream`` is written to the column's TOP-LEVEL ``meta`` (FakeColumn.meta).
 # The YAML sync writer then places it under ``config.meta`` (fusion) or keeps it top-level
 # (classic). These unit tests call the inherit transform directly, so they assert on ``meta``.
-#
-# Legacy ``desc-source`` tags are stripped as a one-time migration cleanup wherever they appear.
 
 
 def test_gap_fill_injects_desc_owner_upstream():
@@ -717,13 +715,12 @@ def test_preexisting_text_match_injects_desc_owner_upstream():
     assert col.meta.get("desc-owner") == "upstream"
 
 
-def test_progenitor_change_does_not_re_inject_when_already_upstream():
-    """When CLL resolves a different progenitor but the column already has desc-owner: upstream,
-    force_inherit=True handles description sync — no additional column-level injection occurs.
-    Legacy desc-source tag is stripped as cleanup."""
+def test_text_match_injects_desc_owner_regardless_of_progenitor():
+    """When the column's text matches the (new) upstream, desc-owner: upstream is injected.
+    This covers the backfill case where a column was already carrying the right text."""
     child = FakeNode(
         "child",
-        {"COL": FakeColumn("COL", description="Shared desc", meta={"desc-source": "OLD_PARENT.COL"})},
+        {"COL": FakeColumn("COL", description="Shared desc")},
     )
     ctx = make_context()
     with patched(
@@ -737,18 +734,15 @@ def test_progenitor_change_does_not_re_inject_when_already_upstream():
     ):
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
-    # Legacy desc-source stripped; desc-owner: upstream injected (text matches upstream).
-    assert "desc-source" not in col.meta
     assert col.meta.get("desc-owner") == "upstream"
 
 
 def test_upstream_text_drift_does_not_inject_ownership():
     """When upstream text drifts away from the local (developer-improved) description,
-    desc-owner: upstream is NOT injected. desc-owner: this default protects the local text.
-    Legacy desc-source is stripped as cleanup (no longer needed)."""
+    desc-owner: upstream is NOT injected. desc-owner: this default protects the local text."""
     child = FakeNode(
         "child",
-        {"COL": FakeColumn("COL", description="Old parent desc", meta={"desc-source": "PARENT.COL"})},
+        {"COL": FakeColumn("COL", description="Locally improved desc")},
         settings={("desc-owner", None): "this"},
     )
     ctx = make_context()
@@ -756,14 +750,13 @@ def test_upstream_text_drift_does_not_inject_ownership():
         results={
             "child": [cll("child", "col", progenitor_model="parent", progenitor_column="col")]
         },
-        yaml_descs={("parent", "col"): "New parent desc"},  # upstream text has drifted
-        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "New parent desc")})},
+        yaml_descs={("parent", "col"): "Upstream desc"},  # different from local
+        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "Upstream desc")})},
     ):
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
-    assert col.description == "Old parent desc"  # frozen by desc-owner: this, not overwritten
-    assert "desc-source" not in col.meta     # legacy tag stripped
-    assert "desc-owner" not in col.meta      # no injection (text diverged from upstream)
+    assert col.description == "Locally improved desc"  # frozen by desc-owner: this
+    assert "desc-owner" not in col.meta                # no injection (text diverged)
 
 
 def test_authored_description_gets_no_injection():
@@ -783,28 +776,6 @@ def test_authored_description_gets_no_injection():
     assert col.description == "Locally authored"  # preserved (desc-owner: this)
     assert "desc-owner" not in col.meta
     assert "desc-source" not in col.meta
-
-
-def test_force_inherit_strips_legacy_desc_source():
-    """A column with desc-owner: upstream (force-inherit) that also carries a legacy desc-source
-    tag has the stale tag stripped — owned upstream, cleanup applies."""
-    child = FakeNode(
-        "child",
-        {"COL": FakeColumn("COL", description="Local desc", meta={"desc-source": "PARENT.COL"})},
-        settings={("desc-owner", None): "upstream"},
-    )
-    ctx = make_context()
-    with patched(
-        results={
-            "child": [cll("child", "col", progenitor_model="parent", progenitor_column="col")]
-        },
-        yaml_descs={("parent", "col"): "Parent desc"},
-        node_index={"parent": FakeNode("parent", {"COL": FakeColumn("COL", "Parent desc")})},
-    ):
-        inherit_upstream_column_knowledge_cll(ctx, child)
-    col = child.columns["COL"]
-    assert col.description == "Parent desc"  # overwritten (force-inherit)
-    assert "desc-source" not in col.meta     # legacy tag stripped
 
 
 def test_named_anchor_owner_gets_no_injection():
@@ -831,11 +802,11 @@ def test_named_anchor_owner_gets_no_injection():
 
 
 def test_named_anchor_owner_strips_legacy_desc_source():
-    """A column with a NAMED desc-owner anchor that carries a legacy desc-source tag has the
-    stale tag stripped — it is now declared owned/authored."""
+    """A column with a NAMED desc-owner anchor gets no injection (it is an origin).
+    Any pre-existing meta is left untouched by osmosis."""
     child = FakeNode(
         "child",
-        {"COL": FakeColumn("COL", description="Parent desc", meta={"desc-source": "PARENT.COL"})},
+        {"COL": FakeColumn("COL", description="Parent desc")},
         settings={("desc-owner", None): "aml"},
     )
     ctx = make_context()
@@ -848,24 +819,7 @@ def test_named_anchor_owner_strips_legacy_desc_source():
     ):
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
-    assert "desc-source" not in col.meta  # legacy tag stripped
     assert "desc-owner" not in col.meta   # named anchor → no injection
-
-
-def test_legacy_desc_source_stripped_when_column_becomes_computed():
-    """A column that carries a legacy desc-source tag but is now a multi-source/computed column
-    loses the stale tag on the early-skip path — it no longer has a single progenitor."""
-    child = FakeNode(
-        "child",
-        {"COL": FakeColumn("COL", description="Some desc", meta={"desc-source": "PARENT.COL"})},
-    )
-    ctx = make_context()
-    with patched(
-        results={"child": [cll("child", "col", is_computed=True, progenitor_column=None)]},
-    ):
-        inherit_upstream_column_knowledge_cll(ctx, child)
-    col = child.columns["COL"]
-    assert "desc-source" not in col.meta
 
 
 # ---------------------------------------------------------------------------
@@ -876,7 +830,7 @@ def test_legacy_desc_source_stripped_when_column_becomes_computed():
 def test_self_reference_resolves_to_own_and_records_no_soft_fail():
     """A direct self-ref (incremental {{ this }}: M.col → M.col) is short-circuited before the
     cycle guard: it resolves to the column's own description, records NO soft-fail, and does not
-    tag itself as its own desc-source."""
+    inject desc-owner: upstream on itself."""
     ctx = make_context()
     clear_cll_walk_soft_fails(ctx)
     m = FakeNode("m", {"COL": FakeColumn("COL", "Self-defined desc")})

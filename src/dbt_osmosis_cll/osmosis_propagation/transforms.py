@@ -737,32 +737,6 @@ def _build_column_config_with_meta(node_col: t.Any, new_meta: dict[str, t.Any]) 
     return {**config_base, "meta": new_meta}
 
 
-def _drop_stale_desc_source(node: t.Any, col_name: str, node_col: t.Any, key: str) -> None:
-    """Strip a legacy ``desc-source`` provenance tag from a column.
-
-    Called on early-skip paths (aggregate / window / literal / generated / multi-source /
-    originates-here) and as a one-time migration cleanup wherever the old tag may linger.
-    ``desc-source`` is no longer written by osmosis; this function clears any instance written
-    by prior versions so the YAML does not carry stale provenance pointers.
-
-    Strips from both top-level ``meta`` (classic mode) and ``config.meta`` (fusion mode).
-    No-op when the key is disabled (empty string) or the tag is absent.
-    """
-    if not key:
-        return
-    top_meta = dict(getattr(node_col, "meta", None) or {})
-    cfg_meta = _read_column_config_meta(node_col)
-    if key not in top_meta and key not in cfg_meta:
-        return
-    replace_kwargs: dict[str, t.Any] = {}
-    if key in top_meta:
-        replace_kwargs["meta"] = {k: v for k, v in top_meta.items() if k != key}
-    if key in cfg_meta:
-        replace_kwargs["config"] = _build_column_config_with_meta(
-            node_col, {k: v for k, v in cfg_meta.items() if k != key}
-        )
-    node.columns[col_name] = _safe_column_replace(node_col, **replace_kwargs)
-
 
 @_transform_op("Inherit Upstream Column Knowledge (CLL)")
 def inherit_upstream_column_knowledge_cll(
@@ -876,20 +850,18 @@ def inherit_upstream_column_knowledge_cll(
             or _is_generated
             or _is_multi_src
         ):
-            # No single traceable progenitor → drop any stale provenance tag, then skip.
-            _drop_stale_desc_source(node, col_name, node_col, _cfg.desc_source_key)
+            # No single traceable progenitor → skip.
             continue
 
         if result.progenitor_model is None and not _is_union:
             # Column originates here with no traceable upstream — nothing to inherit from.
             # Note: is_first_in_chain=True with progenitor_model set means "first dbt model
             # in chain, source is progenitor" (staging→source). Allow inheritance in that case.
-            _drop_stale_desc_source(node, col_name, node_col, _cfg.desc_source_key)
             continue
 
-        # True-origin reference for the desc-source provenance tag — the node where the
-        # description was first defined (resolved by _resolve_cll_description on the
-        # single-progenitor path). Unions have no single origin, so they never get one.
+        # True-origin reference — the node where the description was first defined
+        # (resolved by _resolve_cll_description on the single-progenitor path).
+        # Unions have no single origin.
         desc_source_ref: str | None = None
 
         if _is_union:
@@ -1072,15 +1044,10 @@ def inherit_upstream_column_knowledge_cll(
         if _should_inject_ownership:
             _new_meta["desc-owner"] = "upstream"
 
-        # Strip legacy desc-source tag (one-time migration cleanup from prior osmosis versions).
-        _legacy_key = _cfg.desc_source_key
-        if _legacy_key and _legacy_key in _new_meta:
-            _new_meta.pop(_legacy_key)
-
         if _new_meta != _orig_meta:
             update_kwargs["meta"] = _new_meta
         else:
-            # Injection / cleanup reverted the meta block to a no-op → don't write meta.
+            # Injection reverted the meta block to a no-op → don't write meta.
             update_kwargs.pop("meta", None)
 
         if update_kwargs:

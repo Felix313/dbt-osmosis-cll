@@ -77,10 +77,6 @@ def get_managed_meta_keys() -> frozenset[str]:
         cfg.meta_key_derived_from,
         cfg.meta_key_computed_in,
     }
-    if cfg.desc_source_key:
-        # CLL gap-fill provenance tag — owned locally where written, must not
-        # propagate downstream as inherited meta.
-        keys.add(cfg.desc_source_key)
     return frozenset(keys)
 
 
