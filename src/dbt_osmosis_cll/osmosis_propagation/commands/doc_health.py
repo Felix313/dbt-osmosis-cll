@@ -20,10 +20,11 @@ Documented columns are further broken down by TRUST — where the text comes fro
 
 - ``glossary``  — the column name is in the central glossary (``column-docs-path``);
   the glossary is authoritative and recomputed every run.
-- ``inherited`` — the column carries the managed ``desc-source`` provenance meta key,
-  i.e. the text was gap-filled from its CLL origin and is recomputed every run.
+- ``inherited`` — the column has a column-level ``desc-owner: upstream`` override (in
+  ``meta`` or ``config.meta``), meaning osmosis continuously syncs its description from
+  the CLL upstream origin on every run.
 - ``authored``  — documented with neither marker: a human wrote it at this node
-  (origins, anchors, and frozen ``desc-owner: this`` columns land here).
+  (origins, named anchors, and locally authored ``desc-owner: this`` columns land here).
 
 Combined with ``cll_failures`` (``--check-cll``), this gives CI a way to catch
 silent CLL regressions: a drop in ``inherited`` + a rise in ``undocumented``
@@ -144,7 +145,7 @@ def compute_doc_health(
     """
     from dbt.artifacts.resources.types import NodeType
 
-    from dbt_osmosis_cll.config import get_column_docs, get_config
+    from dbt_osmosis_cll.config import get_column_docs
     from dbt_osmosis_cll.integration.cll import (
         get_cll_failures,
         get_cll_results,
@@ -155,16 +156,18 @@ def compute_doc_health(
     placeholders = set(context.placeholders)
     report = DocHealthReport(cll_checked=check_cll)
 
-    desc_source_key = get_config().desc_source_key
     glossary_cols = frozenset(get_column_docs().keys())
 
     def _is_inherited(col: t.Any) -> bool:
-        """True when the column carries the managed desc-source provenance key
-        (top-level meta in classic mode, config.meta in fusion mode)."""
-        if not desc_source_key:
-            return False
+        """True when the column has a column-level ``desc-owner: upstream`` override.
+
+        osmosis injects this key (into top-level meta in classic mode or config.meta in
+        fusion mode) when it verifiably traces the column's CLL origin AND the layer-default
+        is ``desc-owner: this``.  A column-level override means the description is continuously
+        synced from the upstream origin on every osmosis run.
+        """
         meta = getattr(col, "meta", None) or {}
-        if desc_source_key in meta:
+        if meta.get("desc-owner") == "upstream":
             return True
         col_config = getattr(col, "config", None)
         if col_config is None:
@@ -174,7 +177,7 @@ def compute_doc_health(
             if isinstance(col_config, dict)
             else getattr(col_config, "meta", None) or {}
         )
-        return desc_source_key in config_meta
+        return config_meta.get("desc-owner") == "upstream"
 
     for _uid, node in _iter_candidate_nodes(context):
         total = documented = annotation_only = 0

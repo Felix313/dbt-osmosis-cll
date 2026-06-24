@@ -192,18 +192,17 @@ class OsmosisConfig:
     inputs, etc.).  Value format: ``SCHEMA.MODEL``.  Aligns with ``annotation-computed``.
     """
 
-    # ── desc-source provenance ────────────────────────────────────────────────
+    # ── legacy desc-source cleanup ────────────────────────────────────────────
     desc_source_key: str = "desc-source"
-    """Meta key written under ``config.meta`` recording the CLL progenitor a column's
-    description was gap-filled from.  Value format: ``MODEL_NAME.COLUMN_NAME`` (uppercase;
-    for sources, ``MODEL_NAME`` is the source table name).
+    """Legacy provenance meta key written by prior osmosis versions.
 
-    Written ONLY when CLL inheritance fills a previously empty description (gap-fill) — never
-    for force-inherit (``desc-owner: upstream``) overwrites of an existing description, since
-    such columns are owned upstream and need no provenance tag.  Stripped when a column gains
-    its own authored description and is no longer inherited.
+    osmosis no longer writes this key; it now injects ``desc-owner: upstream`` directly when
+    it verifiably traces a column's CLL origin (see ``inherit_upstream_column_knowledge_cll``).
+    This field remains so the key stays in ``get_managed_meta_keys()`` — which ensures:
+      • the YAML sync writer strips it from ``config.meta`` on the next write (no re-persistence)
+      • it is not forwarded downstream as regular inherited meta
 
-    Set to an empty string in ``.osmosis`` (``desc-source-key =``) to disable writing the key.
+    Set to an empty string in ``.osmosis`` (``desc-source-key =``) to disable cleanup.
     Configured as ``desc-source-key``.
     """
 

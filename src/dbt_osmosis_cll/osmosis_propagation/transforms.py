@@ -738,18 +738,15 @@ def _build_column_config_with_meta(node_col: t.Any, new_meta: dict[str, t.Any]) 
 
 
 def _drop_stale_desc_source(node: t.Any, col_name: str, node_col: t.Any, key: str) -> None:
-    """Remove a ``desc-source`` provenance tag from a column that is no longer CLL-inherited.
+    """Strip a legacy ``desc-source`` provenance tag from a column.
 
-    Used on the early-skip paths (aggregate / window / literal / generated / multi-source /
-    originates-here) where a column that previously inherited a description — and so carries a
-    provenance tag — has since become non-inheritable.  Keeping the old tag there would make it
-    stale, so it is dropped.
+    Called on early-skip paths (aggregate / window / literal / generated / multi-source /
+    originates-here) and as a one-time migration cleanup wherever the old tag may linger.
+    ``desc-source`` is no longer written by osmosis; this function clears any instance written
+    by prior versions so the YAML does not carry stale provenance pointers.
 
-    The tag is a managed meta key, so the authoritative removal is from the column's TOP-LEVEL
-    ``meta``: the YAML sync writer re-adds managed keys to ``config.meta`` ONLY from top-level
-    meta, so leaving a stale tag there would re-persist it.  A stale copy sitting directly in
-    ``config.meta`` is also stripped for completeness (though the writer drops managed keys from
-    existing ``config.meta`` anyway).  No-op when the key is disabled or the tag is absent.
+    Strips from both top-level ``meta`` (classic mode) and ``config.meta`` (fusion mode).
+    No-op when the key is disabled (empty string) or the tag is absent.
     """
     if not key:
         return
@@ -1031,93 +1028,60 @@ def inherit_upstream_column_knowledge_cll(
                     if merged_meta != local_meta:
                         update_kwargs["meta"] = merged_meta
 
-        # --- desc-source provenance (managed meta key) ---
-        # Recomputed from current CLL state on EVERY run rather than written once and left in
-        # place, so the tag can never go stale: it always equals the column's CURRENT true
-        # origin, or is absent when the column is no longer CLL-inherited. This makes the pass
-        # idempotent (a second run with no upstream change is a no-op) and self-correcting (if
-        # the lineage moves to a different origin the pointer updates; if the column stops being
-        # inherited the tag is dropped).
+        # --- desc-owner: upstream injection ---
+        # When osmosis verifiably traces this column's CLL origin AND the layer-default is "this"
+        # (defensive gap-fill mode), inject ``desc-owner: upstream`` at column level. This commits
+        # the column to continuous upstream sync: on every subsequent run ``force_inherit=True``
+        # keeps the description in lockstep with the upstream origin automatically.
         #
-        # IMPORTANT — write to the column's TOP-LEVEL ``meta``, not ``config.meta`` directly.
-        # desc-source is a managed meta key, and the YAML sync writer treats top-level ``meta``
-        # as the single source of truth for managed keys: it strips them from any existing
-        # ``config.meta`` (to avoid stale accumulation) and re-adds them from top-level ``meta``
-        # — placing them under ``config.meta`` in fusion mode, or keeping them top-level in
-        # classic mode. A value written straight to ``config.meta`` here is therefore dropped on
-        # write in BOTH modes. Routing through ``meta`` lets the writer persist it correctly.
+        # Injection only fires when the text is provably from upstream:
+        #   • ``_gap_filled`` — column was empty this run and just received an upstream description
+        #   • ``_final_desc == _resolved_upstream`` — backfill for columns already carrying the
+        #     upstream text from a previous osmosis run (no tag yet, but content proves inheritance)
+        # Text divergence (developer improved the description locally) correctly prevents injection,
+        # preserving the developer's work without requiring any tag changes.
         #
-        # A column counts as CLL-inherited — and therefore carries the tag, pointing at
-        # ``desc_source_ref`` — when it is not owned upstream (force_inherit), has a single
-        # resolvable origin, has a non-empty final description, AND any of:
-        #   • it was gap-filled this run; or
-        #   • its description still matches the resolved upstream text — covers the idempotent
-        #     re-match on later runs and backfills descriptions that were inherited before this
-        #     feature existed (no tag yet, but content proves the inheritance); or
-        #   • it already carried the tag — keeps provenance alive when ``desc-owner: this``
-        #     freezes the child while the upstream description text later drifts. The frozen
-        #     text no longer matches upstream, but the column is still sourced from the same
-        #     origin, so the pointer is correct, not stale.
-        # Everything else — owned upstream, unions, the early-skipped computed/aggregate kinds
-        # (handled above), an unresolved/empty description, or a genuinely locally authored
-        # description that was never inherited — carries no tag, and any existing tag is dropped.
-        # To claim local ownership of a previously inherited description, remove its desc-source
-        # tag; while the tag is present the column is treated as inherited.
-        _desc_source_key = _cfg.desc_source_key
-        if _desc_source_key:
-            _orig_meta = dict(node_col.meta or {})
-            # Detect a prior tag wherever it loaded from: top-level meta (classic) or a
-            # fusion-written config.meta. Either counts as "already inherited".
-            _had_tag = (
-                _desc_source_key in _orig_meta
-                or _desc_source_key in _read_column_config_meta(node_col)
-            )
+        # Additive-only: ``desc-owner: upstream`` is NEVER removed by osmosis. Once injected, the
+        # developer removes it manually when SQL changes the column's meaning — the visible tag in
+        # YAML serves as an explicit reminder to review ownership when editing.
+        #
+        # Also strips legacy ``desc-source`` tags (written by prior osmosis versions) as a
+        # one-time migration cleanup. The YAML sync writer additionally strips them from
+        # ``config.meta`` via managed-key filtering, so no separate config.meta pass is needed here.
+        _orig_meta = dict(node_col.meta or {})
 
-            _final_desc_raw = update_kwargs.get("description", existing_desc)
-            _final_desc = (
-                strip_annotation_tags(_final_desc_raw).strip() if _final_desc_raw else ""
-            )
-            _resolved_upstream = (
-                strip_annotation_tags(desc_to_apply).strip() if desc_to_apply else ""
-            )
+        _final_desc_raw = update_kwargs.get("description", existing_desc)
+        _final_desc = strip_annotation_tags(_final_desc_raw).strip() if _final_desc_raw else ""
+        _resolved_upstream = strip_annotation_tags(desc_to_apply).strip() if desc_to_apply else ""
 
-            # A column never cites itself as its own source: when the origin resolves back to
-            # this very column (e.g. an incremental model selecting from {{ this }}), the text
-            # originates here, so it is authored, not inherited → no tag.
-            _self_ref = f"{node.name.upper()}.{col_name.upper()}"
+        # A column never cites itself as its own source (e.g. incremental model reading {{ this }}).
+        _self_ref = f"{node.name.upper()}.{col_name.upper()}"
+        _is_gap_fill_owner = str(desc_authority).lower() == "this"
 
-            # desc-source is for GAP-FILL columns only — those whose description is inherited via
-            # CLL because the layer owns descriptions but gap-fills empties (desc-owner: this,
-            # the default). It is NOT written for:
-            #   • desc-owner: upstream (force-inherit) — transparent passthroughs, covered by
-            #     CBM-ODP annotations, owned upstream;
-            #   • a NAMED anchor (desc-owner set to anything else, e.g. "aml") — the description
-            #     is explicitly authored/owned at that column (e.g. injected by AML enrichment),
-            #     so the column is an ORIGIN; a CLL-lineage pointer would mischaracterize it even
-            #     when its text happens to match an upstream source.
-            _is_gap_fill_owner = str(desc_authority).lower() == "this"
+        _should_inject_ownership = (
+            not force_inherit        # not already desc-owner: upstream at column or layer level
+            and _is_gap_fill_owner   # layer-default is "this" (defensive); named anchors excluded
+            and desc_source_ref is not None
+            and desc_source_ref != _self_ref
+            and bool(_final_desc)
+            and (_gap_filled or _final_desc == _resolved_upstream)
+        )
 
-            _is_inherited = (
-                not force_inherit
-                and _is_gap_fill_owner
-                and desc_source_ref is not None
-                and desc_source_ref != _self_ref
-                and bool(_final_desc)
-                and (_gap_filled or _final_desc == _resolved_upstream or _had_tag)
-            )
+        _new_meta = dict(update_kwargs["meta"]) if "meta" in update_kwargs else dict(_orig_meta)
 
-            # Apply onto the meta the writer will persist: the tag/meta block above may already
-            # have staged update_kwargs["meta"]; otherwise start from the column's current meta.
-            _new_meta = dict(update_kwargs["meta"]) if "meta" in update_kwargs else dict(_orig_meta)
-            if _is_inherited:
-                _new_meta[_desc_source_key] = desc_source_ref
-            else:
-                _new_meta.pop(_desc_source_key, None)
-            if _new_meta != _orig_meta:
-                update_kwargs["meta"] = _new_meta
-            else:
-                # desc-source reverted the meta block's change to a no-op → don't write meta.
-                update_kwargs.pop("meta", None)
+        if _should_inject_ownership:
+            _new_meta["desc-owner"] = "upstream"
+
+        # Strip legacy desc-source tag (one-time migration cleanup from prior osmosis versions).
+        _legacy_key = _cfg.desc_source_key
+        if _legacy_key and _legacy_key in _new_meta:
+            _new_meta.pop(_legacy_key)
+
+        if _new_meta != _orig_meta:
+            update_kwargs["meta"] = _new_meta
+        else:
+            # Injection / cleanup reverted the meta block to a no-op → don't write meta.
+            update_kwargs.pop("meta", None)
 
         if update_kwargs:
             logger.debug(

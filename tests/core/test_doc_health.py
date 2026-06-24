@@ -148,13 +148,12 @@ def test_format_report_contains_summary_and_attention_section():
 
 
 def test_trust_breakdown_authored_inherited_glossary():
-    """Documented columns split by provenance: glossary > inherited (desc-source) > authored."""
-    desc_source_key = get_config().desc_source_key
+    """Documented columns split by provenance: glossary > inherited (desc-owner: upstream) > authored."""
     node = FakeNode(
         "m",
         {
             "A": FakeColumn("A", "hand-written description"),
-            "B": FakeColumn("B", "gap-filled text", meta={desc_source_key: "STG_X.B"}),
+            "B": FakeColumn("B", "gap-filled text", meta={"desc-owner": "upstream"}),
             "C": FakeColumn("C", "glossary text"),
             "D": FakeColumn("D", ""),
         },
@@ -181,11 +180,10 @@ def test_trust_breakdown_authored_inherited_glossary():
     assert data["nodes"][0]["glossary"] == 1
 
 
-def test_trust_breakdown_reads_desc_source_from_config_meta():
-    """Fusion mode writes managed keys to config.meta — inherited must be detected there too."""
-    desc_source_key = get_config().desc_source_key
+def test_trust_breakdown_reads_desc_owner_from_config_meta():
+    """Fusion mode writes desc-owner: upstream to config.meta — inherited must be detected there."""
     col = FakeColumn("B", "gap-filled text")
-    col.config = {"meta": {desc_source_key: "STG_X.B"}}
+    col.config = {"meta": {"desc-owner": "upstream"}}
     node = FakeNode("m", {"B": col})
     ctx = make_context()
     with patched([node]):
