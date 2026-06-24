@@ -91,11 +91,11 @@ jobs:
           pip install --constraint=.github/workflows/constraints.txt uv
           uv --version
 
-      - name: Validate latest dbt-core compatibility with published DuckDB adapter
+      - name: Validate dbt-core 1.10 (latest with published DuckDB adapter) compatibility
         run: |
           SMOKE_ENV=$(mktemp -d)/dbt-osmosis-smoke
           uv venv "$SMOKE_ENV"
-          uv pip install --python "$SMOKE_ENV/bin/python" "dbt-core~=1.11.0" "dbt-duckdb~=1.10.1" basedpyright pytest pytest-cov hypothesis .
+          uv pip install --python "$SMOKE_ENV/bin/python" "dbt-core~=1.10.0" "dbt-duckdb~=1.10.1" basedpyright pytest pytest-cov hypothesis .
           export VIRTUAL_ENV="$SMOKE_ENV"
           export PATH="$SMOKE_ENV/bin:$PATH"
           basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
