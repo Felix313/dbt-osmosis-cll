@@ -20,7 +20,10 @@ from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext, Ya
 @pytest.fixture(scope="function")
 def fresh_caches():
     """Patches the internal caches so each test starts with a fresh state."""
-    from dbt_osmosis_cll.osmosis_propagation.schema.reader import _YAML_BUFFER_CACHE, _YAML_ORIGINAL_CACHE
+    from dbt_osmosis_cll.osmosis_propagation.schema.reader import (
+        _YAML_BUFFER_CACHE,
+        _YAML_ORIGINAL_CACHE,
+    )
 
     _YAML_BUFFER_CACHE.clear()
     _YAML_ORIGINAL_CACHE.clear()
@@ -75,7 +78,9 @@ def test_create_missing_source_yamls_tracks_written_files(tmp_path: Path):
             "dbt_osmosis_cll.osmosis_propagation.introspection.get_columns",
             return_value={"id": relation_meta},
         ),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._reload_manifest") as reload_manifest,
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._reload_manifest"
+        ) as reload_manifest,
     ):
         create_missing_source_yamls(context)
 
@@ -98,7 +103,9 @@ def test_create_missing_source_yamls_dry_run_skips_reload(tmp_path: Path):
             "dbt_osmosis_cll.osmosis_propagation.introspection.get_columns",
             return_value={"id": relation_meta},
         ),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._reload_manifest") as reload_manifest,
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._reload_manifest"
+        ) as reload_manifest,
     ):
         create_missing_source_yamls(context)
 
@@ -143,7 +150,9 @@ def test_create_missing_source_yamls_does_not_leak_database_override_between_sou
             "dbt_osmosis_cll.osmosis_propagation.introspection.get_columns",
             return_value={"id": relation_meta},
         ),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._reload_manifest") as reload_manifest,
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._reload_manifest"
+        ) as reload_manifest,
     ):
         create_missing_source_yamls(context)
 
@@ -194,7 +203,9 @@ def test_apply_restructure_plan_dry_run_skips_reload(
 
     with (
         mock.patch.object(yaml_context.settings, "dry_run", True),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._reload_manifest") as reload_manifest,
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._reload_manifest"
+        ) as reload_manifest,
     ):
         apply_restructure_plan(yaml_context, plan, confirm=False)
 
@@ -510,7 +521,10 @@ def test_absolute_path_within_project_allowed(yaml_context: YamlRefactorContext)
 
 def test_yaml_file_creation_on_disk(yaml_context: YamlRefactorContext, tmp_path):
     """Behavior test: Verify that YAML files are actually created on disk."""
-    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+        RestructureOperation,
+        apply_restructure_plan,
+    )
 
     # Create a plan with a new file
     target_file = tmp_path / "models" / "test_model.yml"
@@ -545,7 +559,10 @@ def test_yaml_file_merge_with_existing(yaml_context: YamlRefactorContext, tmp_pa
     """Behavior test: Verify that new content is merged with existing YAML content."""
     import yaml
 
-    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+        RestructureOperation,
+        apply_restructure_plan,
+    )
 
     target_file = tmp_path / "models" / "existing.yml"
     target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -590,7 +607,10 @@ def test_superseded_file_cleanup(yaml_context: YamlRefactorContext, tmp_path):
     from dbt.artifacts.resources.types import NodeType
     from dbt.contracts.graph.nodes import ModelNode
 
-    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+        RestructureOperation,
+        apply_restructure_plan,
+    )
 
     old_file = tmp_path / "models" / "old.yml"
     old_file.parent.mkdir(parents=True, exist_ok=True)
@@ -632,7 +652,10 @@ def test_superseded_file_cleanup(yaml_context: YamlRefactorContext, tmp_path):
 
 def test_directory_structure_creation(yaml_context: YamlRefactorContext, tmp_path):
     """Behavior test: Verify that nested directories are created as needed."""
-    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+        RestructureOperation,
+        apply_restructure_plan,
+    )
 
     # Create a deep nested path
     nested_path = tmp_path / "models" / "staging" / "raw" / "sources" / "test.yml"
@@ -668,7 +691,10 @@ def test_conflict_resolution_file_already_exists(yaml_context: YamlRefactorConte
     """
     import yaml
 
-    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+        RestructureOperation,
+        apply_restructure_plan,
+    )
 
     target_file = tmp_path / "models" / "conflict.yml"
     target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -710,7 +736,10 @@ def test_empty_superseded_file_removal(yaml_context: YamlRefactorContext, tmp_pa
     from dbt.artifacts.resources.types import NodeType
     from dbt.contracts.graph.nodes import ModelNode
 
-    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+        RestructureOperation,
+        apply_restructure_plan,
+    )
 
     old_file = tmp_path / "models" / "to_empty.yml"
     old_file.parent.mkdir(parents=True, exist_ok=True)
@@ -752,7 +781,10 @@ def test_partial_superseded_file_preserved(yaml_context: YamlRefactorContext, tm
     from dbt.artifacts.resources.types import NodeType
     from dbt.contracts.graph.nodes import ModelNode
 
-    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import RestructureOperation, apply_restructure_plan
+    from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+        RestructureOperation,
+        apply_restructure_plan,
+    )
 
     old_file = tmp_path / "models" / "partial.yml"
     old_file.parent.mkdir(parents=True, exist_ok=True)

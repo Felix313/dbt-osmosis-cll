@@ -3,7 +3,10 @@
 from unittest import mock
 
 from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext
-from dbt_osmosis_cll.osmosis_propagation.commands.sql_operations import compile_sql_code, execute_sql_code
+from dbt_osmosis_cll.osmosis_propagation.commands.sql_operations import (
+    compile_sql_code,
+    execute_sql_code,
+)
 
 
 def test_compile_sql_code_no_jinja(yaml_context: YamlRefactorContext):
@@ -13,7 +16,9 @@ def test_compile_sql_code_no_jinja(yaml_context: YamlRefactorContext):
     """
     raw_sql = "SELECT 1 AS mycol"
     before_node_count = len(yaml_context.project.manifest.nodes)
-    with mock.patch("dbt_osmosis_cll.osmosis_propagation.commands.sql_operations.process_node") as mock_process:
+    with mock.patch(
+        "dbt_osmosis_cll.osmosis_propagation.commands.sql_operations.process_node"
+    ) as mock_process:
         node = compile_sql_code(yaml_context.project, raw_sql)
         mock_process.assert_not_called()
     after_node_count = len(yaml_context.project.manifest.nodes)
@@ -28,8 +33,12 @@ def test_compile_sql_code_with_jinja(yaml_context: YamlRefactorContext):
     """
     raw_sql = "SELECT {{ 1 + 1 }} AS mycol"
     with (
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.commands.sql_operations.process_node") as mock_process,
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.commands.sql_operations.SqlCompileRunner.compile") as mock_compile,
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.commands.sql_operations.process_node"
+        ) as mock_process,
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.commands.sql_operations.SqlCompileRunner.compile"
+        ) as mock_compile,
     ):
         node_mock = mock.Mock()
         node_mock.raw_code = raw_sql
@@ -58,7 +67,9 @@ def test_execute_sql_code_with_jinja(yaml_context: YamlRefactorContext):
     raw_sql = "SELECT {{ 2 + 2 }} AS four"
     with (
         mock.patch.object(yaml_context.project.adapter, "execute") as mock_execute,
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.commands.sql_operations.compile_sql_code") as mock_compile,
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.commands.sql_operations.compile_sql_code"
+        ) as mock_compile,
     ):
         mock_execute.return_value = ("OK", mock.Mock(rows=[(4,)]))
 

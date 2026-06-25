@@ -61,9 +61,7 @@ def _topological_depths(context: t.Any) -> dict[str, int]:
         upstream: list[str] = []
         depends_on = getattr(node, "depends_on", None)
         if depends_on is not None:
-            upstream = [
-                u for u in (getattr(depends_on, "nodes", []) or []) if u in all_nodes
-            ]
+            upstream = [u for u in (getattr(depends_on, "nodes", []) or []) if u in all_nodes]
         if not upstream:
             depths[uid] = 0
             return 0
@@ -80,9 +78,7 @@ def _topological_depths(context: t.Any) -> dict[str, int]:
     return depths
 
 
-def _topological_waves(
-    context: t.Any, candidates: list[ResultNode]
-) -> list[list[ResultNode]]:
+def _topological_waves(context: t.Any, candidates: list[ResultNode]) -> list[list[ResultNode]]:
     """Group *candidates* into waves sorted by ascending dependency depth.
 
     Each wave can run in parallel internally; the pipeline op must wait for
@@ -122,7 +118,6 @@ def _resolve_select_to_ids(context: t.Any) -> frozenset[str]:
     from dbt.compilation import Linker
     from dbt.graph.cli import parse_union
     from dbt.graph.selector import NodeSelector
-    from dbt.graph.selector_spec import IndirectSelection
 
     manifest = context.project.manifest
     select_strs = list(context.settings.select)
@@ -223,8 +218,6 @@ def _topological_sort(
 
     uid_to_node = dict(candidate_nodes)
     return [(uid, uid_to_node[uid]) for uid in sorted_uids]
-
-
 
 
 def _iter_candidate_nodes(

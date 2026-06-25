@@ -6,6 +6,7 @@ round-trip emitter (which can reorder keys or alter block scalars).
 Only handles the subset of the dbt YAML schema used by staging/model files:
   version: 2 / models: [...columns: [...]]
 """
+
 from __future__ import annotations
 
 import re
@@ -82,7 +83,9 @@ def _wrap_description(desc: str, max_text_width: int) -> str:
     return "\n\n".join(wrapped)
 
 
-def _render_description(desc: str, key_indent: int, max_line_width: int = _DEFAULT_MAX_LINE_WIDTH) -> list[str]:
+def _render_description(
+    desc: str, key_indent: int, max_line_width: int = _DEFAULT_MAX_LINE_WIDTH
+) -> list[str]:
     """Render a description as a literal block scalar when multi-line or too long."""
     max_text_width = max_line_width - (key_indent + 2)
     if "\n" not in desc and len(desc) > max_text_width:

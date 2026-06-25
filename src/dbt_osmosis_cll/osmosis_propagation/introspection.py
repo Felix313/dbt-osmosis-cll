@@ -1185,7 +1185,12 @@ def get_columns(
     # Falls back to get_columns_in_relation if the adapter doesn't support it.
     try:
         used_schemas: frozenset = frozenset(
-            [(relation.database.casefold() if relation.database else "", relation.schema.casefold() if relation.schema else "")]  # type: ignore[union-attr]
+            [
+                (
+                    relation.database.casefold() if relation.database else "",
+                    relation.schema.casefold() if relation.schema else "",
+                )
+            ]  # type: ignore[union-attr]
         )
         catalog_table, _ = context.project.adapter.get_catalog_by_relations(
             used_schemas, {relation}
@@ -1205,7 +1210,9 @@ def get_columns(
                 col_index = row_dict.get("column_index") or row_dict.get("COLUMN_INDEX") or 0
                 if col_name:
                     catalog_columns.append(
-                        ColumnMetadata(name=col_name, type=col_type, index=col_index, comment=col_comment)
+                        ColumnMetadata(
+                            name=col_name, type=col_type, index=col_index, comment=col_comment
+                        )
                     )
             if catalog_columns:
                 with _COLUMN_LIST_CACHE_LOCK:
@@ -1325,7 +1332,9 @@ def prefetch_columns(context: t.Any, nodes: t.Iterable[t.Any]) -> int:
             col_index = row_dict.get("column_index") or row_dict.get("COLUMN_INDEX") or 0
             if col_name:
                 cols.append(
-                    ColumnMetadata(name=col_name, type=col_type, index=col_index, comment=col_comment)
+                    ColumnMetadata(
+                        name=col_name, type=col_type, index=col_index, comment=col_comment
+                    )
                 )
         if cols:
             with _COLUMN_LIST_CACHE_LOCK:
@@ -1334,7 +1343,9 @@ def prefetch_columns(context: t.Any, nodes: t.Iterable[t.Any]) -> int:
             prefetched += 1
 
     logger.info(
-        ":white_check_mark: Batch-prefetched columns for %d/%d relations.", prefetched, len(to_fetch)
+        ":white_check_mark: Batch-prefetched columns for %d/%d relations.",
+        prefetched,
+        len(to_fetch),
     )
     return prefetched
 

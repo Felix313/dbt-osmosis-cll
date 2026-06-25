@@ -92,9 +92,14 @@ def patched(*, results=None, settings=None, origin=None, origin_desc=None, col_d
         return results.get(node.name, [])
 
     stack = contextlib.ExitStack()
-    stack.enter_context(mock.patch("dbt_osmosis_cll.integration.cll.get_cll_results", fake_get_cll_results))
     stack.enter_context(
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.introspection._get_setting_for_node", fake_get_setting)
+        mock.patch("dbt_osmosis_cll.integration.cll.get_cll_results", fake_get_cll_results)
+    )
+    stack.enter_context(
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.introspection._get_setting_for_node",
+            fake_get_setting,
+        )
     )
     stack.enter_context(
         mock.patch("dbt_osmosis_cll.config.get_column_docs", lambda *a, **k: dict(col_docs))
@@ -104,7 +109,8 @@ def patched(*, results=None, settings=None, origin=None, origin_desc=None, col_d
     )
     stack.enter_context(
         mock.patch(
-            "dbt_osmosis_cll.integration.cll.get_origin_source_description", lambda *a, **k: origin_desc
+            "dbt_osmosis_cll.integration.cll.get_origin_source_description",
+            lambda *a, **k: origin_desc,
         )
     )
     with stack:
@@ -336,12 +342,19 @@ def test_passthrough_of_upstream_computation_points_to_computing_model():
     parent, and by bare model name (no schema prefix). Locks the annotate side of the
     computation-origin fix."""
     cfg = get_config()
-    node = FakeNode("dp", {"PREV_SOURCE_SYS_ID": FakeColumn("PREV_SOURCE_SYS_ID", "Vorperiodenwert")})
+    node = FakeNode(
+        "dp", {"PREV_SOURCE_SYS_ID": FakeColumn("PREV_SOURCE_SYS_ID", "Vorperiodenwert")}
+    )
     _annotate(
         node,
         results={
             "dp": [
-                cll("dp", "prev_source_sys_id", progenitor_model="union", progenitor_column="prev_source_sys_id")
+                cll(
+                    "dp",
+                    "prev_source_sys_id",
+                    progenitor_model="union",
+                    progenitor_column="prev_source_sys_id",
+                )
             ]
         },
         settings={"annotate-column-origin-infos": "always"},

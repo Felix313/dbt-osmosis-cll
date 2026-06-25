@@ -5,6 +5,7 @@ Orchestrates the collect → fetch → merge → write pipeline without any
 knowledge of where descriptions come from.  The caller supplies a
 ``DescriptionFetcher`` implementation that connects to their data source.
 """
+
 from __future__ import annotations
 
 import fnmatch
@@ -22,6 +23,7 @@ from ._yaml import render_model_yml, _DEFAULT_MAX_LINE_WIDTH
 # Writes always target config.meta; reads also accept legacy top-level meta so YAMLs
 # written by older runs still resolve. This keeps output dbt-1.10-correct and avoids
 # the churn of osmosis later relocating a top-level meta key into config.meta.
+
 
 def _read_anchor(entry: dict[str, t.Any], anchor_meta_key: str) -> t.Any:
     """Read the anchor value from config.meta, falling back to legacy top-level meta."""
@@ -136,6 +138,7 @@ def enrich_yaml_files(
     Returns:
         Mapping of ``{yml_path: number_of_columns_updated}``.
     """
+
     def _is_model_anchored(model_name: str) -> bool:
         """Return True if this model should receive a model-level anchor."""
         if not model_anchor_globs:
@@ -178,21 +181,26 @@ def enrich_yaml_files(
                     continue
                 # In default mode: only enrich empty / auto-generated descriptions.
                 # In force mode: enrich all non-anchored columns (external source is leading).
-                if not force and existing and not (
-                    replaceable_pattern is not None
-                    and replaceable_pattern.fullmatch(existing)
+                if (
+                    not force
+                    and existing
+                    and not (
+                        replaceable_pattern is not None and replaceable_pattern.fullmatch(existing)
+                    )
                 ):
                     continue
                 col_names_needed.add(col_name)
                 work_items.append({
-                    "yml_path":   yml_path,
+                    "yml_path": yml_path,
                     "model_name": model_name,
-                    "col_name":   col_name,
-                    "existing":   existing,
+                    "col_name": col_name,
+                    "existing": existing,
                     "model_anchor": _is_model_anchored(model_name),
                 })
 
-    print(f"{len(work_items)} enrichable column slot(s) across {len(col_names_needed)} unique name(s).")
+    print(
+        f"{len(work_items)} enrichable column slot(s) across {len(col_names_needed)} unique name(s)."
+    )
     if not work_items:
         print("Nothing to do.")
         return {}
@@ -228,11 +236,15 @@ def enrich_yaml_files(
                 # osmosis from overwriting it with an upstream description.
                 new_desc = item["existing"]
                 if verbose:
-                    print(f"  [ANCHOR] {item['model_name']}.{item['col_name']}: desc unchanged, anchoring as AML-owned")
+                    print(
+                        f"  [ANCHOR] {item['model_name']}.{item['col_name']}: desc unchanged, anchoring as AML-owned"
+                    )
             else:
                 stats["skipped"] += 1
                 if verbose:
-                    print(f"  [SKIP] {item['model_name']}.{item['col_name']}: no change / manual docs preserved")
+                    print(
+                        f"  [SKIP] {item['model_name']}.{item['col_name']}: no change / manual docs preserved"
+                    )
                 continue
 
         if verbose:
@@ -269,7 +281,8 @@ def enrich_yaml_files(
                     if dry_run:
                         old = col_entry.get("description", "<none>")
                         anchor_note = (
-                            "model-level" if use_model_anchor
+                            "model-level"
+                            if use_model_anchor
                             else f"column config.meta.{anchor_meta_key}"
                         )
                         print(f"\n[DRY RUN] {yml_path.name}  ->  {col_name}")
@@ -333,7 +346,7 @@ def enrich_yaml_files(
             print(f"  Cleaned {yml_path.name} (model-level anchor, per-column anchors removed)")
 
     if dry_run:
-        print(f"\n[DRY RUN] No files written. Remove --dry-run to apply.")
+        print("\n[DRY RUN] No files written. Remove --dry-run to apply.")
     else:
         print(f"\nDone. Updated {len(results)} file(s).")
 

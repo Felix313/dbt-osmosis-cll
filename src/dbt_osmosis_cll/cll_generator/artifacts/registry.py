@@ -141,20 +141,21 @@ def _replace_placeholder(match: re.Match) -> str:
     """
     return match.group(0) if match.group(0).startswith("__dbt__") else "TRUE"
 
-from dbt_osmosis_cll.cll_generator.artifacts.catalog import CatalogReader
-from dbt_osmosis_cll.cll_generator.artifacts.manifest import ManifestReader
-from dbt_osmosis_cll.cll_generator.models.schema import (
+
+from dbt_osmosis_cll.cll_generator.artifacts.catalog import CatalogReader  # noqa: E402
+from dbt_osmosis_cll.cll_generator.artifacts.manifest import ManifestReader  # noqa: E402
+from dbt_osmosis_cll.cll_generator.models.schema import (  # noqa: E402
     Model,
     SQLParseResult,
     ColumnLineage,
     Exposure,
 )
-from dbt_osmosis_cll.cll_generator.artifacts.exceptions import (
+from dbt_osmosis_cll.cll_generator.artifacts.exceptions import (  # noqa: E402
     ModelNotFoundError,
     RegistryNotLoadedError,
     RegistryError,
 )
-from dbt_osmosis_cll.cll_generator.parser import SQLColumnParser
+from dbt_osmosis_cll.cll_generator.parser import SQLColumnParser  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -421,6 +422,7 @@ class ModelRegistry:
         get_column_lineage() because the api.py loop iterates over model.columns.
         """
         from dbt_osmosis_cll.cll_generator.models.schema import Column
+
         for col_name, lineage in parse_result.column_lineage.items():
             if col_name not in model.columns:
                 model.columns[col_name] = Column(name=col_name, model_name=model.name)

@@ -1,7 +1,7 @@
 # Bug: table alias resolved as model name in CLL cache
 
-**Date:** 2026-06-17  
-**Severity:** Low (affects one edge type; downstream consumers can detect and filter)  
+**Date:** 2026-06-17
+**Severity:** Low (affects one edge type; downstream consumers can detect and filter)
 **Affected component:** `cll_generator/api.py` — `_resolve_progenitor` / `source_columns` extraction
 
 ---
@@ -56,8 +56,8 @@ to appear as a table alias in the compiled SQL fragment that the parser analysed
 
 ## Observed cache entry
 
-File: `target/cll_cache.json`  
-Model: `EXPORT_DAT_TOP_CUSTOMER_FLG_DELTA_HIST`  
+File: `target/cll_cache.json`
+Model: `EXPORT_DAT_TOP_CUSTOMER_FLG_DELTA_HIST`
 Column: `record_flg`
 
 ```json

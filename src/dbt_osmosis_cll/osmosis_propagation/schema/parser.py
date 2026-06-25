@@ -142,7 +142,9 @@ def create_yaml_instance(
         # .osmosis yaml-best-width) are reflected — not the stale captured `width`.
         effective_width = y.best_width
         newlines = len(data.splitlines())
-        if newlines == 1 and len(data) > effective_width - len(f"description{y.prefix_colon or ''}: "):
+        if newlines == 1 and len(data) > effective_width - len(
+            f"description{y.prefix_colon or ''}: "
+        ):
             # Wrap long single-line strings and emit as literal block (|) so that
             # consumers (e.g. DBeaver column comments) receive real line breaks
             # rather than one very long unbroken string.

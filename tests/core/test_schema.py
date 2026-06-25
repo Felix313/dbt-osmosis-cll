@@ -10,7 +10,11 @@ from dbt_osmosis_cll.osmosis_propagation.schema.reader import (
     _YAML_BUFFER_CACHE,
     _YAML_ORIGINAL_CACHE,
 )
-from dbt_osmosis_cll.osmosis_propagation.schema.writer import _write_yaml, _merge_preserved_sections, commit_yamls
+from dbt_osmosis_cll.osmosis_propagation.schema.writer import (
+    _write_yaml,
+    _merge_preserved_sections,
+    commit_yamls,
+)
 
 
 def test_create_yaml_instance_settings():

@@ -1313,7 +1313,10 @@ class TestBackwardCompatibility:
         - get_meta(node, column_name, source, meta_key)
         - has_property(property_key, node, column_name)
         """
-        from dbt_osmosis_cll.osmosis_propagation.introspection import PropertyAccessor, PropertySource
+        from dbt_osmosis_cll.osmosis_propagation.introspection import (
+            PropertyAccessor,
+            PropertySource,
+        )
 
         mock_context = Mock()
         mock_context.project = Mock()
@@ -1420,7 +1423,10 @@ class TestBackwardCompatibility:
 
     def test_property_accessor_source_parameter(self) -> None:
         """T066: Test PropertyAccessor accepts different source parameters."""
-        from dbt_osmosis_cll.osmosis_propagation.introspection import PropertyAccessor, PropertySource
+        from dbt_osmosis_cll.osmosis_propagation.introspection import (
+            PropertyAccessor,
+            PropertySource,
+        )
 
         mock_context = Mock()
         accessor = PropertyAccessor(context=mock_context)

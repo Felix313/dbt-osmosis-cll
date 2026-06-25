@@ -148,14 +148,26 @@ def patched(
     stack.enter_context(
         mock.patch("dbt_osmosis_cll.integration.cll._ensure_manifest_index", lambda _ctx: None)
     )
-    stack.enter_context(mock.patch("dbt_osmosis_cll.integration.cll.get_cll_results", fake_get_cll_results))
-    stack.enter_context(mock.patch("dbt_osmosis_cll.integration.cll._SOURCE_INDEX", {PROJECT: source_index}))
-    stack.enter_context(mock.patch("dbt_osmosis_cll.integration.cll._NODE_INDEX", {PROJECT: node_index}))
     stack.enter_context(
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.inheritance._read_ancestor_yaml_description", fake_read_yaml)
+        mock.patch("dbt_osmosis_cll.integration.cll.get_cll_results", fake_get_cll_results)
     )
     stack.enter_context(
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.introspection._get_setting_for_node", fake_get_setting)
+        mock.patch("dbt_osmosis_cll.integration.cll._SOURCE_INDEX", {PROJECT: source_index})
+    )
+    stack.enter_context(
+        mock.patch("dbt_osmosis_cll.integration.cll._NODE_INDEX", {PROJECT: node_index})
+    )
+    stack.enter_context(
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.inheritance._read_ancestor_yaml_description",
+            fake_read_yaml,
+        )
+    )
+    stack.enter_context(
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.introspection._get_setting_for_node",
+            fake_get_setting,
+        )
     )
     if managed is not None:
         stack.enter_context(
@@ -725,12 +737,12 @@ def test_text_match_injects_desc_owner_regardless_of_progenitor():
     ctx = make_context()
     with patched(
         results={
-            "child": [
-                cll("child", "col", progenitor_model="new_parent", progenitor_column="col")
-            ]
+            "child": [cll("child", "col", progenitor_model="new_parent", progenitor_column="col")]
         },
         yaml_descs={("new_parent", "col"): "Shared desc"},
-        node_index={"new_parent": FakeNode("new_parent", {"COL": FakeColumn("COL", "Shared desc")})},
+        node_index={
+            "new_parent": FakeNode("new_parent", {"COL": FakeColumn("COL", "Shared desc")})
+        },
     ):
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
@@ -756,7 +768,7 @@ def test_upstream_text_drift_does_not_inject_ownership():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == "Locally improved desc"  # frozen by desc-owner: this
-    assert "desc-owner" not in col.meta                # no injection (text diverged)
+    assert "desc-owner" not in col.meta  # no injection (text diverged)
 
 
 def test_authored_description_gets_no_injection():
@@ -797,7 +809,7 @@ def test_named_anchor_owner_gets_no_injection():
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
     assert col.description == "Parent desc"  # preserved (named anchor, not overwritten)
-    assert "desc-owner" not in col.meta      # named anchor → origin → no injection
+    assert "desc-owner" not in col.meta  # named anchor → origin → no injection
     assert "desc-source" not in col.meta
 
 
@@ -819,7 +831,7 @@ def test_named_anchor_owner_strips_legacy_desc_source():
     ):
         inherit_upstream_column_knowledge_cll(ctx, child)
     col = child.columns["COL"]
-    assert "desc-owner" not in col.meta   # named anchor → no injection
+    assert "desc-owner" not in col.meta  # named anchor → no injection
 
 
 # ---------------------------------------------------------------------------
@@ -877,7 +889,9 @@ def test_max_depth_records_soft_fail():
     clear_cll_walk_soft_fails(ctx)
     # A 3-link passthrough chain with max_depth=1 forces the depth guard to trip.
     deep = FakeNode("deep", {"COL": FakeColumn("COL", "Deep")})
-    mid = FakeNode("mid", {"COL": FakeColumn("COL", "")}, settings={("desc-owner", None): "upstream"})
+    mid = FakeNode(
+        "mid", {"COL": FakeColumn("COL", "")}, settings={("desc-owner", None): "upstream"}
+    )
     with patched(
         results={
             "mid": [cll("mid", "col", progenitor_model="deep", progenitor_column="col")],
@@ -922,10 +936,33 @@ def _window_passthrough_fixture():
     union = FakeNode("union", {"PREV_COL": FakeColumn("PREV_COL", desc)})
     dp = FakeNode("dp", {"PREV_COL": FakeColumn("PREV_COL", "")})
     results = {
-        "dp": [cll("dp", "prev_col", is_rename=True, progenitor_model="union", progenitor_column="prev_col")],
-        "union": [cll("union", "prev_col", is_rename=True, progenitor_model="ident", progenitor_column="prev_col")],
+        "dp": [
+            cll(
+                "dp",
+                "prev_col",
+                is_rename=True,
+                progenitor_model="union",
+                progenitor_column="prev_col",
+            )
+        ],
+        "union": [
+            cll(
+                "union",
+                "prev_col",
+                is_rename=True,
+                progenitor_model="ident",
+                progenitor_column="prev_col",
+            )
+        ],
         "ident": [
-            cll("ident", "prev_col", is_window=True, is_computed=True, progenitor_model="src", progenitor_column="col")
+            cll(
+                "ident",
+                "prev_col",
+                is_window=True,
+                is_computed=True,
+                progenitor_model="src",
+                progenitor_column="col",
+            )
         ],
     }
     return ctx, dp, {"dp": dp, "union": union, "ident": ident}, results
@@ -970,12 +1007,24 @@ def test_origin_carries_renamed_name_at_computation_wall():
     dp = FakeNode("dp", {"FOO": FakeColumn("FOO", "")})
     results = {
         "dp": [cll("dp", "foo", is_rename=True, progenitor_model="union", progenitor_column="bar")],
-        "union": [cll("union", "bar", is_rename=True, progenitor_model="ident", progenitor_column="bar")],
+        "union": [
+            cll("union", "bar", is_rename=True, progenitor_model="ident", progenitor_column="bar")
+        ],
         "ident": [
-            cll("ident", "bar", is_window=True, is_computed=True, progenitor_model="src", progenitor_column="col")
+            cll(
+                "ident",
+                "bar",
+                is_window=True,
+                is_computed=True,
+                progenitor_model="src",
+                progenitor_column="col",
+            )
         ],
     }
-    with _no_origin_cache(), patched(results=results, node_index={"dp": dp, "union": union, "ident": ident}):
+    with (
+        _no_origin_cache(),
+        patched(results=results, node_index={"dp": dp, "union": union, "ident": ident}),
+    ):
         origin = get_column_origin(ctx, dp, "FOO")
     _schema, origin_model, origin_col, entry_col = origin
     assert origin_model == "IDENT"

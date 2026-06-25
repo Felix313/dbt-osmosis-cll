@@ -4,6 +4,7 @@ Description merge logic for external enrichment sources.
 Provides a configurable, idempotent merge that decides whether an external
 description should overwrite an existing YAML column description.
 """
+
 from __future__ import annotations
 
 import re

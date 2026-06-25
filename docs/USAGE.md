@@ -307,4 +307,3 @@ ROW_BATCH_TIMESTAMP: >-
 ROW_CREATE_TIMESTAMP: >-
   Timestamp when this record was first created in the database.
 ```
-

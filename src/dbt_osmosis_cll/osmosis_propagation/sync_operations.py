@@ -34,8 +34,7 @@ def _sync_doc_section(
         node.description
         and not doc_section.get("description")
         and (
-            context.settings.scaffold_empty_configs
-            or node.description not in context.placeholders
+            context.settings.scaffold_empty_configs or node.description not in context.placeholders
         )
     ):
         doc_section["description"] = str(node.description)
@@ -70,7 +69,10 @@ def _sync_doc_section(
         else:
             cdict = {k: v for k, v in cdict.items() if k not in ("config", "doc_blocks")}
         cdict["name"] = name
-        from dbt_osmosis_cll.osmosis_propagation.introspection import _get_setting_for_node, normalize_column_name
+        from dbt_osmosis_cll.osmosis_propagation.introspection import (
+            _get_setting_for_node,
+            normalize_column_name,
+        )
 
         norm_name = normalize_column_name(name, context.project.runtime_cfg.credentials.type)
 
@@ -166,8 +168,12 @@ def _sync_doc_section(
             # existing config.meta when they are no longer in the node's meta.  This
             # prevents stale flags (e.g. "desc-owner" propagated from staging)
             # from accumulating in dp-layer YAML across successive osmosis runs.
-            existing_config_meta: dict = config_value.get("meta", {}) if isinstance(config_value, dict) else {}
-            preserved_existing = {k: v for k, v in existing_config_meta.items() if k not in get_managed_meta_keys()}
+            existing_config_meta: dict = (
+                config_value.get("meta", {}) if isinstance(config_value, dict) else {}
+            )
+            preserved_existing = {
+                k: v for k, v in existing_config_meta.items() if k not in get_managed_meta_keys()
+            }
             effective_meta = dict(meta_value) if isinstance(meta_value, dict) else {}
             merged_config_meta = {**preserved_existing, **effective_meta}
             if merged_config_meta:
@@ -593,7 +599,10 @@ def _sync_versioned_model_group_to_yaml(
     """Synchronize all versions of one model through a single YAML document update."""
     representative = nodes[0]
 
-    from dbt_osmosis_cll.osmosis_propagation.path_management import get_current_yaml_path, get_target_yaml_path
+    from dbt_osmosis_cll.osmosis_propagation.path_management import (
+        get_current_yaml_path,
+        get_target_yaml_path,
+    )
 
     current_path = get_current_yaml_path(context, representative)
     target_path = current_path
@@ -636,7 +645,10 @@ def _sync_single_node_to_yaml(
         )
         return
 
-    from dbt_osmosis_cll.osmosis_propagation.path_management import get_current_yaml_path, get_target_yaml_path
+    from dbt_osmosis_cll.osmosis_propagation.path_management import (
+        get_current_yaml_path,
+        get_target_yaml_path,
+    )
 
     current_path = get_current_yaml_path(context, node)
     target_path = current_path
@@ -718,9 +730,7 @@ def sync_node_to_yaml(
                     sync_node_to_yaml(context, group[0], commit=commit)
                 else:
                     versioned_group = t.cast("list[ModelNode]", group)
-                    _sync_versioned_model_group_to_yaml(
-                        context, versioned_group, commit=commit
-                    )
+                    _sync_versioned_model_group_to_yaml(context, versioned_group, commit=commit)
             except Exception as e:  # noqa: BLE001 — collect & report, never abort the batch
                 return group, e
             return group, None
@@ -733,7 +743,9 @@ def sync_node_to_yaml(
                 for n in grp:
                     msg = f"{type(err).__name__}: {err}"
                     logger.error(
-                        ":boom: Commit failed for => %s: %s", n.unique_id, msg,
+                        ":boom: Commit failed for => %s: %s",
+                        n.unique_id,
+                        msg,
                     )
                     if failures is not None:
                         failures.append((n.unique_id, msg))

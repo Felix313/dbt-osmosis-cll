@@ -5,7 +5,6 @@ import time
 import typing as t
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path  # used by callers that import from this module
 from types import MappingProxyType
 
 from dbt.artifacts.resources.types import NodeType
@@ -20,7 +19,6 @@ from dbt_osmosis_cll.osmosis_propagation import logger
 from dbt_osmosis_cll.osmosis_propagation.inheritance import _safe_column_replace
 from dbt_osmosis_cll.osmosis_propagation.settings import get_managed_meta_keys
 from dbt_osmosis_cll.config import get_config
-
 
 
 __all__ = [
@@ -211,6 +209,7 @@ class TransformPipeline:
         if context is not None:
             try:
                 from dbt_osmosis_cll.integration.cll import clear_cll_failures, get_cll_failures
+
                 failures = get_cll_failures(context)
                 if failures:
                     logger.warning(
@@ -233,6 +232,7 @@ class TransformPipeline:
                     clear_cll_walk_soft_fails,
                     get_cll_walk_soft_fails,
                 )
+
                 soft_fails = get_cll_walk_soft_fails(context)
                 _labels = {
                     "max-depth": "exceeded the max lineage depth",
@@ -342,13 +342,10 @@ def inherit_upstream_column_knowledge(
         existing_desc = node_column.description.strip()
         if not force_inherit and existing_desc:
             from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
+
             if not strip_annotation_tags(existing_desc).strip():
                 force_inherit = True  # annotation-only ⟹ treat as no real description
-        if (
-            "description" in inheritable
-            and not force_inherit
-            and existing_desc
-        ):
+        if "description" in inheritable and not force_inherit and existing_desc:
             inheritable.remove("description")
 
         updated_metadata = {k: v for k, v in kwargs.items() if v is not None and k in inheritable}
@@ -363,6 +360,7 @@ def inherit_upstream_column_knowledge(
         # stale annotation carried on the upstream node's in-memory description.
         if "description" in updated_metadata and isinstance(updated_metadata["description"], str):
             from dbt_osmosis_cll.osmosis_propagation.annotations import strip_annotation_tags
+
             _clean_desc = strip_annotation_tags(updated_metadata["description"]).strip()
             updated_metadata = {**updated_metadata, "description": _clean_desc}
 
@@ -385,7 +383,9 @@ def inherit_upstream_column_knowledge(
         if isinstance(updated_metadata.get("config"), dict):
             config_meta = updated_metadata["config"].get("meta", {})
             if config_meta:
-                local_config_meta = dict((getattr(node_column, "config", None) or {}).get("meta", {}))
+                local_config_meta = dict(
+                    (getattr(node_column, "config", None) or {}).get("meta", {})
+                )
                 filtered_config_meta = {k: v for k, v in config_meta.items() if k not in _managed}
                 for key in _managed:
                     if key in local_config_meta:
@@ -400,9 +400,7 @@ def inherit_upstream_column_knowledge(
         node.columns[name] = _safe_column_replace(node_column, **updated_metadata)
 
 
-def _owns_description(
-    context: YamlRefactorContextProtocol, node: t.Any, column_name: str
-) -> bool:
+def _owns_description(context: YamlRefactorContextProtocol, node: t.Any, column_name: str) -> bool:
     """True if *column_name* on *node* OWNS its description rather than inheriting it.
 
     ``desc-owner`` is the single ownership key: ``upstream`` means force-inherit
@@ -522,9 +520,7 @@ def _resolve_cll_description(
     # candidate set).
     def _own_description() -> str | None:
         cols = getattr(upstream_node, "columns", {})
-        col_info = next(
-            (v for k, v in cols.items() if k.lower() == parent_col_name.lower()), None
-        )
+        col_info = next((v for k, v in cols.items() if k.lower() == parent_col_name.lower()), None)
         if col_info:
             raw = getattr(col_info, "description", None) or ""
             cleaned = strip_annotation_tags(raw).strip()
@@ -719,7 +715,8 @@ def _read_column_config_meta(node_col: t.Any) -> dict[str, t.Any]:
     if node_config is None:
         return {}
     raw = (
-        node_config.get("meta", {}) if isinstance(node_config, dict)
+        node_config.get("meta", {})
+        if isinstance(node_config, dict)
         else getattr(node_config, "meta", None) or {}
     )
     return dict(raw or {})
@@ -735,7 +732,6 @@ def _build_column_config_with_meta(node_col: t.Any, new_meta: dict[str, t.Any]) 
     col_as_dict = _column_to_dict(node_col, omit_none=True)
     config_base = col_as_dict.get("config") or {}
     return {**config_base, "meta": new_meta}
-
 
 
 @_transform_op("Inherit Upstream Column Knowledge (CLL)")
@@ -788,7 +784,10 @@ def inherit_upstream_column_knowledge_cll(
                 if processed % 25 == 0 or processed == total:
                     logger.info(
                         ":hourglass: CLL Inherit progress => %d / %d (wave %d/%d)",
-                        processed, total, wave_idx + 1, len(waves),
+                        processed,
+                        total,
+                        wave_idx + 1,
+                        len(waves),
                     )
         return
 
@@ -843,13 +842,7 @@ def inherit_upstream_column_knowledge_cll(
         _is_generated = getattr(result, "is_generated", False)
         _is_multi_src = result.is_computed and result.progenitor_column is None
 
-        if (
-            _is_aggregate
-            or _is_window
-            or _is_literal
-            or _is_generated
-            or _is_multi_src
-        ):
+        if _is_aggregate or _is_window or _is_literal or _is_generated or _is_multi_src:
             # No single traceable progenitor → skip.
             continue
 
@@ -1031,8 +1024,8 @@ def inherit_upstream_column_knowledge_cll(
         _is_gap_fill_owner = str(desc_authority).lower() == "this"
 
         _should_inject_ownership = (
-            not force_inherit        # not already desc-owner: upstream at column or layer level
-            and _is_gap_fill_owner   # layer-default is "this" (defensive); named anchors excluded
+            not force_inherit  # not already desc-owner: upstream at column or layer level
+            and _is_gap_fill_owner  # layer-default is "this" (defensive); named anchors excluded
             and desc_source_ref is not None
             and desc_source_ref != _self_ref
             and bool(_final_desc)
@@ -1086,10 +1079,13 @@ def inject_missing_columns(
             prefetch_columns(context, source_nodes)
         nodes = list(_iter_candidate_nodes(context))
         total = len(nodes)
-        for i, _ in enumerate(context.pool.map(
-            partial(inject_missing_columns, context),
-            (n for _, n in nodes),
-        ), start=1):
+        for i, _ in enumerate(
+            context.pool.map(
+                partial(inject_missing_columns, context),
+                (n for _, n in nodes),
+            ),
+            start=1,
+        ):
             if i % 25 == 0 or i == total:
                 logger.info("Inject Missing Columns progress => %d / %d", i, total)
         return
@@ -1203,20 +1199,28 @@ def inject_missing_columns(
             # --prefer-yaml-values is not set.  This ensures manual edits in the source
             # YAML are never silently preserved when prod has an authoritative description.
             existing_col = next(
-                (c for c in node.columns.values()
-                 if normalize_column_name(c.name, context.project.runtime_cfg.credentials.type).lower()
-                 == compare_name.lower()),
+                (
+                    c
+                    for c in node.columns.values()
+                    if normalize_column_name(
+                        c.name, context.project.runtime_cfg.credentials.type
+                    ).lower()
+                    == compare_name.lower()
+                ),
                 None,
             )
             if existing_col is not None and not descriptions_equivalent(
-                existing_col.description, incoming_meta.comment,
+                existing_col.description,
+                incoming_meta.comment,
             ):
                 logger.info(
                     ":pencil: Updating source column description from prod => %s in node => %s",
                     incoming_name,
                     node.unique_id,
                 )
-                node.columns[existing_col.name] = _safe_column_replace(existing_col, description=incoming_meta.comment)
+                node.columns[existing_col.name] = _safe_column_replace(
+                    existing_col, description=incoming_meta.comment
+                )
 
 
 @_transform_op("Remove Extra Columns")
@@ -1314,7 +1318,11 @@ def sort_columns_as_in_database(
     node: ResultNode | None = None,
 ) -> None:
     """Sort columns in a dbt node and it's corresponding yaml section as they appear in the database. Changes are implicitly buffered until commit_yamls is called."""
-    from dbt_osmosis_cll.osmosis_propagation.introspection import _get_setting_for_node, get_columns, normalize_column_name
+    from dbt_osmosis_cll.osmosis_propagation.introspection import (
+        _get_setting_for_node,
+        get_columns,
+        normalize_column_name,
+    )
     from dbt_osmosis_cll.osmosis_propagation.node_filters import _iter_candidate_nodes
 
     if node is None:
@@ -1327,6 +1335,7 @@ def sort_columns_as_in_database(
         return
     logger.debug("Sorting columns by warehouse order => %s", node.unique_id)
     from dbt_osmosis_cll.integration.cll import get_model_columns_from_cll
+
     if node.resource_type == NodeType.Source:
         incoming_columns = get_columns(context, node)
     else:
@@ -1462,6 +1471,7 @@ def synchronize_data_types(
         return
     logger.debug("Synchronizing data types => %s", node.unique_id)
     from dbt_osmosis_cll.integration.cll import get_model_columns_from_cll
+
     if node.resource_type == NodeType.Source:
         incoming_columns = get_columns(context, node)
     else:
@@ -1526,9 +1536,6 @@ def synchronize_data_types(
                     column.data_type = inc_c.type.lower()
                 else:
                     column.data_type = inc_c.type
-
-
-
 
 
 @_transform_op("Annotate Column Origins")
@@ -1603,7 +1610,10 @@ def annotate_column_origins(
                 if processed % 25 == 0 or processed == total:
                     logger.info(
                         ":hourglass: Annotate Column Origins progress => %d / %d (wave %d/%d)",
-                        processed, total, wave_idx + 1, len(waves),
+                        processed,
+                        total,
+                        wave_idx + 1,
+                        len(waves),
                     )
         return
 
@@ -1611,6 +1621,7 @@ def annotate_column_origins(
         return
 
     from dbt_osmosis_cll.config import get_column_docs as _get_col_docs_fn
+
     _col_docs: dict[str, str] = _get_col_docs_fn()
     # Columns in the reference file are implicitly ignored by CLL annotation.
     _ignore_cols: frozenset[str] = frozenset(_col_docs.keys())
@@ -1621,7 +1632,9 @@ def annotate_column_origins(
     #   "never" / false / absent → no annotation (but CLL still runs to fill renamed
     #                              column descriptions and strip stale annotation tags)
     _raw_annotate = _get_setting_for_node("annotate-column-origin-infos", node, fallback=None)
-    _annotate_mode: str = "" if (not _raw_annotate or _raw_annotate == "never") else str(_raw_annotate)
+    _annotate_mode: str = (
+        "" if (not _raw_annotate or _raw_annotate == "never") else str(_raw_annotate)
+    )
 
     results = get_cll_results(context, node)
     node_lower = node.name.lower()
@@ -1660,7 +1673,8 @@ def annotate_column_origins(
             node_config = getattr(node_col, "config", None)
             if node_config is not None:
                 raw_config_meta = dict(
-                    node_config.get("meta", {}) if isinstance(node_config, dict)
+                    node_config.get("meta", {})
+                    if isinstance(node_config, dict)
                     else getattr(node_config, "meta", None) or {}
                 )
             removed_config = {raw_config_meta.pop(k, None) for k in _managed} - {None}
@@ -1668,6 +1682,7 @@ def annotate_column_origins(
             cleaned_config: dict[str, t.Any] | None = None
             if removed_config and node_config is not None:
                 from dbt_osmosis_cll.osmosis_propagation.inheritance import _column_to_dict
+
                 col_as_dict = _column_to_dict(node_col, omit_none=True)
                 config_base = col_as_dict.get("config") or {}
                 cleaned_config = {**config_base, "meta": raw_config_meta}
@@ -1684,7 +1699,10 @@ def annotate_column_origins(
 
             any_removed = bool(removed_meta) or bool(removed_config)
             if any_removed or stripped_desc != (node_col.description or "").strip():
-                replace_kwargs: dict[str, t.Any] = {"meta": stale_meta, "description": stripped_desc}
+                replace_kwargs: dict[str, t.Any] = {
+                    "meta": stale_meta,
+                    "description": stripped_desc,
+                }
                 if cleaned_config is not None:
                     replace_kwargs["config"] = cleaned_config
                 node.columns[col_name] = _safe_column_replace(node_col, **replace_kwargs)
@@ -1701,7 +1719,8 @@ def annotate_column_origins(
             node_config = getattr(node_col, "config", None)
             if node_config is not None:
                 raw_config_meta = dict(
-                    node_config.get("meta", {}) if isinstance(node_config, dict)
+                    node_config.get("meta", {})
+                    if isinstance(node_config, dict)
                     else getattr(node_config, "meta", None) or {}
                 )
             removed_cfg = bool({raw_config_meta.pop(k, None) for k in _managed} - {None})
@@ -1709,6 +1728,7 @@ def annotate_column_origins(
             cleaned_config: dict[str, t.Any] | None = None
             if removed_cfg and node_config is not None:
                 from dbt_osmosis_cll.osmosis_propagation.inheritance import _column_to_dict
+
                 col_as_dict = _column_to_dict(node_col, omit_none=True)
                 config_base = col_as_dict.get("config") or {}
                 cleaned_config = {**config_base, "meta": raw_config_meta}
@@ -1744,12 +1764,12 @@ def annotate_column_origins(
         is_multi_source = result.is_computed and progenitor_col_raw is None
 
         # New semantic types — use getattr for backward compat with old SimpleNamespace disk cache entries
-        _is_union      = getattr(result, "is_union",      False)
-        _is_literal    = getattr(result, "is_literal",    False)
-        _is_aggregate  = getattr(result, "is_aggregate",  False)
-        _is_window     = getattr(result, "is_window",     False)
-        _is_generated  = getattr(result, "is_generated",  False)
-        _literal_val   = getattr(result, "literal_value",   None)
+        _is_union = getattr(result, "is_union", False)
+        _is_literal = getattr(result, "is_literal", False)
+        _is_aggregate = getattr(result, "is_aggregate", False)
+        _is_window = getattr(result, "is_window", False)
+        _is_generated = getattr(result, "is_generated", False)
+        _literal_val = getattr(result, "literal_value", None)
         _generated_val = getattr(result, "generated_value", None)
 
         # Clean managed meta keys from config.meta for all columns that have a CLL result.
@@ -1758,17 +1778,21 @@ def annotate_column_origins(
         _node_config = getattr(node_col, "config", None)
         if _node_config is not None:
             _raw_cfg_meta = dict(
-                _node_config.get("meta", {}) if isinstance(_node_config, dict)
+                _node_config.get("meta", {})
+                if isinstance(_node_config, dict)
                 else getattr(_node_config, "meta", None) or {}
             )
         _removed_cfg = bool({_raw_cfg_meta.pop(k, None) for k in _managed} - {None})
         _cleaned_config: dict[str, t.Any] | None = None
         if _removed_cfg and _node_config is not None:
             from dbt_osmosis_cll.osmosis_propagation.inheritance import _column_to_dict
+
             _col_as_dict = _column_to_dict(node_col, omit_none=True)
             _config_base = _col_as_dict.get("config") or {}
             _cleaned_config = {**_config_base, "meta": _raw_cfg_meta}
-        _config_kwarg: dict[str, t.Any] = {"config": _cleaned_config} if _cleaned_config is not None else {}
+        _config_kwarg: dict[str, t.Any] = (
+            {"config": _cleaned_config} if _cleaned_config is not None else {}
+        )
 
         if _is_union or _is_literal or _is_generated or _is_aggregate or _is_window:
             new_meta.pop(_key_computed, None)
@@ -1779,7 +1803,9 @@ def annotate_column_origins(
             central_doc = _col_docs.get(col_name.lower()) if _col_docs else None
 
             if central_doc and not has_real_desc:
-                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=central_doc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(
+                    node_col, meta=new_meta, description=central_doc, **_config_kwarg
+                )
             elif _annotate_mode:
                 if _is_union:
                     tag = format_union_tag(node_schema, node.name.upper())
@@ -1803,7 +1829,9 @@ def annotate_column_origins(
                         tag = format_window_in_tag(node_schema, node.name.upper())
 
                 new_desc = f"{base_desc}\n\n{tag}".strip() if has_real_desc else tag
-                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(
+                    node_col, meta=new_meta, description=new_desc, **_config_kwarg
+                )
             else:
                 # Non-annotation mode: annotation is disabled for this layer, so just strip any
                 # stale CBM-ODP tags from the column's OWN description and write it back.
@@ -1814,7 +1842,9 @@ def annotate_column_origins(
                 # the immediate progenitor's description onto these columns — propagation in the
                 # annotation function — which laundered e.g. SERVICE_CONTRACT_TYPE's text onto the
                 # MAX(CASE ...) HAS_* flags. Propagation now owns that decision.)
-                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(
+                    node_col, meta=new_meta, description=base_desc, **_config_kwarg
+                )
             continue
 
         if is_multi_source:
@@ -1833,23 +1863,29 @@ def annotate_column_origins(
             # Use central docs as the description when the column has none.
             central_doc = _col_docs.get(col_name.lower()) if _col_docs else None
             if central_doc and not has_real_desc:
-                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=central_doc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(
+                    node_col, meta=new_meta, description=central_doc, **_config_kwarg
+                )
             elif _annotate_mode:
                 # Multi-source: born in this model — "Computed here", listing the
                 # direct inputs when CLL preserved them (roadmap #5): the endpoint
                 # reader sees what feeds the expression without opening the SQL.
                 _progenitor_pairs = getattr(result, "progenitors", None) or []
                 _inputs = [
-                    f"{str(m).upper()}.{str(c).upper()}"
-                    for m, c in _progenitor_pairs
-                    if m and c
+                    f"{str(m).upper()}.{str(c).upper()}" for m, c in _progenitor_pairs if m and c
                 ]
                 computed_tag = format_computed_here_tag(inputs=_inputs or None)
-                new_desc = f"{base_desc}\n\n{computed_tag}".strip() if has_real_desc else computed_tag
-                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
+                new_desc = (
+                    f"{base_desc}\n\n{computed_tag}".strip() if has_real_desc else computed_tag
+                )
+                node.columns[col_name] = _safe_column_replace(
+                    node_col, meta=new_meta, description=new_desc, **_config_kwarg
+                )
             else:
                 # No annotation mode: still write stripped description to remove any old tags.
-                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(
+                    node_col, meta=new_meta, description=base_desc, **_config_kwarg
+                )
 
             logger.debug("%s.%s => derived in %s", node.name, col_name, node_ref)
 
@@ -1867,7 +1903,9 @@ def annotate_column_origins(
                     base_desc = strip_annotation_tags((node_col.description or "").strip())
                     if not base_desc or base_desc in context.placeholders:
                         base_desc = ""
-                    node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
+                    node.columns[col_name] = _safe_column_replace(
+                        node_col, meta=new_meta, description=base_desc, **_config_kwarg
+                    )
                     continue
                 origin = ("", imm_model.upper(), imm_col.upper(), imm_col.upper())
 
@@ -1879,7 +1917,9 @@ def annotate_column_origins(
             # stale tags and keep the column's own description unchanged.
             if origin_model.upper() == node.name.upper():
                 base_desc = strip_annotation_tags((node_col.description or "").strip())
-                node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
+                node.columns[col_name] = _safe_column_replace(
+                    node_col, meta=new_meta, description=base_desc, **_config_kwarg
+                )
                 continue
 
             if not origin_col:
@@ -1899,12 +1939,18 @@ def annotate_column_origins(
                 if not base_desc or base_desc in context.placeholders:
                     base_desc = ""
                 if _annotate_mode:
-                    renamed_entry = entry_col if entry_col and entry_col.upper() != col_name.upper() else None
+                    renamed_entry = (
+                        entry_col if entry_col and entry_col.upper() != col_name.upper() else None
+                    )
                     derived_tag = format_derived_tag(schema, origin_model, entry_col=renamed_entry)
                     new_desc = f"{base_desc}\n\n{derived_tag}".strip() if base_desc else derived_tag
-                    node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
+                    node.columns[col_name] = _safe_column_replace(
+                        node_col, meta=new_meta, description=new_desc, **_config_kwarg
+                    )
                 else:
-                    node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=base_desc, **_config_kwarg)
+                    node.columns[col_name] = _safe_column_replace(
+                        node_col, meta=new_meta, description=base_desc, **_config_kwarg
+                    )
                 continue
 
             # Use CLL's is_rename (pure alias, no expression) rather than a name-comparison
@@ -1924,12 +1970,16 @@ def annotate_column_origins(
                 new_meta.pop(_key_renamed, None)
                 new_meta.pop(_key_derived, None)
 
-            raw_source_desc = get_origin_source_description(context, schema, origin_model, origin_col)
+            raw_source_desc = get_origin_source_description(
+                context, schema, origin_model, origin_col
+            )
             # Strip any annotation tags that may have been written to the upstream
             # manifest by a concurrent annotate_column_origins call in the same run.
             # Without this, the annotation of the upstream leaks into the source_desc
             # embedded in this node's annotation.
-            source_desc: str | None = strip_annotation_tags(raw_source_desc).strip() or None if raw_source_desc else None
+            source_desc: str | None = (
+                strip_annotation_tags(raw_source_desc).strip() or None if raw_source_desc else None
+            )
 
             # Always strip old annotation tags from the current description — ensures annotations
             # from previous runs don't accumulate when annotate mode is "never".
@@ -1962,20 +2012,32 @@ def annotate_column_origins(
             if is_name_changed:
                 # Renamed: always annotate (shows the original col name — not obvious from YAML).
                 if is_pure_rename:
-                    origin_annotation = format_origin_tag(origin_col, origin_model, annotation_src_desc)
+                    origin_annotation = format_origin_tag(
+                        origin_col, origin_model, annotation_src_desc
+                    )
                 else:
-                    origin_annotation = format_computed_origin_tag(origin_col, origin_model, annotation_src_desc)
+                    origin_annotation = format_computed_origin_tag(
+                        origin_col, origin_model, annotation_src_desc
+                    )
             elif _annotate_mode == "always":
                 # Passthrough: annotate only when layer is set to "always".
-                origin_annotation = format_computed_origin_tag(origin_col, origin_model, annotation_src_desc)
+                origin_annotation = format_computed_origin_tag(
+                    origin_col, origin_model, annotation_src_desc
+                )
 
             if _annotate_mode and origin_annotation is not None:
-                new_desc = f"{base_desc}\n\n{origin_annotation}".strip() if base_desc else origin_annotation
+                new_desc = (
+                    f"{base_desc}\n\n{origin_annotation}".strip()
+                    if base_desc
+                    else origin_annotation
+                )
             else:
                 # No annotation: write stripped description so old tags are removed.
                 new_desc = base_desc
 
-            node.columns[col_name] = _safe_column_replace(node_col, meta=new_meta, description=new_desc, **_config_kwarg)
+            node.columns[col_name] = _safe_column_replace(
+                node_col, meta=new_meta, description=new_desc, **_config_kwarg
+            )
 
             if is_name_changed:
                 logger.debug("%s.%s => renamed from %s.%s", node.name, col_name, schema, origin_col)

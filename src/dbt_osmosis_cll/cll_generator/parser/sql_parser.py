@@ -145,7 +145,9 @@ class StarExpressionHandler:
                                 context, join_table, col_name
                             )
                             branches = (
-                                list(context.cte_union_branches.get(join_table, {}).get(col_name, []))
+                                list(
+                                    context.cte_union_branches.get(join_table, {}).get(col_name, [])
+                                )
                                 if trans_type == "union"
                                 else []
                             )
@@ -345,7 +347,10 @@ class SQLColumnParser:
         the column instead of blindly to the first FROM table."""
         self.dialect = dialect
         self._table_columns: Optional[Dict[str, Set[str]]] = (
-            {str(tbl).lower(): {str(c).lower() for c in cols} for tbl, cols in table_columns.items()}
+            {
+                str(tbl).lower(): {str(c).lower() for c in cols}
+                for tbl, cols in table_columns.items()
+            }
             if table_columns
             else None
         )
@@ -397,8 +402,7 @@ class SQLColumnParser:
         ephemeral_cte_names: Set[str] = set()
         if stop_at_ephemeral:
             ephemeral_cte_names = {
-                cte.alias.lower() for cte in ctes
-                if cte.alias.lower().startswith("__dbt__cte__")
+                cte.alias.lower() for cte in ctes if cte.alias.lower().startswith("__dbt__cte__")
             }
 
         for cte in ctes:
@@ -450,8 +454,7 @@ class SQLColumnParser:
             if branch_selects:
                 first_branch = branch_selects[0]
                 explicit_names = [
-                    strip_sql_comments(e.alias_or_name.lower())
-                    for e in first_branch.expressions
+                    strip_sql_comments(e.alias_or_name.lower()) for e in first_branch.expressions
                 ]
                 if not [n for n in explicit_names if n and n != "*"]:
                     eph_table = self._branch_from_table(first_branch)
@@ -751,7 +754,9 @@ class SQLColumnParser:
         recursively yields all branch SELECTs in declaration order.
         """
         if isinstance(node, (exp.Union, exp.Intersect, exp.Except)):
-            return self._flatten_set_operation(node.this) + self._flatten_set_operation(node.expression)
+            return self._flatten_set_operation(node.this) + self._flatten_set_operation(
+                node.expression
+            )
         return [node]
 
     def _resolve_branch_source(
@@ -840,22 +845,18 @@ class SQLColumnParser:
                 # the order they were stored (insertion order == declaration order).
                 if from_table and from_table in cte_sources:
                     for up_col in cte_sources[from_table].keys():
-                        result.append(
-                            (
-                                up_col.lower(),
-                                self._qualify_branch_column(
-                                    up_col.lower(), from_table, cte_sources, cte_to_model
-                                ),
-                            )
-                        )
+                        result.append((
+                            up_col.lower(),
+                            self._qualify_branch_column(
+                                up_col.lower(), from_table, cte_sources, cte_to_model
+                            ),
+                        ))
                 # A star on a non-CTE table can't be expanded to names here; skip.
                 continue
             col_name = strip_sql_comments(expr.alias_or_name).lower()
             if not col_name or col_name == "*":
                 continue
-            source = self._resolve_branch_source(
-                expr, branch_select, cte_sources, cte_to_model
-            )
+            source = self._resolve_branch_source(expr, branch_select, cte_sources, cte_to_model)
             result.append((col_name, source))
         return result
 
@@ -888,8 +889,7 @@ class SQLColumnParser:
         # UNION columns match by ordinal position; output names come from the
         # FIRST branch.
         expanded_branches = [
-            self._expand_branch_columns(bs, cte_sources, cte_to_model)
-            for bs in branch_selects
+            self._expand_branch_columns(bs, cte_sources, cte_to_model) for bs in branch_selects
         ]
 
         # Record each branch's underlying base table for star_sources tracking.
@@ -1115,10 +1115,13 @@ class SQLColumnParser:
         source_col = self._normalize_table_ref(
             strip_sql_comments(str(expr)), context.aliases, effective_context
         )
-        table_part, col = split_qualified_name(source_col)
+        table_part, _ = split_qualified_name(source_col)
         table = table_part if table_part else effective_context
         resolved_source = self._resolve_column_source(
-            source_col, table, context.cte_sources, context.cte_to_model,
+            source_col,
+            table,
+            context.cte_sources,
+            context.cte_to_model,
             context.ephemeral_cte_names,
         )
 
@@ -1135,9 +1138,7 @@ class SQLColumnParser:
             else:
                 trans_type = cte_trans_type
             if cte_trans_type == "union":
-                union_branches = list(
-                    context.cte_union_branches.get(table, {}).get(col_name, [])
-                )
+                union_branches = list(context.cte_union_branches.get(table, {}).get(col_name, []))
         elif is_aliased:
             trans_type = "renamed"
 
@@ -1250,7 +1251,10 @@ class SQLColumnParser:
             table_part, _ = split_qualified_name(source_col)
             table = table_part if table_part else effective_context
             resolved = self._resolve_column_source(
-                source_col, table, context.cte_sources, context.cte_to_model,
+                source_col,
+                table,
+                context.cte_sources,
+                context.cte_to_model,
                 context.ephemeral_cte_names,
             )
             if resolved == "":

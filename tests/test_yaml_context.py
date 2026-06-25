@@ -3,7 +3,10 @@ from unittest import mock
 from dbt_osmosis_cll.osmosis_propagation.config import _reload_manifest
 from dbt_osmosis_cll.osmosis_propagation.introspection import _COLUMN_LIST_CACHE, get_columns
 from dbt_osmosis_cll.osmosis_propagation.path_management import create_missing_source_yamls
-from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import apply_restructure_plan, draft_restructure_delta_plan
+from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
+    apply_restructure_plan,
+    draft_restructure_delta_plan,
+)
 from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext
 from dbt_osmosis_cll.osmosis_propagation.transforms import inherit_upstream_column_knowledge
 

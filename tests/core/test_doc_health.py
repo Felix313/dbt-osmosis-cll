@@ -10,7 +10,10 @@ import pytest
 from dbt.artifacts.resources.types import NodeType
 
 from dbt_osmosis_cll.config import get_config, reset_config
-from dbt_osmosis_cll.osmosis_propagation.commands.doc_health import compute_doc_health, format_report
+from dbt_osmosis_cll.osmosis_propagation.commands.doc_health import (
+    compute_doc_health,
+    format_report,
+)
 
 
 class FakeColumn:
@@ -42,9 +45,13 @@ def patched(nodes, *, cll_failures=None):
             lambda _ctx: ((n.unique_id, n) for n in nodes),
         )
     )
-    stack.enter_context(mock.patch("dbt_osmosis_cll.integration.cll.get_cll_results", lambda _c, _n: []))
     stack.enter_context(
-        mock.patch("dbt_osmosis_cll.integration.cll.get_cll_failures", lambda _c: frozenset(cll_failures))
+        mock.patch("dbt_osmosis_cll.integration.cll.get_cll_results", lambda _c, _n: [])
+    )
+    stack.enter_context(
+        mock.patch(
+            "dbt_osmosis_cll.integration.cll.get_cll_failures", lambda _c: frozenset(cll_failures)
+        )
     )
     with stack:
         yield
@@ -122,9 +129,13 @@ def test_check_cll_collects_failures_and_skips_sources():
                 lambda _ctx: iter([(model.unique_id, model), (source.unique_id, source)]),
             )
         )
-        stack.enter_context(mock.patch("dbt_osmosis_cll.integration.cll.get_cll_results", cll_results))
         stack.enter_context(
-            mock.patch("dbt_osmosis_cll.integration.cll.get_cll_failures", lambda _c: frozenset({"m"}))
+            mock.patch("dbt_osmosis_cll.integration.cll.get_cll_results", cll_results)
+        )
+        stack.enter_context(
+            mock.patch(
+                "dbt_osmosis_cll.integration.cll.get_cll_failures", lambda _c: frozenset({"m"})
+            )
         )
         report = compute_doc_health(ctx, check_cll=True)
 
@@ -159,8 +170,11 @@ def test_trust_breakdown_authored_inherited_glossary():
         },
     )
     ctx = make_context()
-    with patched([node]), mock.patch(
-        "dbt_osmosis_cll.config.get_column_docs", lambda *a, **k: {"c": "glossary text"}
+    with (
+        patched([node]),
+        mock.patch(
+            "dbt_osmosis_cll.config.get_column_docs", lambda *a, **k: {"c": "glossary text"}
+        ),
     ):
         report = compute_doc_health(ctx)
 

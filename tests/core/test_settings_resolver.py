@@ -195,7 +195,9 @@ class _ColumnConfig:
 class MockColumnWithConfig(MockColumn):
     """Column whose settings live under config.meta (dbt 1.10+ / fusion-compat)."""
 
-    def __init__(self, name: str, meta: dict | None = None, config_meta: dict | None = None) -> None:
+    def __init__(
+        self, name: str, meta: dict | None = None, config_meta: dict | None = None
+    ) -> None:
         super().__init__(name, meta)
         self.config = _ColumnConfig(config_meta)
 

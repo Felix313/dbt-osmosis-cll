@@ -87,7 +87,10 @@ def test_schema_diff_detects_renamed_columns_without_context_node(
     }
     database_columns["customerid"] = ColumnMetadata(name="customerid", type="TEXT", index=999)
 
-    with mock.patch("dbt_osmosis_cll.osmosis_propagation.introspection.get_columns", return_value=database_columns):
+    with mock.patch(
+        "dbt_osmosis_cll.osmosis_propagation.introspection.get_columns",
+        return_value=database_columns,
+    ):
         result = differ.compare_node(node)
 
     rename_changes = [change for change in result.changes if isinstance(change, ColumnRenamed)]

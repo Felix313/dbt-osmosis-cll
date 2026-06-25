@@ -50,9 +50,7 @@ def _write_manifest(tmp_path) -> str:
                 "with c as (select coalesce(a.x, b.y) as merged"
                 " from tbl_a a join tbl_b b on a.k = b.k) select merged from c",
             ),
-            "model.pkg.renamed": model(
-                "renamed", "select id as order_id from base_table"
-            ),
+            "model.pkg.renamed": model("renamed", "select id as order_id from base_table"),
             "model.pkg.unioned": model(
                 "unioned",
                 "with u as (select a.x as val from tbl_a a"
@@ -72,9 +70,7 @@ def results_by_model_col(tmp_path):
     manifest_path = _write_manifest(tmp_path)
     reader = ManifestCatalogReader(manifest_path=manifest_path)
     reader.load()
-    results = get_column_lineage(
-        manifest_path=manifest_path, _catalog_reader_override=reader
-    )
+    results = get_column_lineage(manifest_path=manifest_path, _catalog_reader_override=reader)
     return {(r.model, r.column): r for r in results}
 
 

@@ -198,7 +198,8 @@ class TestGenerateStagingFromSource:
         mock_source.name = "orders"
 
         with mock.patch(
-            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition", return_value=mock_source
+            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition",
+            return_value=mock_source,
         ):
             # Mock interface generator
             result_dict = {
@@ -230,7 +231,10 @@ class TestGenerateStagingFromSource:
 
     def test_generate_staging_source_not_found(self, yaml_context):
         """Test staging generation when source not found."""
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition", return_value=None):
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition",
+            return_value=None,
+        ):
             with pytest.raises(ValueError, match="Source raw.users not found"):
                 generate_staging_from_source(
                     context=yaml_context.project,
@@ -245,7 +249,8 @@ class TestGenerateStagingFromSource:
         mock_source.name = "users"
 
         with mock.patch(
-            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition", return_value=mock_source
+            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition",
+            return_value=mock_source,
         ):
             result_dict = {
                 "staging_name": "stg_users",
@@ -494,7 +499,8 @@ class TestEdgeCases:
         mock_source.name = "empty_table"
 
         with mock.patch(
-            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition", return_value=mock_source
+            "dbt_osmosis_cll.osmosis_propagation.commands.generators._get_source_definition",
+            return_value=mock_source,
         ):
             result_dict = {
                 "staging_name": "stg_empty_table",

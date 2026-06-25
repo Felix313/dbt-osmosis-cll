@@ -4,7 +4,9 @@ from typing import List, Optional, Set, Dict, Literal, Any
 
 class ColumnLineage(BaseModel):
     source_columns: Set[str]
-    transformation_type: Literal["direct", "renamed", "derived", "aggregate", "window", "union", "literal", "generated"]
+    transformation_type: Literal[
+        "direct", "renamed", "derived", "aggregate", "window", "union", "literal", "generated"
+    ]
     sql_expression: Optional[str] = None
     description: Optional[str] = None
     union_branches: List[str] = Field(default_factory=list)

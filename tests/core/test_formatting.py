@@ -17,7 +17,9 @@ class TestRunExternalFormatter:
         """Formatter runs successfully with correct command and file paths."""
         files = [Path("models/staging/orders.yml"), Path("models/marts/customers.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=0,
                 stdout=b"Formatted 2 files\n",
@@ -42,7 +44,9 @@ class TestRunExternalFormatter:
 
     def test_no_files_is_noop(self):
         """No-op when no files are provided."""
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             result = run_external_formatter("prettier --write", [], cwd=Path("/project"))
 
             assert result is True
@@ -50,7 +54,9 @@ class TestRunExternalFormatter:
 
     def test_empty_iterable_is_noop(self):
         """No-op when an empty iterable is provided."""
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             result = run_external_formatter("prettier --write", iter([]), cwd=Path("/project"))
 
             assert result is True
@@ -60,7 +66,9 @@ class TestRunExternalFormatter:
         """Formatter failure (non-zero exit code) does not raise an exception."""
         files = [Path("models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=2,
                 stdout=b"",
@@ -76,7 +84,9 @@ class TestRunExternalFormatter:
         """Missing formatter command does not raise an exception."""
         files = [Path("models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.side_effect = FileNotFoundError("No such file or directory: 'nonexistent'")
 
             result = run_external_formatter("nonexistent --write", files, cwd=Path("/project"))
@@ -87,7 +97,9 @@ class TestRunExternalFormatter:
         """OS error during execution does not raise an exception."""
         files = [Path("models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.side_effect = OSError("Permission denied")
 
             result = run_external_formatter("formatter", files, cwd=Path("/project"))
@@ -98,7 +110,9 @@ class TestRunExternalFormatter:
         """Complex command strings are parsed correctly via shlex.split."""
         files = [Path("models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
             run_external_formatter(
@@ -121,7 +135,9 @@ class TestRunExternalFormatter:
         """yamlfmt formatter is invoked correctly (no special flags needed)."""
         files = [Path("models/a.yml"), Path("models/b.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
             run_external_formatter("yamlfmt", files, cwd=Path("/project"))
@@ -133,7 +149,9 @@ class TestRunExternalFormatter:
         """yq in-place identity command is parsed correctly."""
         files = [Path("models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
             run_external_formatter("yq -i '.'", files, cwd=Path("/project"))
@@ -145,7 +163,9 @@ class TestRunExternalFormatter:
         """frozenset of Paths (as returned by context.written_files) works correctly."""
         files = frozenset({Path("models/a.yml"), Path("models/b.yml")})
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
             result = run_external_formatter("prettier --write", files, cwd=Path("/project"))
@@ -171,7 +191,9 @@ class TestRunExternalFormatter:
 
         files = [Path("models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd=["prettier"], timeout=120)
 
             result = run_external_formatter(
@@ -184,7 +206,9 @@ class TestRunExternalFormatter:
         """Timeout parameter is forwarded to subprocess.run."""
         files = [Path("models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
             run_external_formatter("prettier --write", files, cwd=Path("/project"), timeout=60)
@@ -195,7 +219,9 @@ class TestRunExternalFormatter:
         """Setting timeout=0 passes None to subprocess (no timeout)."""
         files = [Path("models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
             run_external_formatter("prettier --write", files, cwd=Path("/project"), timeout=0)
@@ -206,7 +232,9 @@ class TestRunExternalFormatter:
         """Path objects are properly converted to string arguments."""
         files = [Path("/absolute/path/models/a.yml")]
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run") as mock_run:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.formatting.subprocess.run"
+        ) as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
             run_external_formatter("fmt", files, cwd=Path("/project"))

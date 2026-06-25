@@ -422,7 +422,7 @@ wheels = [
 
 [[package]]
 name = "dbt-osmosis-cll"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

@@ -16,7 +16,10 @@ from dbt.contracts.graph.nodes import ManifestNode
 
 from dbt_osmosis_cll.osmosis_propagation import logger
 from dbt_osmosis_cll.osmosis_propagation.config import DbtProjectContext
-from dbt_osmosis_cll.osmosis_propagation.commands.sql_operations import compile_sql_code, execute_sql_code
+from dbt_osmosis_cll.osmosis_propagation.commands.sql_operations import (
+    compile_sql_code,
+    execute_sql_code,
+)
 
 __all__ = [
     "ModelValidationStatus",

@@ -6,6 +6,7 @@ dbt incremental SCD2 / attribute-history models accumulate state via
 multi-source UNION with no origin. ``_strip_self_referencing_union_branches`` removes the
 self-branch (when a real branch remains) so the column resolves to its true upstream.
 """
+
 from __future__ import annotations
 
 from dbt_osmosis_cll.cll_generator.artifacts.registry import (

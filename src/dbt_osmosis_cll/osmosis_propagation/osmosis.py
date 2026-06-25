@@ -83,7 +83,9 @@ from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
 )
 
 # External formatter integration
-from dbt_osmosis_cll.osmosis_propagation.formatting import run_external_formatter as run_external_formatter  # noqa: F401
+from dbt_osmosis_cll.osmosis_propagation.formatting import (
+    run_external_formatter as run_external_formatter,
+)  # noqa: F401
 
 # Schema parsing and writing
 from dbt_osmosis_cll.osmosis_propagation.schema.parser import (

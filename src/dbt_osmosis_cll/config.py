@@ -39,6 +39,7 @@ run, overwriting any existing description in the YAML.
     ROW_CREATE_TIMESTAMP: >-
       Zeitstempel der erstmaligen Erstellung dieses Datensatzes.
 """
+
 from __future__ import annotations
 
 import configparser
@@ -57,13 +58,13 @@ class OsmosisConfig:
     """Resolved package configuration with defaults."""
 
     # ── Annotation strings (written into YAML descriptions) ──────────────────
-    annotation_renamed:   str = "Renamed from:"
+    annotation_renamed: str = "Renamed from:"
     """Prefix for a pure column rename (name changed, same data)."""
 
-    annotation_derived:   str = "Derived from:"
+    annotation_derived: str = "Derived from:"
     """Prefix for a single-source computed transform (CAST, function, etc.)."""
 
-    annotation_computed:  str = "Computed in:"
+    annotation_computed: str = "Computed in:"
     """Prefix for multi-source or unresolvable columns (no single parent)."""
 
     annotation_aggregate_from: str = "Aggregated from"
@@ -193,7 +194,6 @@ class OsmosisConfig:
     """
 
 
-
 # ---------------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------------
@@ -247,6 +247,7 @@ def _load_column_docs_file(docs_path: str, project_root: Path) -> dict[str, str]
         return {}
     try:
         import yaml  # pyyaml — always available in a dbt environment
+
         with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         result = {str(k).lower(): str(v).strip() for k, v in (data or {}).items() if v}
@@ -319,29 +320,39 @@ def _load_config(start: Path) -> OsmosisConfig:
             return lines if lines else None
 
         cfg = OsmosisConfig(
-            annotation_renamed                 = _str("annotation-renamed",          OsmosisConfig.annotation_renamed),
-            annotation_derived                 = _str("annotation-derived",          OsmosisConfig.annotation_derived),
-            annotation_computed                = _str("annotation-computed",         OsmosisConfig.annotation_computed),
-            annotation_aggregate_from          = _str("annotation-aggregate-from",   OsmosisConfig.annotation_aggregate_from),
-            annotation_aggregate_in            = _str("annotation-aggregate-in",     OsmosisConfig.annotation_aggregate_in),
-            annotation_window_from             = _str("annotation-window-from",      OsmosisConfig.annotation_window_from),
-            annotation_window_in               = _str("annotation-window-in",        OsmosisConfig.annotation_window_in),
-            annotation_union                   = _str("annotation-union",            OsmosisConfig.annotation_union),
-            annotation_literal                 = _str("annotation-literal",          OsmosisConfig.annotation_literal),
-            annotation_generated               = _str("annotation-generated",        OsmosisConfig.annotation_generated),
-            annotation_namespace               = _str("annotation-namespace",        OsmosisConfig.annotation_namespace),
-            annotation_separator               = _str("annotation-separator",        OsmosisConfig.annotation_separator),
-            cll_cache_path                     = _str("cll-cache-path",       OsmosisConfig.cll_cache_path),
-            cll_max_origin_depth               = _int("cll-max-origin-depth", OsmosisConfig.cll_max_origin_depth),
-            column_docs_path                   = _str("column-docs-path",     OsmosisConfig.column_docs_path),
-            compiled_sql_placeholder_patterns  = _patterns("compiled-sql-placeholder-patterns"),
-            inherit_through_renames            = _bool("inherit-through-renames", OsmosisConfig.inherit_through_renames),
-            yaml_best_width                    = _int("yaml-best-width",      OsmosisConfig.yaml_best_width),
-            write_cll_tags_to_meta             = _bool("write-cll-tags-to-meta", OsmosisConfig.write_cll_tags_to_meta),
-            meta_key_renamed_from              = _str("col-renamed-from",     OsmosisConfig.meta_key_renamed_from),
-            meta_key_derived_from              = _str("col-derived-from",     OsmosisConfig.meta_key_derived_from),
-            meta_key_computed_in               = _str("col-computed-in",      OsmosisConfig.meta_key_computed_in),
-            legacy_strip_markers               = _strlist("legacy-strip-markers", []),
+            annotation_renamed=_str("annotation-renamed", OsmosisConfig.annotation_renamed),
+            annotation_derived=_str("annotation-derived", OsmosisConfig.annotation_derived),
+            annotation_computed=_str("annotation-computed", OsmosisConfig.annotation_computed),
+            annotation_aggregate_from=_str(
+                "annotation-aggregate-from", OsmosisConfig.annotation_aggregate_from
+            ),
+            annotation_aggregate_in=_str(
+                "annotation-aggregate-in", OsmosisConfig.annotation_aggregate_in
+            ),
+            annotation_window_from=_str(
+                "annotation-window-from", OsmosisConfig.annotation_window_from
+            ),
+            annotation_window_in=_str("annotation-window-in", OsmosisConfig.annotation_window_in),
+            annotation_union=_str("annotation-union", OsmosisConfig.annotation_union),
+            annotation_literal=_str("annotation-literal", OsmosisConfig.annotation_literal),
+            annotation_generated=_str("annotation-generated", OsmosisConfig.annotation_generated),
+            annotation_namespace=_str("annotation-namespace", OsmosisConfig.annotation_namespace),
+            annotation_separator=_str("annotation-separator", OsmosisConfig.annotation_separator),
+            cll_cache_path=_str("cll-cache-path", OsmosisConfig.cll_cache_path),
+            cll_max_origin_depth=_int("cll-max-origin-depth", OsmosisConfig.cll_max_origin_depth),
+            column_docs_path=_str("column-docs-path", OsmosisConfig.column_docs_path),
+            compiled_sql_placeholder_patterns=_patterns("compiled-sql-placeholder-patterns"),
+            inherit_through_renames=_bool(
+                "inherit-through-renames", OsmosisConfig.inherit_through_renames
+            ),
+            yaml_best_width=_int("yaml-best-width", OsmosisConfig.yaml_best_width),
+            write_cll_tags_to_meta=_bool(
+                "write-cll-tags-to-meta", OsmosisConfig.write_cll_tags_to_meta
+            ),
+            meta_key_renamed_from=_str("col-renamed-from", OsmosisConfig.meta_key_renamed_from),
+            meta_key_derived_from=_str("col-derived-from", OsmosisConfig.meta_key_derived_from),
+            meta_key_computed_in=_str("col-computed-in", OsmosisConfig.meta_key_computed_in),
+            legacy_strip_markers=_strlist("legacy-strip-markers", []),
         )
         logger.debug("Loaded dbt-osmosis-cll config from %s: %s", osmosis_file, cfg)
         return cfg

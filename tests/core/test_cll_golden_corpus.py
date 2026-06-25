@@ -59,9 +59,8 @@ def test_real_corpus_parses_without_exceptions():
         if not result.column_lineage and not result.star_sources:
             no_lineage.append(rel)
 
-    assert not exceptions, (
-        f"{len(exceptions)} files raised during parsing:\n"
-        + "\n".join(f"  {r}: {e}" for r, e in exceptions[:10])
+    assert not exceptions, f"{len(exceptions)} files raised during parsing:\n" + "\n".join(
+        f"  {r}: {e}" for r, e in exceptions[:10]
     )
     assert parsed > 0
     lineage_ratio = (parsed - len(no_lineage)) / parsed

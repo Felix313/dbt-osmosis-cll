@@ -175,8 +175,12 @@ class TestValidateModels:
         mock_node.raw_sql = "SELECT 1 AS col"
 
         with (
-            mock.patch("dbt_osmosis_cll.osmosis_propagation.validation.compile_sql_code") as mock_compile,
-            mock.patch("dbt_osmosis_cll.osmosis_propagation.validation.execute_sql_code") as mock_execute,
+            mock.patch(
+                "dbt_osmosis_cll.osmosis_propagation.validation.compile_sql_code"
+            ) as mock_compile,
+            mock.patch(
+                "dbt_osmosis_cll.osmosis_propagation.validation.execute_sql_code"
+            ) as mock_execute,
         ):
             # Mock compile to return a compiled node
             compiled_node = mock.Mock()
@@ -206,7 +210,9 @@ class TestValidateModels:
         mock_node.raw_code = "SELEC 1"  # Syntax error
         mock_node.raw_sql = "SELEC 1"
 
-        with mock.patch("dbt_osmosis_cll.osmosis_propagation.validation.compile_sql_code") as mock_compile:
+        with mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.validation.compile_sql_code"
+        ) as mock_compile:
             mock_compile.side_effect = Exception("Syntax error")
 
             report = validate_models(
@@ -228,8 +234,12 @@ class TestValidateModels:
         mock_node.raw_sql = "SELECT * FROM nonexistent_table"
 
         with (
-            mock.patch("dbt_osmosis_cll.osmosis_propagation.validation.compile_sql_code") as mock_compile,
-            mock.patch("dbt_osmosis_cll.osmosis_propagation.validation.execute_sql_code") as mock_execute,
+            mock.patch(
+                "dbt_osmosis_cll.osmosis_propagation.validation.compile_sql_code"
+            ) as mock_compile,
+            mock.patch(
+                "dbt_osmosis_cll.osmosis_propagation.validation.execute_sql_code"
+            ) as mock_execute,
         ):
             compiled_node = mock.Mock()
             compiled_node.compiled_code = "SELECT * FROM nonexistent_table"

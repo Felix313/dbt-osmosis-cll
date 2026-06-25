@@ -112,10 +112,21 @@ def test_create_dbt_project_context_accepts_interface_registered_adapter():
 
     with (
         mock.patch("dbt.adapters.factory.FACTORY", factory),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config", return_value=project),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.DbtProjectContext.from_project", return_value=context),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module", side_effect=ImportError),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False
+        ),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config",
+            return_value=project,
+        ),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.DbtProjectContext.from_project",
+            return_value=context,
+        ),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module",
+            side_effect=ImportError,
+        ),
     ):
         result = create_dbt_project_context(cfg)
 
@@ -138,13 +149,21 @@ def test_create_dbt_project_context_registers_project_adapter_when_factory_missi
 
     with (
         mock.patch("dbt.adapters.factory.FACTORY", factory),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config", return_value=project),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False
+        ),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config",
+            return_value=project,
+        ),
         mock.patch(
             "dbt_osmosis_cll.osmosis_propagation.config.DbtProjectContext.from_project",
             return_value=mock.sentinel.context,
         ),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module", side_effect=ImportError),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module",
+            side_effect=ImportError,
+        ),
     ):
         result = create_dbt_project_context(cfg)
 
@@ -169,13 +188,21 @@ def test_create_dbt_project_context_replaces_stale_factory_adapter():
 
     with (
         mock.patch("dbt.adapters.factory.FACTORY", factory),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config", return_value=project),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False
+        ),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config",
+            return_value=project,
+        ),
         mock.patch(
             "dbt_osmosis_cll.osmosis_propagation.config.DbtProjectContext.from_project",
             return_value=mock.sentinel.context,
         ),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module", side_effect=ImportError),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module",
+            side_effect=ImportError,
+        ),
     ):
         result = create_dbt_project_context(cfg)
 
@@ -201,13 +228,21 @@ def test_create_dbt_project_context_falls_back_to_close_all_connections():
 
     with (
         mock.patch("dbt.adapters.factory.FACTORY", factory),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config", return_value=project),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False
+        ),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config",
+            return_value=project,
+        ),
         mock.patch(
             "dbt_osmosis_cll.osmosis_propagation.config.DbtProjectContext.from_project",
             return_value=mock.sentinel.context,
         ),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module", side_effect=ImportError),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module",
+            side_effect=ImportError,
+        ),
     ):
         result = create_dbt_project_context(cfg)
 
@@ -233,13 +268,21 @@ def test_create_dbt_project_context_rebinds_when_stale_adapter_has_no_cleanup_ho
 
     with (
         mock.patch("dbt.adapters.factory.FACTORY", factory),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config", return_value=project),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config._detect_fusion_manifest", return_value=False
+        ),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.InterfaceDbtProject.from_config",
+            return_value=project,
+        ),
         mock.patch(
             "dbt_osmosis_cll.osmosis_propagation.config.DbtProjectContext.from_project",
             return_value=mock.sentinel.context,
         ),
-        mock.patch("dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module", side_effect=ImportError),
+        mock.patch(
+            "dbt_osmosis_cll.osmosis_propagation.config.importlib.import_module",
+            side_effect=ImportError,
+        ),
     ):
         result = create_dbt_project_context(cfg)
 

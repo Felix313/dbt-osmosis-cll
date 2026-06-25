@@ -65,7 +65,8 @@ def _initialize_column_knowledge(column: t.Any, node: ResultNode) -> dict[str, t
 
     # Match the existing graph-builder behaviorby dropping empty/whitespace-only strings and empty lists.
     return {
-        k: v for k, v in column_data.items()
+        k: v
+        for k, v in column_data.items()
         if not (isinstance(v, str) and not v.strip()) and v not in ([], ())
     }
 
@@ -419,15 +420,19 @@ def _build_column_knowledge_graph(
     tree = _build_node_ancestor_tree(context.project.manifest, node)
     logger.debug("Node ancestor tree => %s", tree)
 
-    node_yaml = _get_node_yaml(context, node)
     node_column_variants = _collect_column_variants(context, node)
 
     # CLL-first parent resolution: ask CLL which direct parent provides each column.
     # When CLL succeeds the result disambiguates multi-parent joins deterministically.
     # Multi-source computed columns carry _CLL_COMPUTED_SENTINEL — inheritance is skipped
     # entirely for them; annotate_column_origins will add a "computed in:" annotation.
-    from dbt_osmosis_cll.integration.cll import _CLL_COMPUTED_SENTINEL, build_parent_map, get_cll_results
+    from dbt_osmosis_cll.integration.cll import (
+        _CLL_COMPUTED_SENTINEL,
+        build_parent_map,
+        get_cll_results,
+    )
     from dbt_osmosis_cll.osmosis_propagation.introspection import _get_setting_for_node
+
     cll_parent_map = build_parent_map(get_cll_results(context, node), node.name)
 
     # Initialize the column knowledge graph with the local node's column data

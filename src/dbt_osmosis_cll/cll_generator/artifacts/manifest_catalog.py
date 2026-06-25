@@ -10,6 +10,7 @@ refresh (e.g. osmosis_sources_scoped.sh). When source YMLs are accurate, this
 reader is strictly more correct than LiveDbCatalogReader for the osmosis use
 case because it reflects the documented contract, not transient DB state.
 """
+
 from __future__ import annotations
 
 import json
@@ -61,23 +62,19 @@ class ManifestCatalogReader:
                     "data_type": col_data.get("data_type") or col_data.get("type"),
                     "lineage": [],
                 }
-            models[node_id] = Model(
-                **{
-                    "name": model_name,
-                    "schema": node_data.get("schema") or "main",
-                    "database": node_data.get("database") or "main",
-                    "columns": columns,
-                    "resource_type": resource_type,
-                    "unique_id": node_id,
-                }
-            )
+            models[node_id] = Model(**{
+                "name": model_name,
+                "schema": node_data.get("schema") or "main",
+                "database": node_data.get("database") or "main",
+                "columns": columns,
+                "resource_type": resource_type,
+                "unique_id": node_id,
+            })
 
         for source_id, source_data in self.manifest.get("sources", {}).items():
             # identifier = actual DB table name (what CLL uses for lookup)
             source_identifier = (
-                source_data.get("identifier")
-                or source_data.get("name")
-                or source_id.split(".")[-1]
+                source_data.get("identifier") or source_data.get("name") or source_id.split(".")[-1]
             ).lower()
             table_name = (source_data.get("name") or source_id.split(".")[-1]).lower()
             source_name = (source_data.get("source_name") or "").lower()
@@ -92,18 +89,16 @@ class ManifestCatalogReader:
                     "data_type": col_data.get("data_type") or col_data.get("type"),
                     "lineage": [],
                 }
-            model = Model(
-                **{
-                    "name": table_name,
-                    "schema": source_data.get("schema") or "main",
-                    "database": source_data.get("database") or "main",
-                    "columns": columns,
-                    "resource_type": "source",
-                    "source_identifier": source_identifier or None,
-                    "source_name": source_name or None,
-                    "unique_id": source_id,
-                }
-            )
+            model = Model(**{
+                "name": table_name,
+                "schema": source_data.get("schema") or "main",
+                "database": source_data.get("database") or "main",
+                "columns": columns,
+                "resource_type": "source",
+                "source_identifier": source_identifier or None,
+                "source_name": source_name or None,
+                "unique_id": source_id,
+            })
             models[source_id] = model
             for col in model.columns.values():
                 col.model_name = source_identifier

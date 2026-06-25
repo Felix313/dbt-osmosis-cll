@@ -3,6 +3,7 @@ import click
 from dbt_osmosis_cll.cll_generator.models.schema import Column, ColumnLineage
 from .base import LineageStaticDisplay
 
+
 class TextDisplay(LineageStaticDisplay):
     def display_column_info(self, column: Column) -> None:
         click.echo(f"\nColumn: {column.name}")
@@ -15,19 +16,19 @@ class TextDisplay(LineageStaticDisplay):
             return
 
         click.echo("\nUpstream dependencies:")
-        
-        if 'sources' in refs and isinstance(refs['sources'], set) and refs['sources']:
+
+        if "sources" in refs and isinstance(refs["sources"], set) and refs["sources"]:
             click.echo("  Sources:")
-            for source in sorted(refs['sources']):
+            for source in sorted(refs["sources"]):
                 click.echo(f"    {source}")
 
-        if 'direct_refs' in refs and isinstance(refs['direct_refs'], set) and refs['direct_refs']:
+        if "direct_refs" in refs and isinstance(refs["direct_refs"], set) and refs["direct_refs"]:
             click.echo("  Direct references:")
-            for ref in sorted(refs['direct_refs']):
+            for ref in sorted(refs["direct_refs"]):
                 click.echo(f"    {ref}")
 
         for model_name, columns in refs.items():
-            if model_name not in ('sources', 'direct_refs') and isinstance(columns, dict):
+            if model_name not in ("sources", "direct_refs") and isinstance(columns, dict):
                 click.echo(f"  Model {model_name}:")
                 for col_name, lineage in columns.items():
                     click.echo(f"    {col_name}")
@@ -35,7 +36,7 @@ class TextDisplay(LineageStaticDisplay):
     def display_downstream(self, refs: Dict[str, Dict[str, ColumnLineage]]) -> None:
         if not refs:
             return
-            
+
         click.echo("\nDownstream dependencies:")
         for model_name, columns in refs.items():
             click.echo(f"  Model {model_name}:")

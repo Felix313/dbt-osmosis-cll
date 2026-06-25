@@ -12,12 +12,12 @@ two-tier cache and graceful fallback:
 Both ``inheritance.py`` (disambiguation) and ``transforms.py`` (origin
 enrichment) import from here.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import re
 import threading
 import types
 import typing as t
@@ -25,7 +25,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from dbt_osmosis_cll.config import get_config
+from dbt_osmosis_cll.config import get_config  # noqa: E402
 
 if t.TYPE_CHECKING:
     from dbt.contracts.graph.nodes import ResultNode
@@ -65,22 +65,36 @@ _FAILURES_LOCK = threading.Lock()
 
 # Fields we read from ColumnLineageResult — serialised/deserialised for disk cache
 _RESULT_FIELDS = (
-    "model", "column", "is_computed", "progenitor_model", "progenitor_column",
-    "is_first_in_chain", "is_rename", "source_column",
-    "is_aggregate", "is_window", "is_literal", "is_union", "is_generated",
-    "literal_value", "generated_value", "unique_id",
+    "model",
+    "column",
+    "is_computed",
+    "progenitor_model",
+    "progenitor_column",
+    "is_first_in_chain",
+    "is_rename",
+    "source_column",
+    "is_aggregate",
+    "is_window",
+    "is_literal",
+    "is_union",
+    "is_generated",
+    "literal_value",
+    "generated_value",
+    "unique_id",
     # NOTE: tuple-valued fields JSON-round-trip as lists of [model, col] lists —
     # consumers unpack pairs positionally, which works for both shapes.
     # union_branches was historically MISSING here, silently degrading union
     # agreement inheritance on warm disk-cache runs; schema_version 4 forces the
     # one-time rebuild that backfills it.
-    "union_branches", "progenitors",
+    "union_branches",
+    "progenitors",
 )
 
 
 # ---------------------------------------------------------------------------
 # Disk cache helpers
 # ---------------------------------------------------------------------------
+
 
 def _disk_cache_path(project_dir: str) -> Path:
     cfg_path = get_config().cll_cache_path
@@ -141,7 +155,9 @@ def _compiled_sql_hash(project_dir: str, node: t.Any) -> str | None:
     return None
 
 
-def _is_compiled_sql_stale(project_dir: str, node: t.Any, target_base: "Path | None" = None) -> bool:
+def _is_compiled_sql_stale(
+    project_dir: str, node: t.Any, target_base: "Path | None" = None
+) -> bool:
     """Return True if the compiled SQL artifact is older than the source SQL file,
     or if no compiled artifact exists yet.
 
@@ -167,8 +183,6 @@ def _is_compiled_sql_stale(project_dir: str, node: t.Any, target_base: "Path | N
     return True
 
 
-
-
 def _deserialize_results(raw: list[dict[str, t.Any]]) -> list[t.Any]:
     return [types.SimpleNamespace(**r) for r in raw]
 
@@ -180,6 +194,7 @@ def _serialize_results(results: list[t.Any]) -> list[dict[str, t.Any]]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def get_cll_results(
     context: YamlRefactorContextProtocol,
@@ -205,7 +220,9 @@ def get_cll_results(
     project_dir: str = str(runtime_cfg.project_root)
     # Use the configured target directory (respects DBT_TARGET_PATH env var).
     # project_target_path is the full absolute path to the target folder.
-    target_base: Path = Path(getattr(runtime_cfg, "project_target_path", None) or Path(project_dir) / "target")
+    target_base: Path = Path(
+        getattr(runtime_cfg, "project_target_path", None) or Path(project_dir) / "target"
+    )
     cache_key = (project_dir, node.name)
 
     # 1. In-memory
@@ -241,11 +258,10 @@ def get_cll_results(
             reader.load()
             _READER_CACHE[project_dir] = reader
 
-        adapter_type: str | None = getattr(
-            getattr(runtime_cfg, "credentials", None), "type", None
-        )
+        adapter_type: str | None = getattr(getattr(runtime_cfg, "credentials", None), "type", None)
 
         from dbt_osmosis_cll.config import get_config
+
         _cfg = get_config()
         results = get_column_lineage(
             manifest_path=manifest_path,
@@ -318,8 +334,7 @@ def maybe_bulk_compile(context: "YamlRefactorContextProtocol") -> None:
     stale = [
         node
         for _, node in _iter_candidate_nodes(context)
-        if isinstance(node, ModelNode)
-        and _is_compiled_sql_stale(project_dir, node, target_base)
+        if isinstance(node, ModelNode) and _is_compiled_sql_stale(project_dir, node, target_base)
     ]
 
     if not stale:
@@ -375,8 +390,7 @@ def get_model_columns_from_cll(
     if not cols:
         return None
     return {
-        r.column: types.SimpleNamespace(comment="", type=None, index=i)
-        for i, r in enumerate(cols)
+        r.column: types.SimpleNamespace(comment="", type=None, index=i) for i, r in enumerate(cols)
     }
 
 
@@ -432,6 +446,7 @@ def build_parent_map(results: list[t.Any], node_name: str) -> dict[str, str]:
 # Origin tracing
 # ---------------------------------------------------------------------------
 
+
 def _ensure_manifest_index(context: YamlRefactorContextProtocol) -> None:
     """Build name→node lookup dicts for sources and model nodes (once per project)."""
     runtime_cfg = context.project.runtime_cfg
@@ -452,8 +467,8 @@ def _ensure_manifest_index(context: YamlRefactorContextProtocol) -> None:
             # Used by Phase 4 CLL-driven inheritance to resolve compiled-SQL
             # database references (e.g. EDW_DB_PROD.AE_AML.SOME_TABLE) back
             # to dbt source nodes for description lookup.
-            db  = (getattr(src_node, "database",   None) or "").upper()
-            sch = (getattr(src_node, "schema",     None) or "").upper()
+            db = (getattr(src_node, "database", None) or "").upper()
+            sch = (getattr(src_node, "schema", None) or "").upper()
             idf = (getattr(src_node, "identifier", None) or "").upper()
             if db and sch and idf:
                 rev_idx[(db, sch, idf)] = src_node
@@ -507,9 +522,7 @@ def clear_cll_failures(context: YamlRefactorContextProtocol) -> None:
         _CLL_FAILURES.pop(project_dir, None)
 
 
-def record_cll_walk_soft_fail(
-    context: YamlRefactorContextProtocol, reason: str, ref: str
-) -> None:
+def record_cll_walk_soft_fail(context: YamlRefactorContextProtocol, reason: str, ref: str) -> None:
     """Record a soft-fail from the origin/description walk for the end-of-run summary.
 
     Unlike a CLL *failure* (a model whose lineage could not be computed), a walk soft-fail is
@@ -671,7 +684,12 @@ def _compute_column_origin(
                 or getattr(node, "schema", None)
                 or ""
             )
-            return (str(schema).upper(), node.name.upper(), column_name.upper(), column_name.upper())
+            return (
+                str(schema).upper(),
+                node.name.upper(),
+                column_name.upper(),
+                column_name.upper(),
+            )
         return None
 
     progenitor_lower = result.progenitor_model.lower()
@@ -721,12 +739,12 @@ def get_origin_source_description(
     runtime_cfg = context.project.runtime_cfg
     project_dir = str(runtime_cfg.project_root)
 
-    upstream_node = _SOURCE_INDEX[project_dir].get(model_lower) or _NODE_INDEX[project_dir].get(model_lower)
+    upstream_node = _SOURCE_INDEX[project_dir].get(model_lower) or _NODE_INDEX[project_dir].get(
+        model_lower
+    )
     if upstream_node is not None:
         cols: dict[str, t.Any] = getattr(upstream_node, "columns", {})
-        col_info = next(
-            (v for k, v in cols.items() if k.lower() == col_lower), None
-        )
+        col_info = next((v for k, v in cols.items() if k.lower() == col_lower), None)
         if col_info is None:
             return None
         desc = getattr(col_info, "description", None) or ""

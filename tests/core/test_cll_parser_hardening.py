@@ -107,10 +107,7 @@ class TestMultiSourcePreservation:
         assert _lineage(result, "merged").source_columns == {"tbl_a.x", "tbl_b.y"}
 
     def test_single_source_through_cte_still_single(self):
-        sql = (
-            "WITH c AS (SELECT a.x AS x2 FROM tbl_a a) "
-            "SELECT x2 FROM c"
-        )
+        sql = "WITH c AS (SELECT a.x AS x2 FROM tbl_a a) SELECT x2 FROM c"
         parser = SQLColumnParser()
         result = parser.parse_column_lineage(sql)
         assert _lineage(result, "x2").source_columns == {"tbl_a.x"}
@@ -160,10 +157,7 @@ class TestTopLevelUnionStarBranches:
         ]
 
     def test_explicit_top_level_union_now_carries_branches(self):
-        sql = (
-            "SELECT a.x AS val FROM tbl_a a"
-            " UNION ALL SELECT b.y AS val FROM tbl_b b"
-        )
+        sql = "SELECT a.x AS val FROM tbl_a a UNION ALL SELECT b.y AS val FROM tbl_b b"
         parser = SQLColumnParser()
         result = parser.parse_column_lineage(sql)
         lin = result.column_lineage["val"][0]
@@ -195,10 +189,7 @@ class TestSchemaAwareResolution:
         assert _lineage(result, "amount").source_columns == {"customers.amount"}
 
     def test_unqualified_column_in_expression_resolves(self):
-        sql = (
-            "SELECT UPPER(region) AS region_uc "
-            "FROM orders o JOIN customers c ON o.cust_id = c.id"
-        )
+        sql = "SELECT UPPER(region) AS region_uc FROM orders o JOIN customers c ON o.cust_id = c.id"
         parser = SQLColumnParser(table_columns=self.TABLE_COLUMNS)
         result = parser.parse_column_lineage(sql)
         assert _lineage(result, "region_uc").source_columns == {"customers.region"}

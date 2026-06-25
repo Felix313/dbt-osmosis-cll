@@ -245,7 +245,10 @@ class SchemaDiff:
         Returns:
             SchemaDiffResult with detected changes
         """
-        from dbt_osmosis_cll.osmosis_propagation.introspection import get_columns, normalize_column_name
+        from dbt_osmosis_cll.osmosis_propagation.introspection import (
+            get_columns,
+            normalize_column_name,
+        )
 
         # Get YAML columns
         yaml_columns: dict[str, ColumnInfo] = node.columns

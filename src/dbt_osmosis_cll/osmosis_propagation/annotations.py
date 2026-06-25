@@ -4,6 +4,7 @@ Renders and parses the origin-annotation blocks (``<separator>\n<namespace>
 -> <verb> ...``) that osmosis writes onto column descriptions. Depends only on
 the resolved config (namespace / separator / verbs).
 """
+
 from __future__ import annotations
 
 import re
@@ -25,7 +26,9 @@ def format_origin_tag(origin_col: str, origin_table: str, source_description: st
     return _wrap_annotation(base)
 
 
-def format_computed_origin_tag(origin_col: str, origin_table: str, source_description: str | None) -> str:
+def format_computed_origin_tag(
+    origin_col: str, origin_table: str, source_description: str | None
+) -> str:
     """Return the full annotation block for a **passthrough / computed** column."""
     base = f"{get_config().annotation_derived} {origin_table}.{origin_col}"
     if source_description:
@@ -173,10 +176,16 @@ def strip_annotation_tags(description: str) -> str:
         f"{_ns} -> {cfg.annotation_literal}",
         f"{_ns} -> {cfg.annotation_generated}",
         # Bare verb forms (even older format, or when namespace was different)
-        cfg.annotation_renamed, cfg.annotation_derived, cfg.annotation_computed,
-        cfg.annotation_aggregate_from, cfg.annotation_aggregate_in,
-        cfg.annotation_window_from, cfg.annotation_window_in,
-        cfg.annotation_union, cfg.annotation_literal, cfg.annotation_generated,
+        cfg.annotation_renamed,
+        cfg.annotation_derived,
+        cfg.annotation_computed,
+        cfg.annotation_aggregate_from,
+        cfg.annotation_aggregate_in,
+        cfg.annotation_window_from,
+        cfg.annotation_window_in,
+        cfg.annotation_union,
+        cfg.annotation_literal,
+        cfg.annotation_generated,
         # Project-specific legacy markers configured in .osmosis (legacy-strip-markers)
         *cfg.legacy_strip_markers,
     ):

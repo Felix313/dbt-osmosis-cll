@@ -511,16 +511,14 @@ class LineageService:
                             potential_count += 1
 
                         col_obj = downstream_model.columns.get(col_name)
-                        affected_columns.append(
-                            {
-                                "model": downstream_model_name,
-                                "column": col_name,
-                                "transformation_type": lineage.transformation_type,
-                                "sql_expression": lineage.sql_expression,
-                                "severity": "critical" if is_critical else "low_impact",
-                                "data_type": col_obj.data_type if col_obj else None,
-                            }
-                        )
+                        affected_columns.append({
+                            "model": downstream_model_name,
+                            "column": col_name,
+                            "transformation_type": lineage.transformation_type,
+                            "sql_expression": lineage.sql_expression,
+                            "severity": "critical" if is_critical else "low_impact",
+                            "data_type": col_obj.data_type if col_obj else None,
+                        })
 
                 except Exception as e:
                     logger.warning(
@@ -532,15 +530,13 @@ class LineageService:
                 for exposure_name in sorted(downstream_refs["exposures"]):
                     try:
                         exposure = self.registry.get_exposure(exposure_name)
-                        affected_exposures.append(
-                            {
-                                "name": exposure.name,
-                                "type": exposure.type,
-                                "url": exposure.url,
-                                "description": exposure.description,
-                                "depends_on_models": list(exposure.depends_on_models),
-                            }
-                        )
+                        affected_exposures.append({
+                            "name": exposure.name,
+                            "type": exposure.type,
+                            "url": exposure.url,
+                            "description": exposure.description,
+                            "depends_on_models": list(exposure.depends_on_models),
+                        })
                     except Exception as e:
                         logger.warning(
                             f"Failed to process exposure {exposure_name} in impact analysis: {e}"

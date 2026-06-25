@@ -6,7 +6,10 @@ from unittest import mock
 
 from dbt.artifacts.resources.types import NodeType
 
-from dbt_osmosis_cll.osmosis_propagation.node_filters import _iter_candidate_nodes, _topological_sort
+from dbt_osmosis_cll.osmosis_propagation.node_filters import (
+    _iter_candidate_nodes,
+    _topological_sort,
+)
 
 
 def _make_node(

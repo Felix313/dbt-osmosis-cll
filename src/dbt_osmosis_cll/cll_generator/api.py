@@ -3,6 +3,7 @@
 This is the stable contract consumed by dbt-osmosis and other integrators.
 Do not break the signatures of ``ColumnLineageResult`` or ``get_column_lineage``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,9 +21,16 @@ logger = logging.getLogger(__name__)
 # may be left as `target` or `tar`).  These are never dbt model names, so any
 # progenitor that resolves to one of these strings is a phantom node and must be
 # dropped.
-_JINJA_RESERVED: frozenset[str] = frozenset(
-    {"target", "this", "model", "config", "var", "env_var", "builtins", "flags"}
-)
+_JINJA_RESERVED: frozenset[str] = frozenset({
+    "target",
+    "this",
+    "model",
+    "config",
+    "var",
+    "env_var",
+    "builtins",
+    "flags",
+})
 
 # Process-level cache of fully-loaded registries.  Building a registry parses the
 # compiled SQL of EVERY model in the project, so without this cache a per-model
@@ -209,9 +217,7 @@ def get_column_lineage(
 
     if compiled_sql_source == "auto_compile":
         if not project_dir:
-            raise ValueError(
-                "project_dir is required when compiled_sql_source='auto_compile'."
-            )
+            raise ValueError("project_dir is required when compiled_sql_source='auto_compile'.")
         _run_dbt_compile(project_dir=project_dir, profiles_dir=profiles_dir, target=target)
 
     # Pre-flight: check that the manifest has inline compiled SQL (unless caller
@@ -278,13 +284,13 @@ def get_column_lineage(
             lin = col_obj.lineage[0]
             progenitor_model, progenitor_column = _resolve_progenitor(lin)
             ttype = lin.transformation_type
-            is_computed   = ttype == "derived"
-            is_aggregate  = ttype == "aggregate"
-            is_window     = ttype == "window"
-            is_literal    = ttype == "literal"
-            is_union      = ttype == "union"
-            is_generated  = ttype == "generated"
-            literal_value   = lin.sql_expression if is_literal  else None
+            is_computed = ttype == "derived"
+            is_aggregate = ttype == "aggregate"
+            is_window = ttype == "window"
+            is_literal = ttype == "literal"
+            is_union = ttype == "union"
+            is_generated = ttype == "generated"
+            literal_value = lin.sql_expression if is_literal else None
             generated_value = lin.sql_expression if is_generated else None
             # Multiple source columns → no single traceable progenitor
             if len(lin.source_columns) > 1:
@@ -311,7 +317,7 @@ def get_column_lineage(
                         m = m.lower()
                         # Same ephemeral-prefix strip as _resolve_progenitor.
                         if m.startswith("__dbt__cte__"):
-                            m = m[len("__dbt__cte__"):]
+                            m = m[len("__dbt__cte__") :]
                         # Drop phantom nodes from Jinja context leakage.
                         if m in _JINJA_RESERVED:
                             continue
@@ -434,7 +440,7 @@ def _load_registry_cached(
     from dbt_osmosis_cll.cll_generator.artifacts.registry import ModelRegistry
 
     registry = ModelRegistry(
-        catalog_path=None,       # type: ignore[arg-type]  # overridden below
+        catalog_path=None,  # type: ignore[arg-type]  # overridden below
         manifest_path=manifest_path,
         adapter_override=dialect,
         _catalog_reader_override=catalog_reader,
@@ -449,8 +455,7 @@ def _load_registry_cached(
     # here so per-call result construction does not re-scan every node.
     all_nodes = registry.get_models()
     terminal_node_names = frozenset(
-        name for name, node in all_nodes.items()
-        if node.resource_type in ("source", "seed")
+        name for name, node in all_nodes.items() if node.resource_type in ("source", "seed")
     )
 
     _REGISTRY_CACHE[cache_key] = (registry, terminal_node_names)
@@ -544,7 +549,7 @@ def _resolve_progenitor(lin) -> tuple[Optional[str], Optional[str]]:
     model_part = parts[0].lower()
     # Strip dbt's ephemeral CTE injection prefix
     if model_part.startswith("__dbt__cte__"):
-        model_part = model_part[len("__dbt__cte__"):]
+        model_part = model_part[len("__dbt__cte__") :]
     # Reject Jinja context objects that leak into compiled SQL as table qualifiers
     # (e.g. `target`, `this`).  They are never real dbt model names.
     if model_part in _JINJA_RESERVED:

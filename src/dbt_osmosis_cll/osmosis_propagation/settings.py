@@ -36,7 +36,9 @@ def _read_profile_threads(runtime_cfg: t.Any) -> int | None:
         target_name = getattr(runtime_cfg, "target_name", None)
         if not profile_name or not target_name:
             return None
-        threads = profiles.get(profile_name, {}).get("outputs", {}).get(target_name, {}).get("threads")
+        threads = (
+            profiles.get(profile_name, {}).get("outputs", {}).get(target_name, {}).get("threads")
+        )
         return int(threads) if threads else None
     except Exception:  # noqa: BLE001 — best-effort profiles.yml read; fall back to dbt default
         return None
@@ -70,9 +72,10 @@ def get_managed_meta_keys() -> frozenset[str]:
       set by AML enrichment survives on the STG node that owns it).
     """
     from dbt_osmosis_cll.config import get_config
+
     cfg = get_config()
     keys = {
-        "desc-owner",       # unified ownership key (upstream = force-inherit; any other value = anchored)
+        "desc-owner",  # unified ownership key (upstream = force-inherit; any other value = anchored)
         cfg.meta_key_renamed_from,
         cfg.meta_key_derived_from,
         cfg.meta_key_computed_in,
@@ -425,6 +428,7 @@ class YamlRefactorContext:
         # Update BOTH best_width and width so the str_representer closure (which reads
         # y.best_width at call time) and ruamel's own emitter both use the same limit.
         from dbt_osmosis_cll.config import get_config  # local import — avoids circular imports
+
         _best_width = get_config().yaml_best_width
         if _best_width > 0:
             self.yaml_handler.best_width = _best_width

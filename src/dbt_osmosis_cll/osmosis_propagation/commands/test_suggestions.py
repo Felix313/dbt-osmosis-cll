@@ -398,6 +398,7 @@ class TestSuggester:
 
         return dict(suggestions)
 
+
 # Backwards-compatible alias from when this class had an LLM-backed mode.
 AITestSuggester = TestSuggester
 

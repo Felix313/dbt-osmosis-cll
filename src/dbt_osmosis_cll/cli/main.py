@@ -30,8 +30,14 @@ from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
 )
 from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext, YamlRefactorSettings
 from dbt_osmosis_cll.osmosis_propagation.commands.sql_lint import SQLLinter, lint_sql_code
-from dbt_osmosis_cll.osmosis_propagation.commands.sql_operations import compile_sql_code, execute_sql_code
-from dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions import suggest_tests_for_model, suggest_tests_for_project
+from dbt_osmosis_cll.osmosis_propagation.commands.sql_operations import (
+    compile_sql_code,
+    execute_sql_code,
+)
+from dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions import (
+    suggest_tests_for_model,
+    suggest_tests_for_project,
+)
 from dbt_osmosis_cll.osmosis_propagation.transforms import (
     annotate_column_origins,
     inherit_upstream_column_knowledge_cll,
@@ -212,7 +218,9 @@ def yaml_opts(func: t.Callable[P, T]) -> t.Callable[P, T]:
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         if kwargs.get("fqn") and kwargs.get("select"):
-            raise click.UsageError("--fqn and --select are mutually exclusive. Use one or the other.")
+            raise click.UsageError(
+                "--fqn and --select are mutually exclusive. Use one or the other."
+            )
         return func(*args, **kwargs)
 
     return wrapper
@@ -339,9 +347,7 @@ def refactor(
 
     with YamlRefactorContext(
         project=create_dbt_project_context(settings),
-        settings=YamlRefactorSettings(
-            **{k: v for k, v in kwargs.items() if v is not None}
-        ),
+        settings=YamlRefactorSettings(**{k: v for k, v in kwargs.items() if v is not None}),
     ) as context:
         typed_context: t.Any = context
         create_missing_source_yamls(context=context)
@@ -354,8 +360,13 @@ def refactor(
         maybe_bulk_compile(typed_context)
 
         from dbt_osmosis_cll.osmosis_propagation.node_filters import _iter_candidate_nodes
+
         _n_nodes = sum(1 for _ in _iter_candidate_nodes(typed_context))
-        _proj = settings.project_dir.split("\\")[-1].split("/")[-1] if settings.project_dir else "project"
+        _proj = (
+            settings.project_dir.split("\\")[-1].split("/")[-1]
+            if settings.project_dir
+            else "project"
+        )
         _tgt = settings.target or "dev"
         logger.info("Propagating docs — project: %s, target: %s, nodes: %d", _proj, _tgt, _n_nodes)
 
@@ -374,10 +385,6 @@ def refactor(
 
         if check and context.mutated:
             sys.exit(1)
-
-
-
-
 
 
 @yaml.command(context_settings=_CONTEXT)
@@ -420,9 +427,7 @@ def organize(
 
     with YamlRefactorContext(
         project=create_dbt_project_context(settings),
-        settings=YamlRefactorSettings(
-            **{k: v for k, v in kwargs.items() if v is not None}
-        ),
+        settings=YamlRefactorSettings(**{k: v for k, v in kwargs.items() if v is not None}),
     ) as context:
         typed_context: t.Any = context
         create_missing_source_yamls(context=context)
@@ -544,14 +549,13 @@ def document(
 
     with YamlRefactorContext(
         project=create_dbt_project_context(settings),
-        settings=YamlRefactorSettings(
-            **{k: v for k, v in kwargs.items() if v is not None}
-        ),
+        settings=YamlRefactorSettings(**{k: v for k, v in kwargs.items() if v is not None}),
     ) as context:
         typed_context: t.Any = context
         maybe_bulk_compile(typed_context)
 
         from dbt_osmosis_cll.osmosis_propagation.node_filters import _iter_candidate_nodes
+
         _n_nodes = sum(1 for _ in _iter_candidate_nodes(typed_context))
         logger.info("Running column propagation pipeline for %d node(s)...", _n_nodes)
 
@@ -635,15 +639,16 @@ def doc_health(
 
     with YamlRefactorContext(
         project=create_dbt_project_context(settings),
-        settings=YamlRefactorSettings(
-            **{k: v for k, v in kwargs.items() if v is not None}
-        ),
+        settings=YamlRefactorSettings(**{k: v for k, v in kwargs.items() if v is not None}),
     ) as context:
         typed_context: t.Any = context
         if check_cll:
             maybe_bulk_compile(typed_context)
 
-        from dbt_osmosis_cll.osmosis_propagation.commands.doc_health import compute_doc_health, format_report
+        from dbt_osmosis_cll.osmosis_propagation.commands.doc_health import (
+            compute_doc_health,
+            format_report,
+        )
 
         report = compute_doc_health(typed_context, check_cll=check_cll)
 

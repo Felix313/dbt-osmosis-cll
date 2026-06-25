@@ -4,7 +4,10 @@ from unittest import mock
 
 import pytest
 
-from dbt_osmosis_cll.osmosis_propagation.inheritance import _build_node_ancestor_tree, _get_node_yaml
+from dbt_osmosis_cll.osmosis_propagation.inheritance import (
+    _build_node_ancestor_tree,
+    _get_node_yaml,
+)
 from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext
 from dbt_osmosis_cll.osmosis_propagation.sync_operations import sync_node_to_yaml
 from dbt_osmosis_cll.osmosis_propagation.transforms import inherit_upstream_column_knowledge

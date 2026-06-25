@@ -2,9 +2,10 @@ from abc import ABC, abstractmethod
 from typing import Dict, Union, Set
 from dbt_osmosis_cll.cll_generator.models.schema import Column, ColumnLineage
 
+
 class LineageStaticDisplay(ABC):
     """Abstract base class for lineage display strategies."""
-    
+
     @abstractmethod
     def display_column_info(self, column: Column) -> None:
         """Display basic column information."""

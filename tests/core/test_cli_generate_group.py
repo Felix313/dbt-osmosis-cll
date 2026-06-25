@@ -37,7 +37,9 @@ def test_generate_staging_dry_run_does_not_write_files(tmp_path: Path):
         yaml_path=yaml_path,
     )
 
-    with mock.patch("dbt_osmosis_cll.cli.main.create_dbt_project_context", return_value=mock.Mock()):
+    with mock.patch(
+        "dbt_osmosis_cll.cli.main.create_dbt_project_context", return_value=mock.Mock()
+    ):
         with mock.patch(
             "dbt_osmosis_cll.cli.main.generate_staging_from_source", return_value=mock_result
         ):

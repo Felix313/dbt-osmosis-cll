@@ -7,6 +7,7 @@ names to sqlglot dialect names. For example, dbt may report the adapter
 
 Extend ADAPTER_TO_DIALECT as needed to support additional adapters.
 """
+
 from typing import Dict, Optional
 
 # Mapping from dbt adapter name (metadata.adapter_type) to sqlglot dialect

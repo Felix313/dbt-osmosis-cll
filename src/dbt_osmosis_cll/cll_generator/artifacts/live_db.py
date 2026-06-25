@@ -63,11 +63,13 @@ def _bootstrap_dbt_adapter(
         try:
             import os as _os
             from dbt_common.context import set_invocation_context
+
             set_invocation_context(_os.environ)
         except Exception:
             pass
         try:
             import dbt.flags as _dbt_flags
+
             if hasattr(_dbt_flags, "set_from_args"):
                 _dbt_flags.set_from_args(args, None)
         except Exception:
@@ -128,7 +130,6 @@ class LiveDbCatalogReader:
         target: Optional[str] = None,
     ) -> None:
         import json
-        from pathlib import Path
 
         self._project_dir = str(project_dir or ".")
         self._profiles_dir = str(profiles_dir or ".")
