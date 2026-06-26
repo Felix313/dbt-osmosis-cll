@@ -52,16 +52,16 @@ jobs:
       # gate once the baseline is cleaned up.
       - name: Run basedpyright (report only)
         run: |
-          uv run basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
-          python -c "import json, pathlib; summary = json.loads(pathlib.Path('/tmp/dbt-osmosis-basedpyright.json').read_text())['summary']; print('basedpyright summary:', summary['errorCount'], 'errors,', summary['warningCount'], 'warnings')"
+          uv run --no-sync basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
+          python -c "import json, pathlib; summary = json.loads(pathlib.Path('/tmp/dbt-osmosis-basedpyright.json').read_text())['summary']; print('basedpyright summary:', summary['errorCount'], 'errors,', summary['warningCount'], 'warnings')" || true
 
       - name: Parse manifest
         run: |
-          uv run dbt parse --project-dir demo_duckdb --profiles-dir demo_duckdb -t test
+          uv run --no-sync dbt parse --project-dir demo_duckdb --profiles-dir demo_duckdb -t test
 
       - name: Run pytest
         run: |
-          uv run pytest
+          uv run --no-sync pytest
 
       - name: Run integration tests
         working-directory: demo_duckdb

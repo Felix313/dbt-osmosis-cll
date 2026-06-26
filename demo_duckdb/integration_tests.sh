@@ -12,10 +12,10 @@ common_options=(
 )
 
 # Run the tests
-uv run dbt-osmosis-cll yaml organize --auto-apply "${common_options[@]}"
-uv run dbt-osmosis-cll yaml document "${common_options[@]}"
-uv run dbt-osmosis-cll yaml refactor --auto-apply "${common_options[@]}"
-uv run dbt-osmosis-cll yaml --help >/dev/null
+uv run --no-sync dbt-osmosis-cll yaml organize --auto-apply "${common_options[@]}"
+uv run --no-sync dbt-osmosis-cll yaml document "${common_options[@]}"
+uv run --no-sync dbt-osmosis-cll yaml refactor --auto-apply "${common_options[@]}"
+uv run --no-sync dbt-osmosis-cll yaml --help >/dev/null
 
 # Restore YAML fixtures that may have been overwritten by the commands above.
 # git checkout restores tracked files; git clean removes untracked files created by organize.
