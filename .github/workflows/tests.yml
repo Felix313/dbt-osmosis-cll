@@ -13,12 +13,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
-        dbt-version: ["1.8.0", "1.9.0", "1.10.0"]
-        exclude:
-          - python-version: "3.13"
-            dbt-version: "1.8.0"
-          - python-version: "3.13"
-            dbt-version: "1.9.0"
 
     steps:
       - name: Check out the repository
@@ -39,32 +33,25 @@ jobs:
           pip install --constraint=.github/workflows/constraints.txt uv
           uv --version
 
-      - name: Install required packages
-        run: | # install the dev extra to be able to parse manifest and run all tests
-          uv sync --extra dev
-
-      - name: Install dbt runtime
+      - name: Install packages
         run: |
-          uv pip install "dbt-core~=${{ matrix.dbt-version }}" "dbt-duckdb~=${{ matrix.dbt-version }}"
-          # Expose the venv's bin/ directly so subsequent steps bypass uv's
-          # auto-resync (uv run re-syncs to the lockfile, reverting the override above)
-          echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+          uv sync --extra dev
 
       # Report-only: the repo baseline is not basedpyright-clean (~20 pre-existing
       # errors inherited from the forks). Gate on tests instead; re-enable a hard
       # gate once the baseline is cleaned up.
       - name: Run basedpyright (report only)
         run: |
-          basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
+          uv run basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
           python -c "import json, pathlib; summary = json.loads(pathlib.Path('/tmp/dbt-osmosis-basedpyright.json').read_text())['summary']; print('basedpyright summary:', summary['errorCount'], 'errors,', summary['warningCount'], 'warnings')" || true
 
       - name: Parse manifest
         run: |
-          dbt parse --project-dir demo_duckdb --profiles-dir demo_duckdb -t test
+          uv run dbt parse --project-dir demo_duckdb --profiles-dir demo_duckdb -t test
 
       - name: Run pytest
         run: |
-          pytest
+          uv run pytest
 
       - name: Run integration tests
         working-directory: demo_duckdb
