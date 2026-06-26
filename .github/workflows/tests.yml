@@ -46,22 +46,25 @@ jobs:
       - name: Install dbt runtime
         run: |
           uv pip install "dbt-core~=${{ matrix.dbt-version }}" "dbt-duckdb~=${{ matrix.dbt-version }}"
+          # Expose the venv's bin/ directly so subsequent steps bypass uv's
+          # auto-resync (uv run re-syncs to the lockfile, reverting the override above)
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
 
       # Report-only: the repo baseline is not basedpyright-clean (~20 pre-existing
       # errors inherited from the forks). Gate on tests instead; re-enable a hard
       # gate once the baseline is cleaned up.
       - name: Run basedpyright (report only)
         run: |
-          uv run --no-sync basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
+          basedpyright --outputjson > /tmp/dbt-osmosis-basedpyright.json || true
           python -c "import json, pathlib; summary = json.loads(pathlib.Path('/tmp/dbt-osmosis-basedpyright.json').read_text())['summary']; print('basedpyright summary:', summary['errorCount'], 'errors,', summary['warningCount'], 'warnings')" || true
 
       - name: Parse manifest
         run: |
-          uv run --no-sync dbt parse --project-dir demo_duckdb --profiles-dir demo_duckdb -t test
+          dbt parse --project-dir demo_duckdb --profiles-dir demo_duckdb -t test
 
       - name: Run pytest
         run: |
-          uv run --no-sync pytest
+          pytest
 
       - name: Run integration tests
         working-directory: demo_duckdb
