@@ -101,7 +101,7 @@ def get_scoped_tables_from_select(select: Any) -> List[str]:
     ``find_all``, so tables inside CTE definitions or subqueries are excluded.
     """
     tables: List[str] = []
-    from_clause = select.args.get("from")
+    from_clause = select.args.get("from") or select.args.get("from_")
     if from_clause is not None and isinstance(from_clause.this, exp.Table):
         tables.append(str(from_clause.this.name).lower())
     for join in select.args.get("joins") or []:

@@ -64,7 +64,7 @@ def _strip_self_referencing_union_branches(
         return sql
 
     def _primary_from(select: exp.Select) -> str | None:
-        frm = select.args.get("from")
+        frm = select.args.get("from") or select.args.get("from_")
         if frm is None:
             return None
         table = frm.this
