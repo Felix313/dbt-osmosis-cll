@@ -1003,8 +1003,9 @@ def explore(
     "select",
     multiple=True,
     required=True,
-    help="dbt-style upstream selector: 'model' (model only), '+model' (model and all "
-    "upstream models to sources), 'N+model' (at most N upstream generations). "
+    help="dbt-style graph selector: 'model' (model only), '+model' (model and all "
+    "upstream models to sources), 'N+model' (at most N upstream generations), "
+    "'model+' / 'model+N' (downstream to endpoints), '+model+' (both directions). "
     "Repeatable; a single value may hold several space/comma-separated selectors.",
 )
 @click.option(
@@ -1057,7 +1058,7 @@ def parse_cll(
 
     from dbt_osmosis_cll.cll_generator.api import get_column_lineage
     from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
-    from dbt_osmosis_cll.cll_generator.selector import parse_selectors, resolve_upstream_models
+    from dbt_osmosis_cll.cll_generator.selector import parse_selectors, resolve_selected_models
 
     manifest_path = Path(manifest) if manifest else Path(project_dir) / "target" / "manifest.json"
     if not manifest_path.exists():
@@ -1070,7 +1071,7 @@ def parse_cll(
     try:
         selectors = parse_selectors(list(select))
         manifest_data = json_handler.loads(manifest_path.read_text(encoding="utf-8"))
-        selected_models = resolve_upstream_models(manifest_data, selectors)
+        selected_models = resolve_selected_models(manifest_data, selectors)
     except (ValueError, KeyError) as exc:
         # KeyError wraps its message in quotes — unwrap for clean CLI output.
         logger.error(":x: %s", exc.args[0] if exc.args else exc)

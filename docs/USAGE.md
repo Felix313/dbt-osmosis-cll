@@ -175,11 +175,15 @@ dbt-osmosis-cll parse-cll -s +my_model
 # Depth-limited: my_model plus one generation of direct parents
 dbt-osmosis-cll parse-cll -s 1+my_model
 
+# Downstream: my_model plus everything built on top of it (impact analysis
+# toward endpoints / data products); depth-limited with my_model+N
+dbt-osmosis-cll parse-cll -s my_model+
+
 # Just the model itself; multiple selectors are unioned
-dbt-osmosis-cll parse-cll -s my_model -s "+other_model, 2+third_model"
+dbt-osmosis-cll parse-cll -s my_model -s "+other_model, 2+third_model, +both_ways+"
 ```
 
-Selector syntax is the upstream subset of dbt's graph operators: `model`, `+model`, and `N+model`. Downstream (`model+`) and method selectors (`tag:`, `path:`, `@model`) are rejected with a clear error.
+Selector syntax follows dbt's graph operators on a named model: `model`, `+model` / `N+model` (upstream), `model+` / `model+N` (downstream), and combinations like `+model+`. Method selectors (`tag:`, `path:`, `@model`) are rejected with a clear error.
 
 Results land in `<project-dir>/target/cll-result.json` by default (override with `-o/--output`). The payload contains the resolved selector (`models`) and one row per `(model, column)` pair with the full `ColumnLineageResult` fields (`progenitor_model`, `progenitor_column`, `is_rename`, `is_computed`, `union_branches`, `progenitors`, …). Source tables appear as progenitors inside model rows — CLL rows themselves exist only for models, so `+model` stops naturally at the source layer.
 

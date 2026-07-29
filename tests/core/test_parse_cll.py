@@ -1,9 +1,10 @@
 """Standalone CLL build for a dbt selector: ``dbt-osmosis-cll parse-cll -s +model``.
 
-Covers the upstream selector parsing (``model``, ``+model``, ``N+model``), the
-manifest-graph resolution (models only, sources terminate the walk, depth limits),
-and the CLI end-to-end path writing a dedicated ``target/cll-result.json`` that
-never touches osmosis' ``cll_cache.json``.
+Covers the graph selector parsing (``model``, ``+model``, ``N+model``, ``model+``,
+``model+N``, ``+model+``), the manifest-graph resolution (models only, sources
+terminate the upstream walk, depth limits in both directions), and the CLI
+end-to-end path writing a dedicated ``target/cll-result.json`` that never touches
+osmosis' ``cll_cache.json``.
 """
 
 from __future__ import annotations
@@ -16,10 +17,10 @@ from click.testing import CliRunner
 
 from dbt_osmosis_cll.cli.main import cli
 from dbt_osmosis_cll.cll_generator.selector import (
-    UpstreamSelector,
+    GraphSelector,
     parse_selector,
     parse_selectors,
-    resolve_upstream_models,
+    resolve_selected_models,
 )
 
 # ---------------------------------------------------------------------------
@@ -28,20 +29,30 @@ from dbt_osmosis_cll.cll_generator.selector import (
 
 
 def test_parse_selector_bare_model():
-    assert parse_selector("stg_orders") == UpstreamSelector(model="stg_orders", depth=0)
+    assert parse_selector("stg_orders") == GraphSelector("stg_orders", up_depth=0, down_depth=0)
 
 
 def test_parse_selector_full_upstream():
-    assert parse_selector("+stg_orders") == UpstreamSelector(model="stg_orders", depth=None)
+    assert parse_selector("+stg_orders") == GraphSelector("stg_orders", up_depth=None, down_depth=0)
 
 
-def test_parse_selector_depth_limited():
-    assert parse_selector("2+stg_orders") == UpstreamSelector(model="stg_orders", depth=2)
+def test_parse_selector_depth_limited_upstream():
+    assert parse_selector("2+stg_orders") == GraphSelector("stg_orders", up_depth=2, down_depth=0)
 
 
-def test_parse_selector_rejects_downstream():
-    with pytest.raises(ValueError, match="downstream"):
-        parse_selector("stg_orders+")
+def test_parse_selector_full_downstream():
+    assert parse_selector("stg_orders+") == GraphSelector("stg_orders", up_depth=0, down_depth=None)
+
+
+def test_parse_selector_depth_limited_downstream():
+    assert parse_selector("stg_orders+2") == GraphSelector("stg_orders", up_depth=0, down_depth=2)
+
+
+def test_parse_selector_both_directions():
+    assert parse_selector("+stg_orders+") == GraphSelector(
+        "stg_orders", up_depth=None, down_depth=None
+    )
+    assert parse_selector("1+stg_orders+2") == GraphSelector("stg_orders", up_depth=1, down_depth=2)
 
 
 def test_parse_selector_rejects_method_selectors():
@@ -51,18 +62,18 @@ def test_parse_selector_rejects_method_selectors():
         parse_selector("@stg_orders")
 
 
-def test_parse_selector_rejects_digits_without_plus():
+def test_parse_selector_rejects_bare_operator():
     with pytest.raises(ValueError, match="not valid"):
-        parse_selector("2stg_orders")
+        parse_selector("+")
 
 
 def test_parse_selectors_splits_on_whitespace_and_commas():
-    parsed = parse_selectors(["+mart_a stg_b", "1+int_c,mart_d"])
+    parsed = parse_selectors(["+mart_a stg_b", "1+int_c,mart_d+"])
     assert parsed == [
-        UpstreamSelector(model="mart_a", depth=None),
-        UpstreamSelector(model="stg_b", depth=0),
-        UpstreamSelector(model="int_c", depth=1),
-        UpstreamSelector(model="mart_d", depth=0),
+        GraphSelector("mart_a", up_depth=None, down_depth=0),
+        GraphSelector("stg_b", up_depth=0, down_depth=0),
+        GraphSelector("int_c", up_depth=1, down_depth=0),
+        GraphSelector("mart_d", up_depth=0, down_depth=None),
     ]
 
 
@@ -72,7 +83,7 @@ def test_parse_selectors_rejects_empty():
 
 
 # ---------------------------------------------------------------------------
-# Upstream resolution over the manifest graph
+# Graph resolution over the manifest
 # ---------------------------------------------------------------------------
 
 
@@ -113,27 +124,42 @@ def _graph_manifest() -> dict:
 
 
 def test_resolve_bare_model_selects_only_anchor():
-    models = resolve_upstream_models(_graph_manifest(), [parse_selector("mart_orders")])
+    models = resolve_selected_models(_graph_manifest(), [parse_selector("mart_orders")])
     assert models == ["mart_orders"]
 
 
 def test_resolve_full_upstream_reaches_sources_but_excludes_them():
-    models = resolve_upstream_models(_graph_manifest(), [parse_selector("+mart_orders")])
+    models = resolve_selected_models(_graph_manifest(), [parse_selector("+mart_orders")])
     assert models == ["int_orders", "mart_orders", "stg_orders"]
 
 
-def test_resolve_depth_one_stops_after_direct_parents():
-    models = resolve_upstream_models(_graph_manifest(), [parse_selector("1+mart_orders")])
+def test_resolve_upstream_depth_one_stops_after_direct_parents():
+    models = resolve_selected_models(_graph_manifest(), [parse_selector("1+mart_orders")])
     assert models == ["int_orders", "mart_orders"]
 
 
+def test_resolve_full_downstream_reaches_endpoints():
+    models = resolve_selected_models(_graph_manifest(), [parse_selector("stg_orders+")])
+    assert models == ["int_orders", "mart_orders", "stg_orders"]
+
+
+def test_resolve_downstream_depth_one_stops_after_direct_children():
+    models = resolve_selected_models(_graph_manifest(), [parse_selector("stg_orders+1")])
+    assert models == ["int_orders", "stg_orders"]
+
+
+def test_resolve_both_directions():
+    models = resolve_selected_models(_graph_manifest(), [parse_selector("+int_orders+")])
+    assert models == ["int_orders", "mart_orders", "stg_orders"]
+
+
 def test_resolve_is_case_insensitive():
-    models = resolve_upstream_models(_graph_manifest(), [parse_selector("1+MART_ORDERS")])
+    models = resolve_selected_models(_graph_manifest(), [parse_selector("1+MART_ORDERS")])
     assert models == ["int_orders", "mart_orders"]
 
 
 def test_resolve_union_of_multiple_selectors():
-    models = resolve_upstream_models(
+    models = resolve_selected_models(
         _graph_manifest(),
         parse_selectors(["other_model", "1+mart_orders"]),
     )
@@ -142,7 +168,7 @@ def test_resolve_union_of_multiple_selectors():
 
 def test_resolve_unknown_model_raises():
     with pytest.raises(KeyError, match="nope"):
-        resolve_upstream_models(_graph_manifest(), [parse_selector("+nope")])
+        resolve_selected_models(_graph_manifest(), [parse_selector("+nope")])
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +234,16 @@ def test_parse_cll_depth_limit_restricts_models(tmp_path):
     assert {r["model"] for r in payload["results"]} == {"int_orders", "mart_orders"}
 
 
+def test_parse_cll_downstream_selector(tmp_path):
+    target = _write_project(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["parse-cll", "-s", "stg_orders+", "--project-dir", str(tmp_path)]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads((target / "cll-result.json").read_text(encoding="utf-8"))
+    assert payload["models"] == ["int_orders", "mart_orders", "stg_orders"]
+
+
 def test_parse_cll_custom_output_path(tmp_path):
     _write_project(tmp_path)
     out = tmp_path / "elsewhere" / "my-cll.json"
@@ -228,10 +264,10 @@ def test_parse_cll_unknown_model_exits_one(tmp_path):
     assert result.exit_code == 1
 
 
-def test_parse_cll_downstream_selector_exits_one(tmp_path):
+def test_parse_cll_method_selector_exits_one(tmp_path):
     _write_project(tmp_path)
     result = CliRunner().invoke(
-        cli, ["parse-cll", "-s", "mart_orders+", "--project-dir", str(tmp_path)]
+        cli, ["parse-cll", "-s", "tag:nightly", "--project-dir", str(tmp_path)]
     )
     assert result.exit_code == 1
 
