@@ -70,6 +70,28 @@ LOGGER = get_logger()
 """Default logger for dbt-osmosis"""
 
 
+def _wire_package_loggers(level: int) -> None:
+    """Route the ``dbt_osmosis_cll`` stdlib logger hierarchy to the terminal.
+
+    The CLL modules (``cll_generator``, ``integration``) log via plain
+    ``logging.getLogger(__name__)``, which has no handler in the CLI process —
+    cache warm/cold status, registry parse progress, and per-model parse warnings
+    were invisible during the (potentially long) lineage build. Attach the same
+    handlers as the main osmosis logger. ``propagate`` is False because the dbt
+    runtime installs a root handler — with propagation every line would print
+    twice (Rich + plain root format).
+    """
+    pkg = logging.getLogger("dbt_osmosis_cll")
+    pkg.setLevel(level)
+    pkg.propagate = False
+    for handler in LOGGER.handlers:
+        if handler not in pkg.handlers:
+            pkg.addHandler(handler)
+
+
+_wire_package_loggers(_LOGGING_LEVEL)
+
+
 def set_log_level(level: int | str) -> None:
     """Set the log level for the default logger."""
     global LOGGER
@@ -79,6 +101,7 @@ def set_log_level(level: int | str) -> None:
     for handler in LOGGER.handlers:
         if isinstance(handler, RichHandler):
             handler.setLevel(level)
+    _wire_package_loggers(level)
 
 
 class LogMethod(t.Protocol):

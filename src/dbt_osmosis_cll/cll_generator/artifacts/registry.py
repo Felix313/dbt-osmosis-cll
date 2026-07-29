@@ -1,7 +1,9 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 from dataclasses import dataclass, field
 import logging
 import re
+import threading
+import time
 
 from sqlglot import exp, parse_one
 
@@ -188,6 +190,7 @@ class ModelRegistry:
         use_target_dir_fallback: bool = False,
         stop_at_ephemeral: bool = False,
         placeholder_patterns: Optional[list] = None,
+        lazy_lineage: bool = False,
     ):
         if _catalog_reader_override is not None:
             self._catalog_reader = _catalog_reader_override
@@ -201,6 +204,12 @@ class ModelRegistry:
         self._use_target_dir_fallback: bool = use_target_dir_fallback
         self._stop_at_ephemeral: bool = stop_at_ephemeral
         self._ephemeral_lineage: Dict[str, Dict] = {}
+        # Lazy lineage mode: load() skips the whole-project SQL parse; each model's
+        # compiled SQL is parsed on first access via ensure_lineage()/ensure_all_lineage().
+        # Keeps cold-start cost proportional to the models actually requested.
+        self._lazy_lineage: bool = lazy_lineage
+        self._lineage_done: Set[str] = set()
+        self._parse_lock = threading.RLock()
         # Build combined placeholder regex from caller-supplied patterns.
         # No default — placeholder replacement is repo-specific and opt-in via .osmosis.
         if placeholder_patterns:
@@ -328,73 +337,96 @@ class ModelRegistry:
 
         return exposures
 
-    def _process_lineage(self, models: Dict[str, Model]) -> None:
-        """Process and apply column lineage to models."""
-        logger = logging.getLogger(__name__)
+    def _parse_model_lineage(self, model: Model) -> str:
+        """Parse one model's compiled SQL and apply its column lineage.
 
+        Returns ``"ok"``, ``"failed"``, or ``"skipped"`` (no SQL / not a SQL model).
+        """
         if self._sql_parser is None:
             raise RegistryError("SQL parser not initialized. Call load() first.")
+
+        if model.language != "sql":
+            return "skipped"
+
+        model_name = self._lookup_name(model)
+        sql = self._manifest_reader.get_compiled_sql(model_name, unique_id=model.unique_id)
+        if not sql and self._use_target_dir_fallback:
+            sql = self._manifest_reader.get_compiled_sql_from_disk(
+                model_name, unique_id=model.unique_id
+            )
+        if not sql:
+            return "skipped"
+
+        # For DML statements (MERGE / INSERT INTO), extract just the source
+        # SELECT so the parser never sees {{ this }} as a self-reference target.
+        # Only DML needs this (and it costs a full parse_one), so plain SELECTs —
+        # the vast majority — skip the throwaway parse via a cheap keyword check.
+        if re.search(r"\b(?:MERGE|INSERT)\b", sql, re.IGNORECASE):
+            sql = _extract_source_select(sql, dialect=self._adapter_override)
+
+        # Incremental SCD2 / history models read {{ this }} as a UNION source to
+        # accumulate state. Drop that self-referencing branch so the column resolves to
+        # its real upstream instead of a multi-source UNION with no origin. Cheap gate
+        # (UNION present AND the model's own name appears) avoids the parse for the
+        # vast majority of models.
+        if re.search(r"\bUNION\b", sql, re.IGNORECASE) and model_name.lower() in sql.lower():
+            sql = _strip_self_referencing_union_branches(
+                sql, model_name, dialect=self._adapter_override
+            )
+
+        # Replace unresolved custom-materialization placeholders (e.g.
+        # __PERIOD_FILTER__) with TRUE so the SQL parser sees valid syntax.
+        if self._placeholder_re is not None:
+            sql = self._placeholder_re.sub(_replace_placeholder, sql)
+
+        try:
+            parse_result = self._sql_parser.parse_column_lineage(
+                sql, stop_at_ephemeral=self._stop_at_ephemeral
+            )
+            self._apply_column_lineage(model, parse_result)
+            # Collect ephemeral CTE lineage from this model's parse result
+            for cte_name, cte_cols in parse_result.ephemeral_cte_lineage.items():
+                self._ephemeral_lineage.setdefault(cte_name, {}).update(cte_cols)
+            return "ok"
+        except Exception as e:
+            logger.warning(
+                f"Failed to process lineage for model {model_name}: {type(e).__name__}: {str(e)}"
+            )
+            return "failed"
+
+    def _process_lineage(self, models: Dict[str, Model]) -> None:
+        """Process and apply column lineage to models (eager, whole set)."""
+        if self._sql_parser is None:
+            raise RegistryError("SQL parser not initialized. Call load() first.")
+
+        sql_models = [m for m in models.values() if m.language == "sql"]
+        total = len(sql_models)
+        logger.info(
+            "Parsing compiled SQL of %d models for column lineage — this runs once per "
+            "process (results are cached).",
+            total,
+        )
 
         successful_parses = 0
         failed_parses = 0
         skipped_models = 0
         failed_model_names = []
-        skipped_model_names = []
 
         # First pass: Process explicit column references
-        for model in models.values():
-            if model.language != "sql":
-                continue
-
-            model_name = self._lookup_name(model)
-            sql = self._manifest_reader.get_compiled_sql(model_name, unique_id=model.unique_id)
-            if not sql and self._use_target_dir_fallback:
-                sql = self._manifest_reader.get_compiled_sql_from_disk(
-                    model_name, unique_id=model.unique_id
-                )
-            if not sql:
-                skipped_models += 1
-                skipped_model_names.append(model_name)
-                continue
-
-            # For DML statements (MERGE / INSERT INTO), extract just the source
-            # SELECT so the parser never sees {{ this }} as a self-reference target.
-            # Only DML needs this (and it costs a full parse_one), so plain SELECTs —
-            # the vast majority — skip the throwaway parse via a cheap keyword check.
-            if re.search(r"\b(?:MERGE|INSERT)\b", sql, re.IGNORECASE):
-                sql = _extract_source_select(sql, dialect=self._adapter_override)
-
-            # Incremental SCD2 / history models read {{ this }} as a UNION source to
-            # accumulate state. Drop that self-referencing branch so the column resolves to
-            # its real upstream instead of a multi-source UNION with no origin. Cheap gate
-            # (UNION present AND the model's own name appears) avoids the parse for the
-            # vast majority of models.
-            if re.search(r"\bUNION\b", sql, re.IGNORECASE) and model_name.lower() in sql.lower():
-                sql = _strip_self_referencing_union_branches(
-                    sql, model_name, dialect=self._adapter_override
-                )
-
-            # Replace unresolved custom-materialization placeholders (e.g.
-            # __PERIOD_FILTER__) with TRUE so the SQL parser sees valid syntax.
-            if self._placeholder_re is not None:
-                sql = self._placeholder_re.sub(_replace_placeholder, sql)
-
-            try:
-                parse_result = self._sql_parser.parse_column_lineage(
-                    sql, stop_at_ephemeral=self._stop_at_ephemeral
-                )
-                self._apply_column_lineage(model, parse_result)
-                # Collect ephemeral CTE lineage from this model's parse result
-                for cte_name, cte_cols in parse_result.ephemeral_cte_lineage.items():
-                    self._ephemeral_lineage.setdefault(cte_name, {}).update(cte_cols)
+        last_progress = time.monotonic()
+        for i, model in enumerate(sql_models, 1):
+            status = self._parse_model_lineage(model)
+            if status == "ok":
                 successful_parses += 1
-            except Exception as e:
+            elif status == "failed":
                 failed_parses += 1
-                failed_model_names.append(model_name)
-                logger.warning(
-                    f"Failed to process lineage for model {model_name}: {type(e).__name__}: {str(e)}"
-                )
-                continue
+                failed_model_names.append(self._lookup_name(model))
+            else:
+                skipped_models += 1
+            now = time.monotonic()
+            if now - last_progress >= 2.0:
+                logger.info("Column lineage parse progress: %d/%d models...", i, total)
+                last_progress = now
 
         logger.info(
             f"SQL parsing summary: {successful_parses} successful, "
@@ -435,20 +467,25 @@ class ModelRegistry:
     def _process_star_references(self, models: Dict[str, Model]) -> None:
         """Process star references between models."""
         for model in models.values():
-            if not model.metadata or "star_sources" not in model.metadata:
-                continue
+            self._process_star_references_for(model)
 
-            for source_name in model.metadata["star_sources"]:
-                star_source = self._resolve_model(source_name)
-                if star_source is not None:
-                    self._apply_star_columns(model, source_name, star_source)
-                elif source_name in self._ephemeral_lineage:
-                    # Ephemeral model: source_name is __dbt__cte__<model> — emit
-                    # child.col ← __dbt__cte__<model>.col so the ephemeral remains
-                    # visible as an intermediate node in include_ephemeral=True mode.
-                    self._apply_ephemeral_star_columns(
-                        model, source_name, self._ephemeral_lineage[source_name]
-                    )
+    def _process_star_references_for(self, model: Model) -> None:
+        """Apply *model*'s ``select *`` references (recorded as ``star_sources`` metadata
+        during its SQL parse) as direct column lineage from the referenced relations."""
+        if not model.metadata or "star_sources" not in model.metadata:
+            return
+
+        for source_name in model.metadata["star_sources"]:
+            star_source = self._resolve_model(source_name)
+            if star_source is not None:
+                self._apply_star_columns(model, source_name, star_source)
+            elif source_name in self._ephemeral_lineage:
+                # Ephemeral model: source_name is __dbt__cte__<model> — emit
+                # child.col ← __dbt__cte__<model>.col so the ephemeral remains
+                # visible as an intermediate node in include_ephemeral=True mode.
+                self._apply_ephemeral_star_columns(
+                    model, source_name, self._ephemeral_lineage[source_name]
+                )
 
     def _apply_star_columns(self, target: Model, source_name: str, source: Model) -> None:
         """Apply star columns from source to target model."""
@@ -498,8 +535,88 @@ class ModelRegistry:
             ):
                 target_col.lineage.append(star_lineage)
 
+    def ensure_lineage(self, model: Model) -> None:
+        """Guarantee *model*'s column lineage is parsed (lazy mode only).
+
+        Eager registries parse everything at :meth:`load`, so this is a no-op there.
+        In lazy mode the model's compiled SQL is parsed on first request; ``select *``
+        references recursively pull in the referenced models' parses first, because
+        star-column application needs the source model's parser-discovered stub
+        columns to match eager-mode results. Thread-safe.
+        """
+        if not self._lazy_lineage:
+            return
+        with self._parse_lock:
+            self._ensure_lineage_locked(model, in_progress=set())
+
+    def ensure_all_lineage(self) -> None:
+        """Guarantee every model's column lineage is parsed (lazy mode only).
+
+        Equivalent to the eager whole-project parse; used when a caller genuinely
+        needs project-wide results (no model filter, or ephemeral rows that can
+        surface from any consuming model's SQL).
+        """
+        if not self._lazy_lineage:
+            return
+        with self._parse_lock:
+            pending = [
+                m
+                for m in self._state.models.values()
+                if (m.unique_id or self._lookup_name(m)) not in self._lineage_done
+                and m.language == "sql"
+            ]
+            if not pending:
+                return
+            total = len(pending)
+            logger.info(
+                "Parsing compiled SQL of %d models for column lineage — this runs once per "
+                "process (results are cached).",
+                total,
+            )
+            last_progress = time.monotonic()
+            for i, model in enumerate(pending, 1):
+                self._ensure_lineage_locked(model, in_progress=set())
+                now = time.monotonic()
+                if now - last_progress >= 2.0:
+                    logger.info("Column lineage parse progress: %d/%d models...", i, total)
+                    last_progress = now
+
+    def _ensure_lineage_locked(self, model: Model, in_progress: Set[str]) -> None:
+        """Parse *model* and apply its star references, recursing into star sources.
+
+        ``in_progress`` guards against star-reference cycles (e.g. mutually
+        star-selecting models): a model already on the stack has necessarily been
+        parsed, which is all a dependent star application needs.
+        """
+        uid = model.unique_id or self._lookup_name(model)
+        if uid in self._lineage_done or uid in in_progress:
+            return
+        in_progress.add(uid)
+
+        self._parse_model_lineage(model)
+
+        # Star references need the source models' parser-discovered stub columns
+        # (undocumented models have no YAML columns), so parse those first —
+        # mirroring the eager flow where ALL parses precede the star pass.
+        if model.metadata and "star_sources" in model.metadata:
+            for source_name in model.metadata["star_sources"]:
+                star_source = self._resolve_model(source_name)
+                if star_source is not None:
+                    self._ensure_lineage_locked(star_source, in_progress)
+            try:
+                self._process_star_references_for(model)
+            except Exception as e:
+                logger.error(f"Failed to process star references: {e}", exc_info=True)
+
+        self._lineage_done.add(uid)
+
     def load(self) -> None:
-        """Load and initialize the registry."""
+        """Load and initialize the registry.
+
+        With ``lazy_lineage=True`` the (potentially expensive) whole-project SQL parse
+        is deferred: models, dependencies, and exposures load as usual, and each
+        model's lineage is parsed on first access via :meth:`ensure_lineage`.
+        """
         if self.is_loaded:
             raise RegistryError("Registry has already been loaded")
 
@@ -536,7 +653,8 @@ class ModelRegistry:
                 dialect=self._dialect, table_columns=table_columns or None
             )
             self._apply_dependencies(models)
-            self._process_lineage(models)
+            if not self._lazy_lineage:
+                self._process_lineage(models)
             exposures = self._load_exposures()
             self._state = RegistryState(
                 models=models, exposures=exposures, is_loaded=True, name_alias=name_alias

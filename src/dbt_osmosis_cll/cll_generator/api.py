@@ -32,12 +32,12 @@ _JINJA_RESERVED: frozenset[str] = frozenset({
     "flags",
 })
 
-# Process-level cache of fully-loaded registries.  Building a registry parses the
-# compiled SQL of EVERY model in the project, so without this cache a per-model
-# caller (e.g. dbt-osmosis resolving lineage one node at a time) re-parses the
-# whole project on every call — O(N^2) over the model count.  Safe to cache for
-# the lifetime of the process because the manifest and compiled SQL are immutable
-# during a run.  Each entry is (registry, terminal_node_names).
+# Process-level cache of loaded registries.  Registries are lazy: SQL is parsed
+# per model on first request (ensure_lineage), and the parsed state accumulates
+# on the cached instance — so a per-model caller (e.g. dbt-osmosis resolving
+# lineage one node at a time) parses each model exactly once per process.  Safe
+# to cache for the lifetime of the process because the manifest and compiled SQL
+# are immutable during a run.  Each entry is (registry, terminal_node_names).
 _REGISTRY_CACHE: dict = {}
 
 
@@ -259,9 +259,16 @@ def get_column_lineage(
         key=lambda kv: (kv[0], kv[1].unique_id or ""),
     )
 
+    # Lazy registry: parse only what this call needs. Without a model filter every
+    # model is iterated anyway; with include_ephemeral the ephemeral rows can surface
+    # from ANY consuming model's SQL, so both cases need the full parse.
+    if model_filter is None or include_ephemeral:
+        registry.ensure_all_lineage()
+
     for model_name, model_obj in iter_items:
         if model_obj.resource_type not in ("model",):
             continue
+        registry.ensure_lineage(model_obj)
 
         for col_name, col_obj in sorted(model_obj.columns.items()):
             if not col_obj.lineage:
@@ -403,10 +410,11 @@ def _load_registry_cached(
     placeholder_patterns: Optional[List[str]],
     catalog_reader_override: Optional[object],
 ):
-    """Return a fully-loaded (registry, terminal_node_names), using the process cache.
+    """Return a loaded (registry, terminal_node_names), using the process cache.
 
-    Loading parses every model's compiled SQL, so the result is cached and reused
-    across calls for the same project/parameters within a process.
+    The registry is lazy — compiled SQL is parsed per model on first request —
+    and cached so the accumulated parse state is reused across calls for the
+    same project/parameters within a process.
     """
     # Discriminate the catalog source so different inputs never share a registry.
     if catalog_reader_override is not None:
@@ -447,6 +455,10 @@ def _load_registry_cached(
         use_target_dir_fallback=use_target_dir,
         stop_at_ephemeral=stop_at_ephemeral,
         placeholder_patterns=placeholder_patterns,
+        # Lazy: load() skips the whole-project SQL parse; get_column_lineage ensures
+        # lineage per requested model, so cold-start cost tracks the request size
+        # (per-node osmosis calls, selector-scoped parse-cll) instead of repo size.
+        lazy_lineage=True,
     )
     registry.load()
 

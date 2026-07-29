@@ -189,6 +189,8 @@ Results land in `<project-dir>/target/cll-result.json` by default (override with
 
 Like `lineage explore`, the command is manifest-only: column lists come from the manifest, compiled SQL from inline `compiled_code` or `target/compiled/`. Run `dbt compile` first so lineage has SQL to trace.
 
+**Cold-start cost tracks the selector, not the repo.** Lineage parsing is lazy: only the models the selector resolves to are SQL-parsed (`yaml refactor`/`document` likewise parse only the models a run actually touches, plus their upstream walks). A first `parse-cll -s +one_model` on a large repo therefore takes seconds, not minutes. Whole-project consumers (`lineage explore`, unfiltered calls) still parse everything and log progress while doing so.
+
 ### `.osmosis` — project config file
 
 Place a `.osmosis` file in your dbt project root (next to `dbt_project.yml`). **All settings are optional** — every key defaults to the value shown below, so you only need to list the ones you want to override.
