@@ -87,6 +87,8 @@ Top-level commands currently exposed by `dbt-osmosis --help`:
 - `test` — suggest dbt tests
 - `diff` — report schema drift between YAML and the database
 - `lint` — lint SQL strings, models, or a whole project
+- `lineage` — serve the read-only interactive lineage explorer (`lineage explore`)
+- `parse-cll` — build column-level lineage for a dbt selector and write it to a standalone JSON file
 
 For command-by-command flags and examples, use the docs-site CLI reference rather than relying on this landing page.
 
@@ -161,6 +163,27 @@ That hook keeps schema YAML changes visible in the commit that introduced them.
 ## Column-level lineage (CLL) configuration
 
 This fork extends dbt-osmosis with column-level lineage tracing and a project-level `.osmosis` configuration file.
+
+### Standalone CLL build (`parse-cll`)
+
+`parse-cll` computes column-level lineage for a dbt selector and writes it to a dedicated JSON file — no YAML is touched, no warehouse connection is needed, and osmosis' own `target/cll_cache.json` is never read or written.
+
+```bash
+# Model plus ALL upstream models, up to (but not including) sources
+dbt-osmosis-cll parse-cll -s +my_model
+
+# Depth-limited: my_model plus one generation of direct parents
+dbt-osmosis-cll parse-cll -s 1+my_model
+
+# Just the model itself; multiple selectors are unioned
+dbt-osmosis-cll parse-cll -s my_model -s "+other_model, 2+third_model"
+```
+
+Selector syntax is the upstream subset of dbt's graph operators: `model`, `+model`, and `N+model`. Downstream (`model+`) and method selectors (`tag:`, `path:`, `@model`) are rejected with a clear error.
+
+Results land in `<project-dir>/target/cll-result.json` by default (override with `-o/--output`). The payload contains the resolved selector (`models`) and one row per `(model, column)` pair with the full `ColumnLineageResult` fields (`progenitor_model`, `progenitor_column`, `is_rename`, `is_computed`, `union_branches`, `progenitors`, …). Source tables appear as progenitors inside model rows — CLL rows themselves exist only for models, so `+model` stops naturally at the source layer.
+
+Like `lineage explore`, the command is manifest-only: column lists come from the manifest, compiled SQL from inline `compiled_code` or `target/compiled/`. Run `dbt compile` first so lineage has SQL to trace.
 
 ### `.osmosis` — project config file
 

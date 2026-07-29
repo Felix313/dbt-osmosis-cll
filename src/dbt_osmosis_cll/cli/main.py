@@ -995,6 +995,130 @@ def explore(
     explorer.start()
 
 
+@cli.command("parse-cll", context_settings=_CONTEXT)
+@logging_opts
+@click.option(
+    "-s",
+    "--select",
+    "select",
+    multiple=True,
+    required=True,
+    help="dbt-style upstream selector: 'model' (model only), '+model' (model and all "
+    "upstream models to sources), 'N+model' (at most N upstream generations). "
+    "Repeatable; a single value may hold several space/comma-separated selectors.",
+)
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, dir_okay=True, file_okay=False),
+    default=discover_project_dir,
+    help="dbt project root. Default is the current working directory and its parents.",
+)
+@click.option(
+    "--manifest",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to manifest.json. Defaults to <project-dir>/target/manifest.json.",
+)
+@click.option(
+    "--dialect",
+    default=None,
+    help="Override the sqlglot dialect (e.g. snowflake). Defaults to the manifest adapter type.",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Output JSON file. Defaults to cll-result.json next to the manifest "
+    "(i.e. <project-dir>/target/cll-result.json). Deliberately separate from "
+    "osmosis' cll_cache.json, which is never touched.",
+)
+def parse_cll(
+    select: tuple[str, ...],
+    project_dir: str,
+    manifest: str | None = None,
+    dialect: str | None = None,
+    output: str | None = None,
+) -> None:
+    """Build column-level lineage for a dbt selector and write it to a JSON file.
+
+    Standalone CLL: resolves the selector over the manifest graph, computes lineage
+    only for the selected models, and writes the results to a dedicated
+    ``cll-result.json`` in the target folder.
+
+    \f
+    Manifest-only like ``lineage explore``: column lists come from the manifest
+    (``ManifestCatalogReader``), compiled SQL from inline ``compiled_code`` or
+    ``target/compiled/`` — no ``catalog.json`` and no warehouse connection.
+    Run ``dbt compile`` first so lineage has SQL to trace.
+    """
+    import dataclasses
+    import json as json_handler
+
+    from dbt_osmosis_cll.cll_generator.api import get_column_lineage
+    from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
+    from dbt_osmosis_cll.cll_generator.selector import parse_selectors, resolve_upstream_models
+
+    manifest_path = Path(manifest) if manifest else Path(project_dir) / "target" / "manifest.json"
+    if not manifest_path.exists():
+        logger.error(
+            ":x: No manifest found at %s — run 'dbt compile' (preferred) or 'dbt parse' first.",
+            manifest_path,
+        )
+        sys.exit(1)
+
+    try:
+        selectors = parse_selectors(list(select))
+        manifest_data = json_handler.loads(manifest_path.read_text(encoding="utf-8"))
+        selected_models = resolve_upstream_models(manifest_data, selectors)
+    except (ValueError, KeyError) as exc:
+        # KeyError wraps its message in quotes — unwrap for clean CLI output.
+        logger.error(":x: %s", exc.args[0] if exc.args else exc)
+        sys.exit(1)
+
+    logger.info(
+        "Selector resolved to %d model(s): %s", len(selected_models), ", ".join(selected_models)
+    )
+
+    reader = ManifestCatalogReader(manifest_path=str(manifest_path))
+    reader.load()
+    results = get_column_lineage(
+        manifest_path=str(manifest_path),
+        models=selected_models,
+        compiled_sql_source="target_dir",
+        dialect=dialect,
+        _catalog_reader_override=reader,
+    )
+
+    models_with_rows = {r.model.lower() for r in results}
+    missing = [m for m in selected_models if m.lower() not in models_with_rows]
+    if missing:
+        logger.warning(
+            ":warning: No lineage rows for %d selected model(s): %s — is the compiled "
+            "SQL up to date? Run 'dbt compile' and retry.",
+            len(missing),
+            ", ".join(missing),
+        )
+
+    output_path = Path(output) if output else manifest_path.parent / "cll-result.json"
+    payload = {
+        "schema_version": 1,
+        "selectors": list(select),
+        "models": selected_models,
+        "results": [dataclasses.asdict(r) for r in results],
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json_handler.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    logger.info(
+        ":white_check_mark: Wrote %d lineage row(s) for %d model(s) to %s",
+        len(results),
+        len(models_with_rows),
+        output_path,
+    )
+
+
 @diff.command(context_settings=_CONTEXT)
 @dbt_opts
 @yaml_opts
