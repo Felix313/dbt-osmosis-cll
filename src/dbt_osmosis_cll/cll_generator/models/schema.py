@@ -79,6 +79,10 @@ class Model(BaseModel):
     language: Optional[str] = None
     resource_type: Literal["model", "source", "seed", "test", "exposure", "snapshot"]
     resource_path: Optional[str] = None
+    alias: Optional[str] = None
+    """dbt ``alias`` — the relation name compiled SQL actually references, when it
+    differs from ``name``. Set for models with a custom alias and for versioned
+    models (``stg_customers`` vs ``stg_customers_v2``), which all share one ``name``."""
     source_identifier: Optional[str] = None
     source_name: Optional[str] = None
     description: Optional[str] = None

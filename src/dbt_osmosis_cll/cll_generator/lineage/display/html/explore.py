@@ -219,6 +219,7 @@ class LineageExplorer:
                 self._set_column_info(column_obj)
                 self.data.main_node = f"col_{model}_{column}"
                 self._process_lineage_tree(model, column)
+                self._drop_dangling_edges()
                 # Store starting model/column for exposure edge creation
                 self._start_model = model
                 self._start_column = column
@@ -431,7 +432,9 @@ class LineageExplorer:
                                 split_result = self._split_qualified_name(source)
                                 if split_result:
                                     src_model, src_col = split_result
-                                    src_node_id = f"col_{src_model}_{src_col}"
+                                    src_node_id = self._ensure_column_node(
+                                        src_model, src_col, "upstream"
+                                    )
                                     edge = GraphEdge(
                                         source=src_node_id, target=main_node_id
                                     ).model_dump()
@@ -599,6 +602,68 @@ class LineageExplorer:
         self.data.edges.append(edge)
         return edge
 
+    def _ensure_column_node(self, model_name: str, col_name: str, direction: str) -> str:
+        """Add the node for ``model_name.col_name`` if the graph does not have it yet.
+
+        Edges are emitted from three places, and only the upstream-refs path used to
+        create the node it points at. The others produced edges into nothing: a
+        column's sibling contributors (``bank_transfer_amount`` draws on both
+        ``payment_method`` and ``amount``, but only the queried one got a node) and
+        the starting column's own upstream. Those columns really do feed the target,
+        so the honest repair is to show them rather than to drop the edge.
+
+        Returns the node id.
+        """
+        node_id = f"col_{model_name}_{col_name}"
+        if any(n["id"] == node_id for n in self.data.nodes):
+            return node_id
+
+        data_type = None
+        resource_type = None
+        if self.lineage_service:
+            try:
+                model_obj = self.lineage_service.get_model(model_name)
+                resource_type = getattr(model_obj, "resource_type", None)
+                col_obj = model_obj.columns.get(col_name)
+                data_type = col_obj.data_type if col_obj else None
+            except Exception:  # noqa: BLE001 — unknown relations still get a bare node
+                pass
+
+        node = GraphNode(
+            id=node_id,
+            label=col_name,
+            type="column",
+            model=model_name,
+            data_type=data_type,
+            resource_type=resource_type,
+        ).model_dump()
+        node["direction"] = direction
+        self.data.nodes.append(node)
+        return node_id
+
+    def _drop_dangling_edges(self) -> None:
+        """Enforce the graph contract: every edge connects nodes that exist.
+
+        A renderer given an edge into a missing node either crashes or silently omits
+        it, so a leak here shows up as an unexplained gap in the UI. The callers above
+        create what they reference; this is the backstop that keeps a future one from
+        reintroducing the problem quietly.
+        """
+        node_ids = {n["id"] for n in self.data.nodes}
+        kept = [e for e in self.data.edges if e["source"] in node_ids and e["target"] in node_ids]
+        dropped = len(self.data.edges) - len(kept)
+        if dropped:
+            logger.warning(
+                "Dropped %d lineage edge(s) referencing nodes that were never created: %s",
+                dropped,
+                ", ".join(
+                    f"{e['source']}->{e['target']}"
+                    for e in self.data.edges
+                    if e["source"] not in node_ids or e["target"] not in node_ids
+                ),
+            )
+            self.data.edges = kept
+
     def _process_refs(
         self,
         refs: Mapping[str, Union[Dict[str, ColumnLineage], Set[str]]],
@@ -670,7 +735,9 @@ class LineageExplorer:
                             filtered_sources, col_node_id, refs, nodes, edges, node_ids
                         )
                 elif direction == "downstream" and hasattr(lineage, "source_columns"):
-                    self._add_downstream_edges(lineage.source_columns, col_node_id, edges)
+                    self._add_downstream_edges(
+                        lineage.source_columns, col_node_id, edges, refs, nodes, node_ids
+                    )
 
                     if "exposures" in refs and isinstance(refs["exposures"], set):
                         for exposure_name in sorted(refs["exposures"]):
@@ -713,14 +780,30 @@ class LineageExplorer:
         source_columns: Union[List[str], Set[str]],
         target_node_id: str,
         edges: List[Dict[str, Any]],
+        refs: Mapping[str, Union[Dict[str, ColumnLineage], Set[str]]],
+        nodes: List[Dict[str, Any]],
+        node_ids: Set[str],
     ) -> None:
-        """Add edges for downstream lineage."""
+        """Add edges for downstream lineage, creating any contributor node still missing.
+
+        A downstream column is usually fed by more than the column being explored —
+        ``orders.bank_transfer_amount`` sums ``stg_payments.amount`` filtered by
+        ``stg_payments.payment_method``. Only the explored column had a node, so the
+        siblings' edges pointed at nothing. They are genuine inputs, so they get a
+        node, mirroring what the upstream path already does.
+        """
         for source in source_columns:
             split_result = self._split_qualified_name(source)
             if split_result is None:
                 continue
             src_model, src_col = split_result
             src_node_id = f"col_{src_model}_{src_col}"
+
+            if src_node_id not in node_ids and not any(
+                n["id"] == src_node_id for n in self.data.nodes
+            ):
+                self._add_source_node(src_model, src_col, refs, nodes, node_ids, "downstream")
+
             edge = GraphEdge(source=src_node_id, target=target_node_id).model_dump()
             edges.append(edge)
 
@@ -754,6 +837,7 @@ class LineageExplorer:
         refs: Mapping[str, Union[Dict[str, ColumnLineage], Set[str]]],
         nodes: List[Dict[str, Any]],
         node_ids: Set[str],
+        direction: str = "upstream",
     ) -> None:
         """Add a source node to the graph."""
         src_node_id = f"col_{src_model}_{src_col}"
@@ -774,7 +858,7 @@ class LineageExplorer:
             data_type=src_data_type,
             resource_type=model_resource_type,
         ).model_dump()
-        src_node["direction"] = "upstream"
+        src_node["direction"] = direction
 
         nodes.append(src_node)
         node_ids.add(src_node_id)

@@ -59,42 +59,61 @@ class ManifestReader:
             dependencies[model_id] = depends_on
         return dependencies
 
+    # Node kinds that become graph edges — those that can carry column lineage.
+    # Seeds are terminal origins exactly like sources: a model selecting from one
+    # has real column lineage into it, and the catalog reader registers seeds as
+    # models. Tests and operations never appear in a SELECT and are excluded.
+    _EDGE_NODE_KINDS = ("model", "snapshot", "seed")
+
+    def relation_name(self, node_id: str) -> Optional[str]:
+        """Return the SQL relation name *node_id* resolves to, or None if it is not
+        a node kind that can appear in a SELECT.
+
+        Compiled SQL references relations, not dbt node names, and the two diverge in
+        two common cases: a model with a custom ``alias``, and versioned models, whose
+        unique_id ends in the version (``model.pkg.stg_customers.v1``) while their
+        relation is the alias (``stg_customers`` for the latest version,
+        ``stg_customers_v2`` for the others). Deriving the name from the last dotted
+        segment of the unique_id yields ``v1`` for the former and silently breaks the
+        edge; every dependency name therefore comes from the node itself.
+        """
+        parts = node_id.split(".")
+        kind = parts[0]
+        if kind == "source":
+            node = self.manifest.get("sources", {}).get(node_id, {})
+            return (node.get("identifier") or node.get("name") or parts[-1]).lower()
+        if kind in self._EDGE_NODE_KINDS:
+            node = self.manifest.get("nodes", {}).get(node_id, {})
+            return (node.get("alias") or node.get("name") or parts[-1]).lower()
+        return None
+
+    @staticmethod
+    def _node_relation_name(node: Dict[str, Any]) -> str:
+        """Relation name of an already-resolved node (``alias`` falling back to name)."""
+        return (node.get("alias") or node.get("name") or "").lower()
+
     def get_model_upstream(self) -> Dict[str, Set[str]]:
-        """Get upstream dependencies for each model."""
+        """Get upstream dependencies for each model, keyed by SQL relation name.
+
+        Both keys and values are relation names so the graph is self-consistent and
+        matches ``ModelRegistry._lookup_name``, which is how a name parsed out of
+        compiled SQL finds its node.
+        """
         upstream: Dict[str, Set[str]] = {}
 
         for _, node in self.manifest.get("nodes", {}).items():
             resource_type = node.get("resource_type")
             if resource_type in ("model", "snapshot"):
-                model_name = node.get("name")
+                model_name = self._node_relation_name(node)
                 if not model_name:
                     continue
 
-                model_name = model_name.lower()
                 upstream[model_name] = set()
 
                 depends_on = node.get("depends_on", {})
                 for dep_id in depends_on.get("nodes", []):
-                    parts = dep_id.split(".")
-                    if parts[0] == "model":
-                        dep_name = parts[-1].lower()
-                        upstream[model_name].add(dep_name)
-                    elif parts[0] == "source":
-                        source_node = self.manifest.get("sources", {}).get(dep_id, {})
-                        source_identifier = source_node.get("identifier")
-                        if source_identifier:
-                            upstream[model_name].add(source_identifier.lower())
-                        else:
-                            # Fallback to source name if identifier not found
-                            source_name = parts[-1].lower()
-                            upstream[model_name].add(source_name)
-                    elif parts[0] in ("snapshot", "seed"):
-                        # Seeds are terminal origins exactly like sources: a model
-                        # selecting from one has real column lineage into it, and the
-                        # catalog reader already registers seeds as models. Without
-                        # this edge the chain stops one hop short of where the data
-                        # actually comes from.
-                        dep_name = parts[-1].lower()
+                    dep_name = self.relation_name(dep_id)
+                    if dep_name:
                         upstream[model_name].add(dep_name)
 
         return upstream
@@ -224,7 +243,8 @@ class ManifestReader:
         """Get model dependencies for each exposure.
 
         Returns:
-            Dict[str, Set[str]]: Key is exposure name, value is set of model names it depends on
+            Dict[str, Set[str]]: Key is exposure name, value is set of SQL relation
+            names it depends on (see :meth:`relation_name`).
         """
         exposure_deps: Dict[str, Set[str]] = {}
 
@@ -237,20 +257,8 @@ class ManifestReader:
 
             depends_on = exposure_data.get("depends_on", {})
             for dep_id in depends_on.get("nodes", []):
-                parts = dep_id.split(".")
-                if parts[0] == "model":
-                    dep_name = parts[-1].lower()
-                    exposure_deps[exposure_name].add(dep_name)
-                elif parts[0] == "source":
-                    source_node = self.manifest.get("sources", {}).get(dep_id, {})
-                    source_identifier = source_node.get("identifier")
-                    if source_identifier:
-                        exposure_deps[exposure_name].add(source_identifier.lower())
-                    else:
-                        source_name = parts[-1].lower()
-                        exposure_deps[exposure_name].add(source_name)
-                elif parts[0] == "snapshot":
-                    dep_name = parts[-1].lower()
+                dep_name = self.relation_name(dep_id)
+                if dep_name:
                     exposure_deps[exposure_name].add(dep_name)
 
         return exposure_deps

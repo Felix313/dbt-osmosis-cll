@@ -52,12 +52,19 @@ class ManifestCatalogReader:
             if resource_type not in ("model", "seed"):
                 continue
             model_name = (node_data.get("name") or node_id.split(".")[-1]).lower()
+            alias = (node_data.get("alias") or "").lower()
+            # Columns carry the SQL relation name, not the dbt model name — their
+            # ``full_name`` is the qualified ``relation.column`` that lineage source
+            # columns are matched against. Sources do the same with their identifier
+            # below; versioned models make the difference visible, since every
+            # version shares one name but writes to its own relation.
+            column_model_name = alias or model_name
             columns: Dict[str, Any] = {}
             for col_name, col_data in node_data.get("columns", {}).items():
                 ncol = col_name.lower()
                 columns[ncol] = {
                     "name": ncol,
-                    "model_name": model_name,
+                    "model_name": column_model_name,
                     "description": col_data.get("description"),
                     "data_type": col_data.get("data_type") or col_data.get("type"),
                     "lineage": [],
@@ -69,6 +76,9 @@ class ManifestCatalogReader:
                 "columns": columns,
                 "resource_type": resource_type,
                 "unique_id": node_id,
+                # Versioned models all share one name; only the alias distinguishes
+                # the relation each version actually writes to.
+                "alias": alias or None,
             })
 
         for source_id, source_data in self.manifest.get("sources", {}).items():

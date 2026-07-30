@@ -142,3 +142,124 @@ def test_model_vs_source_identifier_collision_resolves_like_before(tmp_path):
     compat = registry.get_models()
     assert compat["customers"].resource_type == "source"
     assert compat["orders"].resource_type == "model"
+
+
+# ---------------------------------------------------------------------------
+# Versioned models and custom aliases: the relation is the alias, not the name
+# ---------------------------------------------------------------------------
+
+
+def _versioned_manifest(tmp_path) -> str:
+    """Two versions of one model plus a consumer of v1 — the shape dbt emits.
+
+    Both versions carry name ``stg_customers``; only the alias distinguishes the
+    relation each writes to, and only v1's relation is the bare name.
+    """
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {
+            "model.pkg.stg_customers.v1": {
+                "name": "stg_customers",
+                "alias": "stg_customers",
+                "version": 1,
+                "latest_version": 1,
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {"customer_id": {"data_type": "INTEGER"}},
+                "compiled_code": "select id as customer_id from raw_customers",
+                "depends_on": {"nodes": ["seed.pkg.raw_customers"]},
+            },
+            "model.pkg.stg_customers.v2": {
+                "name": "stg_customers",
+                "alias": "stg_customers_v2",
+                "version": 2,
+                "latest_version": 1,
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {"id": {"data_type": "INTEGER"}},
+                "compiled_code": "select id from raw_customers",
+                "depends_on": {"nodes": ["seed.pkg.raw_customers"]},
+            },
+            "model.pkg.customers": {
+                "name": "customers",
+                "alias": "customers",
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {},
+                "compiled_code": "select customer_id from stg_customers",
+                "depends_on": {"nodes": ["model.pkg.stg_customers.v1"]},
+            },
+            "seed.pkg.raw_customers": {
+                "name": "raw_customers",
+                "resource_type": "seed",
+                "schema": "main",
+                "database": "db",
+                "columns": {"id": {}},
+                "depends_on": {"nodes": []},
+            },
+        },
+        "sources": {},
+        "exposures": {},
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return str(path)
+
+
+def _registry(manifest_path: str):
+    from dbt_osmosis_cll.cll_generator.artifacts.registry import ModelRegistry
+
+    reader = ManifestCatalogReader(manifest_path=manifest_path)
+    reader.load()
+    registry = ModelRegistry(
+        None, manifest_path, _catalog_reader_override=reader, use_target_dir_fallback=False
+    )
+    registry.load()
+    return registry
+
+
+def test_model_versions_resolve_to_their_own_relation(tmp_path):
+    """Keying by name would collapse both versions onto one arbitrary winner."""
+    registry = _registry(_versioned_manifest(tmp_path))
+
+    assert registry.get_model("stg_customers").unique_id == "model.pkg.stg_customers.v1"
+    assert registry.get_model("stg_customers_v2").unique_id == "model.pkg.stg_customers.v2"
+
+
+def test_sql_referencing_a_version_gets_that_version_columns(tmp_path):
+    """`from stg_customers` means v1's relation, so v1's columns must answer."""
+    registry = _registry(_versioned_manifest(tmp_path))
+
+    assert "customer_id" in registry.get_model("stg_customers").columns
+    assert "customer_id" not in registry.get_model("stg_customers_v2").columns
+    assert "id" in registry.get_model("stg_customers_v2").columns
+
+
+def test_dependency_on_a_versioned_model_wires_the_relation_not_the_version(tmp_path):
+    """The unique_id ends in ``v1``; taking its last segment broke the edge."""
+    registry = _registry(_versioned_manifest(tmp_path))
+
+    upstream = registry.get_model("customers").upstream
+    assert "stg_customers" in upstream
+    assert "v1" not in upstream
+
+
+def test_lineage_crosses_into_the_referenced_version(tmp_path):
+    registry = _registry(_versioned_manifest(tmp_path))
+
+    lineage = registry.get_model("customers").columns["customer_id"].lineage
+    assert lineage and lineage[0].source_columns == {"stg_customers.customer_id"}
+
+
+def test_columns_carry_the_relation_name_not_the_model_name(tmp_path):
+    """Column.full_name is the qualified name lineage is matched against."""
+    registry = _registry(_versioned_manifest(tmp_path))
+
+    v2 = registry.get_model("stg_customers_v2")
+    assert v2.columns["id"].full_name == "stg_customers_v2.id"

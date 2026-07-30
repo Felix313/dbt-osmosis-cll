@@ -56,8 +56,9 @@ def _strip_self_referencing_union_branches(
     are removed only when at least one non-self branch remains. Any parse/transform failure
     returns the SQL unchanged (best-effort preprocessing).
 
-    Relation matching is by name, consistent with the rest of the resolver (which keys
-    models by name, not by a custom dbt ``alias``).
+    Relation matching is by the caller-supplied relation name, consistent with the rest
+    of the resolver: callers pass :meth:`ModelRegistry._lookup_name`, which is the dbt
+    ``alias`` when one is set — and the alias is exactly what ``{{ this }}`` compiles to.
     """
     self_name = model_name.lower()
     try:
@@ -225,8 +226,17 @@ class ModelRegistry:
 
     @staticmethod
     def _lookup_name(model: Model) -> str:
-        """SQL relation lookup name: source identifier for sources, else model name."""
-        return ((model.source_identifier or model.name) or "").lower()
+        """SQL relation lookup name — how a name parsed out of compiled SQL finds its node.
+
+        Sources use their identifier, everything else its dbt ``alias`` when set. The
+        alias matters whenever it diverges from the model name: a custom
+        ``alias: my_table``, and versioned models, where every version carries the same
+        ``name`` but writes to a distinct relation (``stg_customers`` vs
+        ``stg_customers_v2``). Keying those by name would collide them into one
+        arbitrary winner, so SQL referencing one version would resolve to another's
+        columns.
+        """
+        return ((model.source_identifier or model.alias or model.name) or "").lower()
 
     @staticmethod
     def _normalize_models(raw: Dict[str, Model]) -> tuple[Dict[str, Model], Dict[str, str]]:
@@ -456,7 +466,9 @@ class ModelRegistry:
         """
         for col_name, lineage in parse_result.column_lineage.items():
             if col_name not in model.columns:
-                model.columns[col_name] = Column(name=col_name, model_name=model.name)
+                # Stub columns carry the relation name, matching the catalog reader —
+                # ``Column.full_name`` is the qualified name lineage is matched against.
+                model.columns[col_name] = Column(name=col_name, model_name=self._lookup_name(model))
             model.columns[col_name].lineage = lineage
 
         if parse_result.star_sources:
@@ -696,9 +708,10 @@ class ModelRegistry:
                 if model is None:
                     unknown.append(key)
                     continue
+                lookup_name = self._lookup_name(model)
                 for col_name, lineage in columns.items():
                     if col_name not in model.columns:
-                        model.columns[col_name] = Column(name=col_name, model_name=model.name)
+                        model.columns[col_name] = Column(name=col_name, model_name=lookup_name)
                     model.columns[col_name].lineage = list(lineage)
                 self._lineage_done.add(model.unique_id or self._lookup_name(model))
                 applied.append(key)

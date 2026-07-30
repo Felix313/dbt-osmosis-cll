@@ -147,3 +147,71 @@ def test_test_and_operation_dependencies_are_not_wired(tmp_path):
     """Only node types that can carry column lineage become edges."""
     r = _dag_reader(tmp_path, ["test.pkg.not_null_x", "operation.pkg.hook"])
     assert r.get_model_upstream()["stg_customers"] == set()
+
+
+def test_relation_name_uses_alias_for_versioned_models(tmp_path):
+    """A versioned model's unique_id ends in the version, its relation is the alias."""
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {
+            "model.pkg.stg_customers.v1": {
+                "name": "stg_customers",
+                "alias": "stg_customers",
+                "resource_type": "model",
+            },
+            "model.pkg.stg_customers.v2": {
+                "name": "stg_customers",
+                "alias": "stg_customers_v2",
+                "resource_type": "model",
+            },
+            "model.pkg.aliased": {
+                "name": "aliased",
+                "alias": "physical_table",
+                "resource_type": "model",
+            },
+        },
+        "sources": {"source.pkg.raw.orders": {"name": "orders", "identifier": "raw_orders"}},
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    r = ManifestReader(str(path))
+    r.load()
+
+    assert r.relation_name("model.pkg.stg_customers.v1") == "stg_customers"
+    assert r.relation_name("model.pkg.stg_customers.v2") == "stg_customers_v2"
+    # A custom alias diverges from the model name for the same reason.
+    assert r.relation_name("model.pkg.aliased") == "physical_table"
+    assert r.relation_name("source.pkg.raw.orders") == "raw_orders"
+    # Node kinds that never appear in a SELECT produce no edge.
+    assert r.relation_name("test.pkg.not_null_x") is None
+
+
+def test_upstream_is_keyed_and_valued_by_relation_name(tmp_path):
+    """Keys and values must use the same namespace, or edges never resolve."""
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {
+            "model.pkg.consumer": {
+                "name": "consumer",
+                "alias": "consumer_table",
+                "resource_type": "model",
+                "depends_on": {"nodes": ["model.pkg.stg_customers.v1"]},
+            },
+            "model.pkg.stg_customers.v1": {
+                "name": "stg_customers",
+                "alias": "stg_customers",
+                "resource_type": "model",
+                "depends_on": {"nodes": []},
+            },
+        },
+        "sources": {},
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    r = ManifestReader(str(path))
+    r.load()
+
+    upstream = r.get_model_upstream()
+    assert upstream["consumer_table"] == {"stg_customers"}
+    assert "consumer" not in upstream
+    assert r.get_model_downstream()["stg_customers"] == {"consumer_table"}

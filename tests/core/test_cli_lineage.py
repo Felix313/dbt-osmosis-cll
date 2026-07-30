@@ -241,3 +241,113 @@ def test_lineage_reaches_upstream_seeds(tmp_path):
     impact = service.get_column_impact("raw_customers", "id")
     assert impact["summary"]["affected_models"] == 1
     assert impact["affected_columns"][0]["column"] == "customer_id"
+
+
+# ---------------------------------------------------------------------------
+# Graph contract: every edge connects nodes that exist
+# ---------------------------------------------------------------------------
+
+
+def _fanin_manifest(tmp_path) -> Path:
+    """A downstream column fed by two columns of the same upstream model.
+
+    Exploring one of them used to emit an edge from the sibling without ever
+    creating its node, leaving the renderer an edge into nothing.
+    """
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {
+            "model.pkg.stg_payments": {
+                "name": "stg_payments",
+                "alias": "stg_payments",
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {"amount": {}, "payment_method": {}},
+                "compiled_code": "select amount, payment_method from raw_payments",
+                "depends_on": {"nodes": []},
+            },
+            "model.pkg.orders": {
+                "name": "orders",
+                "alias": "orders",
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {},
+                "compiled_code": (
+                    "select sum(case when payment_method = 'card' then amount end) "
+                    "as card_amount from stg_payments"
+                ),
+                "depends_on": {"nodes": ["model.pkg.stg_payments"]},
+            },
+        },
+        "sources": {},
+        "exposures": {},
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+@pytest.mark.skipif(not _HAS_LINEAGE_UI, reason="needs the lineage-ui extra")
+def test_graph_edges_never_reference_missing_nodes(tmp_path):
+    from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
+    from dbt_osmosis_cll.cll_generator.lineage.display.html.explore import LineageExplorer
+    from dbt_osmosis_cll.cll_generator.lineage.service import LineageService
+
+    manifest_path = _fanin_manifest(tmp_path)
+    reader = ManifestCatalogReader(manifest_path=str(manifest_path))
+    reader.load()
+    service = LineageService(
+        catalog_path=None,
+        manifest_path=manifest_path,
+        catalog_reader=reader,
+        use_target_dir_fallback=True,
+    )
+    explorer = LineageExplorer()
+    explorer.set_lineage_service(service)
+
+    explorer.data.main_node = "col_stg_payments_payment_method"
+    explorer._process_lineage_tree("stg_payments", "payment_method")
+    explorer._drop_dangling_edges()
+
+    node_ids = {n["id"] for n in explorer.data.nodes}
+    dangling = [
+        (e["source"], e["target"])
+        for e in explorer.data.edges
+        if e["source"] not in node_ids or e["target"] not in node_ids
+    ]
+    assert dangling == []
+    # The sibling that also feeds the downstream column is shown, not dropped.
+    assert "col_stg_payments_amount" in node_ids
+    assert explorer.data.main_node in node_ids
+
+
+@pytest.mark.skipif(not _HAS_LINEAGE_UI, reason="needs the lineage-ui extra")
+def test_terminal_column_still_renders_its_own_node(tmp_path):
+    """A column with no downstream must not come back as an empty graph."""
+    from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
+    from dbt_osmosis_cll.cll_generator.lineage.display.html.explore import LineageExplorer
+    from dbt_osmosis_cll.cll_generator.lineage.service import LineageService
+
+    manifest_path = _fanin_manifest(tmp_path)
+    reader = ManifestCatalogReader(manifest_path=str(manifest_path))
+    reader.load()
+    service = LineageService(
+        catalog_path=None,
+        manifest_path=manifest_path,
+        catalog_reader=reader,
+        use_target_dir_fallback=True,
+    )
+    explorer = LineageExplorer()
+    explorer.set_lineage_service(service)
+
+    model = service.get_model("orders")
+    explorer._set_column_info(model.columns["card_amount"])
+    explorer.data.main_node = "col_orders_card_amount"
+    explorer._process_lineage_tree("orders", "card_amount")
+    explorer._drop_dangling_edges()
+
+    assert explorer.data.main_node in {n["id"] for n in explorer.data.nodes}
