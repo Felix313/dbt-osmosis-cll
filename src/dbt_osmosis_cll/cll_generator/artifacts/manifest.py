@@ -88,7 +88,12 @@ class ManifestReader:
                             # Fallback to source name if identifier not found
                             source_name = parts[-1].lower()
                             upstream[model_name].add(source_name)
-                    elif parts[0] == "snapshot":
+                    elif parts[0] in ("snapshot", "seed"):
+                        # Seeds are terminal origins exactly like sources: a model
+                        # selecting from one has real column lineage into it, and the
+                        # catalog reader already registers seeds as models. Without
+                        # this edge the chain stops one hop short of where the data
+                        # actually comes from.
                         dep_name = parts[-1].lower()
                         upstream[model_name].add(dep_name)
 

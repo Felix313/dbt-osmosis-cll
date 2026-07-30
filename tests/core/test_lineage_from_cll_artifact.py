@@ -581,16 +581,10 @@ def test_restrict_to_drops_out_of_scope_models_but_keeps_sources(tmp_path):
 
 
 def test_restrict_to_keeps_upstream_seeds(tmp_path):
-    """A seed is a terminal origin just like a source — dropping it truncates the chain.
-
-    The manifest reader does not currently wire seed edges into ``upstream`` at all
-    (``get_model_upstream`` handles model/source/snapshot only, see
-    dbt-osmosis-cll-17z), so the edge is set here directly: this asserts the scoping
-    rule, not the reader's dependency wiring.
-    """
+    """A seed is a terminal origin just like a source — dropping it truncates the chain."""
     manifest_path = _write_project(tmp_path)
     service = _service(manifest_path, lazy=True)
-    service.registry.get_model("orders_by_country").upstream.add("country_codes")
+    assert "country_codes" in service.registry.get_model("orders_by_country").upstream
 
     service.registry.restrict_to(["orders_by_country"])
     assert "country_codes" in service.registry.get_models()

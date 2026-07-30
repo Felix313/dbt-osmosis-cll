@@ -210,7 +210,7 @@ dbt-osmosis-cll lineage explore --from-cll
 
 The format is detected from the payload, not the filename, so a relocated or renamed artifact works too.
 
-**The two artifacts differ in scope, and the explorer honours that difference.** A `cll-result.json` states which models its selector resolved to, so the explorer restricts its model tree and graphs to exactly those (plus the sources they terminate at) — the rest of the project is deliberately absent rather than silently empty. A `cll_cache.json` makes no scope claim, so the explorer shows the full project. The sidebar carries a badge naming the source and scope, so a scoped session is never mistaken for a whole-project one.
+**The two artifacts differ in scope, and the explorer honours that difference.** A `cll-result.json` states which models its selector resolved to, so the explorer restricts its model tree and graphs to exactly those (plus the sources and seeds they terminate at) — the rest of the project is deliberately absent rather than silently empty. A `cll_cache.json` makes no scope claim, so the explorer shows the full project. The sidebar carries a badge naming the source and scope, so a scoped session is never mistaken for a whole-project one.
 
 **Nothing is served stale or half-complete.** Both artifacts record a per-model hash of the source `.sql` file. Models whose SQL changed since the artifact was written are dropped from the cached set, and any model the artifact never covered is parsed individually the first time you click it. A partial or slightly outdated cache therefore still yields a complete, current graph — it just costs a few per-model parses instead of a whole-project one.
 

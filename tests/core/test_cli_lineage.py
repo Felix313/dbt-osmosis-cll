@@ -183,3 +183,61 @@ def test_from_cll_with_unreadable_artifact_exits_one(tmp_path):
         cli, ["lineage", "explore", "--project-dir", str(tmp_path), "--from-cll"]
     )
     assert result.exit_code == 1
+
+
+def test_lineage_reaches_upstream_seeds(tmp_path):
+    """Column lineage terminates at the seed a model selects from, not one hop short.
+
+    Seeds are registered as models by the catalog reader but were absent from the
+    dependency graph, so the service dropped their column references as unresolvable
+    (dbt-osmosis-cll-17z).
+    """
+    from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
+    from dbt_osmosis_cll.cll_generator.lineage.service import LineageSelector, LineageService
+
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {
+            "model.pkg.stg_customers": {
+                "name": "stg_customers",
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {},
+                "compiled_code": "select id as customer_id from raw_customers",
+                "depends_on": {"nodes": ["seed.pkg.raw_customers"]},
+            },
+            "seed.pkg.raw_customers": {
+                "name": "raw_customers",
+                "resource_type": "seed",
+                "schema": "main",
+                "database": "db",
+                "columns": {"id": {"description": "Seed PK"}},
+                "depends_on": {"nodes": []},
+            },
+        },
+        "sources": {},
+        "exposures": {},
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    reader = ManifestCatalogReader(manifest_path=str(manifest_path))
+    reader.load()
+    service = LineageService(
+        catalog_path=None,
+        manifest_path=manifest_path,
+        catalog_reader=reader,
+        use_target_dir_fallback=True,
+    )
+
+    assert "raw_customers" in service.registry.get_model("stg_customers").upstream
+
+    info = service.get_column_info(LineageSelector.from_string("+stg_customers.customer_id"))
+    assert "id" in info["upstream"]["raw_customers"]
+
+    # ...and the seed knows what it feeds, so impact analysis works from that end too.
+    impact = service.get_column_impact("raw_customers", "id")
+    assert impact["summary"]["affected_models"] == 1
+    assert impact["affected_columns"][0]["column"] == "customer_id"

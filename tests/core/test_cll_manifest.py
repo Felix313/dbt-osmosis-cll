@@ -87,3 +87,63 @@ def test_find_node_without_load_builds_index_lazily(tmp_path):
 def test_find_node_empty_manifest_returns_none():
     r = ManifestReader()
     assert r._find_node("anything") is None
+
+
+# ---------------------------------------------------------------------------
+# DAG wiring: which depends_on node types become graph edges
+# ---------------------------------------------------------------------------
+
+
+def _dag_reader(tmp_path, deps: list[str], sources: dict | None = None) -> ManifestReader:
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {
+            "model.pkg.stg_customers": {
+                "name": "stg_customers",
+                "resource_type": "model",
+                "language": "sql",
+                "depends_on": {"nodes": deps},
+            },
+            "seed.pkg.raw_customers": {"name": "raw_customers", "resource_type": "seed"},
+            "snapshot.pkg.customers_snap": {
+                "name": "customers_snap",
+                "resource_type": "snapshot",
+                "depends_on": {"nodes": []},
+            },
+        },
+        "sources": sources or {},
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    r = ManifestReader(str(path))
+    r.load()
+    return r
+
+
+def test_seed_dependency_becomes_an_upstream_edge(tmp_path):
+    """A seed is a terminal origin like a source: models selecting from one have
+    real column lineage into it, so it must appear in the DAG rather than leaving
+    the chain to stop one hop short of where the data comes from."""
+    r = _dag_reader(tmp_path, ["seed.pkg.raw_customers"])
+    assert r.get_model_upstream()["stg_customers"] == {"raw_customers"}
+
+
+def test_seed_dependency_becomes_a_downstream_edge(tmp_path):
+    r = _dag_reader(tmp_path, ["seed.pkg.raw_customers"])
+    assert r.get_model_downstream()["raw_customers"] == {"stg_customers"}
+
+
+def test_model_source_and_snapshot_edges_still_wire(tmp_path):
+    r = _dag_reader(
+        tmp_path,
+        ["model.pkg.other", "source.pkg.raw.orders", "snapshot.pkg.customers_snap"],
+        sources={"source.pkg.raw.orders": {"name": "orders", "identifier": "raw_orders"}},
+    )
+    # Sources resolve through their identifier — that is the name the SQL uses.
+    assert r.get_model_upstream()["stg_customers"] == {"other", "raw_orders", "customers_snap"}
+
+
+def test_test_and_operation_dependencies_are_not_wired(tmp_path):
+    """Only node types that can carry column lineage become edges."""
+    r = _dag_reader(tmp_path, ["test.pkg.not_null_x", "operation.pkg.hook"])
+    assert r.get_model_upstream()["stg_customers"] == set()
