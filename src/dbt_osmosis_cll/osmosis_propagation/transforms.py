@@ -26,6 +26,7 @@ __all__ = [
     "TransformPipeline",
     "_transform_op",
     "annotate_column_origins",
+    "format_soft_fail_summary",
     "inherit_upstream_column_knowledge",
     "inherit_upstream_column_knowledge_cll",
     "inject_missing_columns",
@@ -35,6 +36,48 @@ __all__ = [
     "sort_columns_as_in_database",
     "synchronize_data_types",
 ]
+
+# How many refs the end-of-run soft-fail summary spells out per reason. A repo that
+# addresses raw tables directly can produce thousands; a wall of them buries the
+# count that makes the warning actionable.
+_SOFT_FAIL_SUMMARY_LIMIT = 20
+
+_SOFT_FAIL_LABELS = {
+    "max-depth": "exceeded the max lineage depth",
+    "cycle": "hit a lineage cycle",
+    "unresolved-progenitor": (
+        "stopped at a relation that is no dbt node (declare it as a source to trace through it)"
+    ),
+}
+
+
+def format_soft_fail_summary(
+    soft_fails: t.Mapping[str, t.AbstractSet[str]],
+    limit: int = _SOFT_FAIL_SUMMARY_LIMIT,
+) -> list[str]:
+    """Render the end-of-run origin-walk soft-fail summary, one message per reason.
+
+    These columns resolved to no inherited description or origin because the walk
+    bailed out — not hard errors, but reported once at the end rather than dropped
+    in silence. The full count is always stated even when the list is truncated,
+    since that is what tells the reader whether this is an oddity or the norm.
+    """
+    messages: list[str] = []
+    for reason, refs in sorted(soft_fails.items()):
+        if not refs:
+            continue
+        shown = sorted(refs)[:limit]
+        more = len(refs) - len(shown)
+        messages.append(
+            ":warning: CLL origin walk {} for {} column(s) — these kept their existing "
+            "description and got no desc-source tag:\n  {}{}".format(
+                _SOFT_FAIL_LABELS.get(reason, reason),
+                len(refs),
+                "\n  ".join(shown),
+                f"\n  ... and {more} more" if more else "",
+            )
+        )
+    return messages
 
 
 @dataclass
@@ -233,21 +276,8 @@ class TransformPipeline:
                     get_cll_walk_soft_fails,
                 )
 
-                soft_fails = get_cll_walk_soft_fails(context)
-                _labels = {
-                    "max-depth": "exceeded the max lineage depth",
-                    "cycle": "hit a lineage cycle",
-                }
-                for reason, refs in sorted(soft_fails.items()):
-                    if not refs:
-                        continue
-                    logger.warning(
-                        ":warning: CLL origin walk %s for %d column(s) — these kept their "
-                        "existing description and got no desc-source tag:\n  %s",
-                        _labels.get(reason, reason),
-                        len(refs),
-                        "\n  ".join(sorted(refs)),
-                    )
+                for message in format_soft_fail_summary(get_cll_walk_soft_fails(context)):
+                    logger.warning(message)
                 clear_cll_walk_soft_fails(context)
             except Exception:
                 pass

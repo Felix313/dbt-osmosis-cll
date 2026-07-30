@@ -63,6 +63,12 @@ _CLL_WALK_SOFT_FAILS: dict[str, dict[str, set[str]]] = {}
 _CACHE_LOCK = threading.Lock()
 _FAILURES_LOCK = threading.Lock()
 
+# Node kinds a progenitor name can resolve to. Progenitors are relation names read
+# out of compiled SQL, so only nodes that materialise a relation can be one — tests,
+# analyses and operations never appear in a FROM clause, and indexing them would let
+# a test name shadow a real model.
+_ORIGIN_NODE_TYPES = frozenset({"model", "seed", "snapshot"})
+
 # Fields we read from ColumnLineageResult — serialised/deserialised for disk cache
 _RESULT_FIELDS = (
     "model",
@@ -230,7 +236,11 @@ def get_cll_results(
     target_base: Path = Path(
         getattr(runtime_cfg, "project_target_path", None) or Path(project_dir) / "target"
     )
-    cache_key = (project_dir, node.name)
+    # Key by unique_id, not name: versioned models all share one name, so a
+    # name-keyed entry would hand v2 the rows computed for v1 — silently, within a
+    # single run. (The disk cache below is keyed by name but validated against the
+    # source-SQL hash, which differs per version, so it can only thrash, not lie.)
+    cache_key = (project_dir, getattr(node, "unique_id", None) or node.name)
 
     # 1. In-memory
     if cache_key in _LINEAGE_CACHE:
@@ -484,9 +494,21 @@ def _ensure_manifest_index(context: YamlRefactorContextProtocol) -> None:
     if project_dir not in _NODE_INDEX:
         node_idx: dict[str, t.Any] = {}
         for n in context.project.manifest.nodes.values():
-            name = getattr(n, "name", "").lower()
-            if name:
-                node_idx[name] = n
+            rt = getattr(n, "resource_type", "")
+            if str(getattr(rt, "value", rt)).lower() not in _ORIGIN_NODE_TYPES:
+                continue
+            name = (getattr(n, "name", None) or "").lower()
+            alias = (getattr(n, "alias", None) or "").lower()
+            # Index by alias first (canonical): progenitor names come from compiled
+            # SQL, which references relations, and the alias is the relation. Also
+            # index by name when it differs, using setdefault so alias entries win
+            # on collision — versioned models all share one name, and only the one
+            # whose alias IS that name owns the bare relation. Mirrors how sources
+            # are indexed by identifier above.
+            if alias:
+                node_idx[alias] = n
+            if name and name != alias:
+                node_idx.setdefault(name, n)
         _NODE_INDEX[project_dir] = node_idx
 
 
@@ -624,7 +646,13 @@ def get_column_origin(
         _ensure_manifest_index(context)
         runtime_cfg = context.project.runtime_cfg
         project_dir = str(runtime_cfg.project_root)
-        origin_key = (project_dir, node.name.lower(), column_name.lower())
+        # unique_id for the same reason the lineage cache uses it: two versions of a
+        # model share a name but not their lineage.
+        origin_key = (
+            project_dir,
+            (getattr(node, "unique_id", None) or node.name).lower(),
+            column_name.lower(),
+        )
         if origin_key in _ORIGIN_CACHE:
             return _ORIGIN_CACHE[origin_key]
         result = _compute_column_origin(context, node, column_name, project_dir)
@@ -725,6 +753,14 @@ def _compute_column_origin(
     if model_node is not None:
         return _compute_column_origin(context, model_node, progenitor_col, project_dir, _depth + 1)
 
+    # The progenitor relation belongs to no dbt node — typically a table addressed
+    # directly in SQL (``{{ target.schema }}.RAW_TABLE``) with no source definition.
+    # The column legitimately resolves to no origin, but say so: silence here reads
+    # exactly like "this column has no upstream", and the fix (declare the source)
+    # is only obvious once the unresolved relation is named.
+    record_cll_walk_soft_fail(
+        context, "unresolved-progenitor", f"{node.name}.{column_name} → {progenitor_lower}"
+    )
     return None
 
 
