@@ -212,7 +212,7 @@ def test_parse_cll_writes_dedicated_result_file(tmp_path):
     assert not (target / "cll_cache.json").exists()
 
     payload = json.loads(out_path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["selectors"] == ["+mart_orders"]
     assert payload["models"] == ["int_orders", "mart_orders", "stg_orders"]
 
@@ -221,6 +221,16 @@ def test_parse_cll_writes_dedicated_result_file(tmp_path):
     stg_order_id = next(r for r in rows if r["model"] == "stg_orders" and r["column"] == "order_id")
     assert stg_order_id["is_rename"] is True
     assert stg_order_id["source_column"] == "id"
+    # schema_version 2: the row states its transformation kind and carries the
+    # expression field, so the lineage explorer can rebuild a ColumnLineage without
+    # re-parsing the SQL. (A pure rename has no expression of its own — the parser
+    # only records one for derived/literal/window columns.)
+    assert stg_order_id["transformation_type"] == "renamed"
+    assert "sql_expression" in stg_order_id
+
+    # Per-model source-SQL hashes drive staleness detection in the explorer. This
+    # fixture's manifest has no original_file_path, so the map is present but empty.
+    assert payload["fingerprints"] == {}
 
 
 def test_parse_cll_depth_limit_restricts_models(tmp_path):

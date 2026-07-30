@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Set
+from typing import Dict, Iterable, List, Mapping, Optional, Set
 from dataclasses import dataclass, field
 import logging
 import re
@@ -147,6 +147,7 @@ def _replace_placeholder(match: re.Match) -> str:
 from dbt_osmosis_cll.cll_generator.artifacts.catalog import CatalogReader  # noqa: E402
 from dbt_osmosis_cll.cll_generator.artifacts.manifest import ManifestReader  # noqa: E402
 from dbt_osmosis_cll.cll_generator.models.schema import (  # noqa: E402
+    Column,
     Model,
     SQLParseResult,
     ColumnLineage,
@@ -453,8 +454,6 @@ class ModelRegistry:
         Without this, new models with empty YAMLs would always return [] from
         get_column_lineage() because the api.py loop iterates over model.columns.
         """
-        from dbt_osmosis_cll.cll_generator.models.schema import Column
-
         for col_name, lineage in parse_result.column_lineage.items():
             if col_name not in model.columns:
                 model.columns[col_name] = Column(name=col_name, model_name=model.name)
@@ -591,6 +590,12 @@ class ModelRegistry:
         uid = model.unique_id or self._lookup_name(model)
         if uid in self._lineage_done or uid in in_progress:
             return
+        if model.language != "sql":
+            # Sources and seeds have no SQL to trace — the eager pass filters them
+            # out up front, so mark them done rather than re-entering the parser on
+            # every access (a lineage walk touches its terminal sources constantly).
+            self._lineage_done.add(uid)
+            return
         in_progress.add(uid)
 
         self._parse_model_lineage(model)
@@ -661,6 +666,88 @@ class ModelRegistry:
             )
         except Exception as e:
             raise RegistryError(f"Failed to load registry: {e}")
+
+    def apply_cached_lineage(
+        self, lineage_by_model: Mapping[str, Mapping[str, List[ColumnLineage]]]
+    ) -> tuple[list[str], list[str]]:
+        """Seed column lineage from precomputed results instead of parsing SQL.
+
+        *lineage_by_model* maps a model key (manifest ``unique_id`` or SQL relation
+        name) to ``{column_name: [ColumnLineage, ...]}``. Columns not yet on the model
+        are created as stubs, exactly as :meth:`_apply_column_lineage` does for
+        parser-discovered columns, so ``select *`` expansions cached by a previous run
+        survive the round-trip.
+
+        Each hydrated model is marked lineage-done, so a lazy registry never re-parses
+        it; models absent from *lineage_by_model* stay unparsed and are handled on
+        first access by :meth:`ensure_lineage`. Call after :meth:`load`.
+
+        Returns ``(applied_keys, unknown_keys)`` — the latter are keys with no matching
+        model in this manifest (stale cache entries for deleted models).
+        """
+        if not self.is_loaded:
+            raise RegistryNotLoadedError("Registry must be loaded before applying cached lineage")
+
+        applied: list[str] = []
+        unknown: list[str] = []
+        with self._parse_lock:
+            for key, columns in lineage_by_model.items():
+                model = self._resolve_model(key)
+                if model is None:
+                    unknown.append(key)
+                    continue
+                for col_name, lineage in columns.items():
+                    if col_name not in model.columns:
+                        model.columns[col_name] = Column(name=col_name, model_name=model.name)
+                    model.columns[col_name].lineage = list(lineage)
+                self._lineage_done.add(model.unique_id or self._lookup_name(model))
+                applied.append(key)
+        return applied, unknown
+
+    def restrict_to(self, model_keys: Iterable[str]) -> None:
+        """Drop every model outside *model_keys* from the registry.
+
+        Keys are matched as SQL relation names or manifest ``unique_id``s. Sources
+        and seeds feeding a kept model are retained so lineage graphs still terminate
+        at their real origin, and exposures survive only while at least one model
+        they depend on is still present.
+
+        Used by the selector-scoped explorer mode, where the lineage artifact covers
+        a deliberate subset of the project and showing the rest would advertise
+        lineage the caller never asked to compute.
+        """
+        if not self.is_loaded:
+            raise RegistryNotLoadedError("Registry must be loaded before restricting it")
+
+        keep_ids: Set[str] = set()
+        for key in model_keys:
+            model = self._resolve_model(key)
+            if model is not None:
+                keep_ids.add(model.unique_id or self._lookup_name(model))
+
+        # Sources and seeds referenced by a kept model are the graph's terminals —
+        # a selector resolves to models only, so without this the chain would stop
+        # one hop short of where the data actually originates.
+        for uid in list(keep_ids):
+            model = self._state.models.get(uid)
+            if model is None:
+                continue
+            for upstream_name in model.upstream:
+                upstream = self._resolve_model(upstream_name)
+                if upstream is not None and upstream.resource_type in ("source", "seed"):
+                    keep_ids.add(upstream.unique_id or self._lookup_name(upstream))
+
+        models = {uid: m for uid, m in self._state.models.items() if uid in keep_ids}
+        name_alias = {name: uid for name, uid in self._state.name_alias.items() if uid in keep_ids}
+        kept_names = {self._lookup_name(m) for m in models.values()}
+        exposures = {
+            name: exp
+            for name, exp in self._state.exposures.items()
+            if any(dep.lower() in kept_names for dep in exp.depends_on_models)
+        }
+        self._state = RegistryState(
+            models=models, exposures=exposures, is_loaded=True, name_alias=name_alias
+        )
 
     def get_models(self) -> Dict[str, Model]:
         """Get all models keyed by SQL relation name (backwards-compatible view).

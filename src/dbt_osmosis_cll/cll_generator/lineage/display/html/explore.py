@@ -56,6 +56,7 @@ class LineageExplorer:
         self.port = port
         self.data = GraphData()
         self.lineage_service: Optional["LineageService"] = None
+        self.context: Dict[str, Any] = {"mode": "live"}
         self._start_model: Optional[str] = None
         self._start_column: Optional[str] = None
 
@@ -79,12 +80,22 @@ class LineageExplorer:
         async def get_graph_data() -> Dict[str, Any]:
             return self.data.model_dump()
 
+        @self.app.get("/api/context")
+        async def get_context() -> Dict[str, Any]:
+            return self.context
+
         @self.app.get("/api/models")
         async def get_models() -> List[Dict[str, Any]]:
             if not self.lineage_service:
                 return []
 
             model_tree_root: List[Dict[str, Any]] = []
+            # The tree lists every model's columns, including the ones only the SQL
+            # parse discovers, so this is the one endpoint that genuinely needs
+            # project-wide lineage. On a lazy registry seeded from a cache this
+            # parses just the models the cache did not cover; on an eager one it is
+            # a no-op.
+            self.lineage_service.registry.ensure_all_lineage()
             all_models = self.lineage_service.registry.get_models()
             all_exposures = self.lineage_service.registry.get_exposures()
 
@@ -199,7 +210,7 @@ class LineageExplorer:
 
             try:
                 self.data = GraphData()
-                model_obj = self.lineage_service.registry.get_model(model)
+                model_obj = self.lineage_service.get_model(model)
                 column_obj = model_obj.columns.get(column)
 
                 if not column_obj:
@@ -258,7 +269,7 @@ class LineageExplorer:
             try:
                 # Verify model exists
                 try:
-                    model_obj = self.lineage_service.registry.get_model(model)
+                    model_obj = self.lineage_service.get_model(model)
                 except (ValueError, KeyError) as e:
                     return {"error": f"Model '{model}' not found: {str(e)}"}
 
@@ -291,7 +302,7 @@ class LineageExplorer:
             start_col_node_id = f"col_{start_model}_{start_column}"
             if not any(n["id"] == start_col_node_id for n in self.data.nodes):
                 try:
-                    model_obj = self.lineage_service.registry.get_model(start_model)
+                    model_obj = self.lineage_service.get_model(start_model)
                     column_obj = model_obj.columns.get(start_column)
                     if column_obj:
                         self._set_column_info(column_obj)
@@ -326,7 +337,7 @@ class LineageExplorer:
                     continue
 
                 try:
-                    model_obj = self.lineage_service.registry.get_model(model_name)
+                    model_obj = self.lineage_service.get_model(model_name)
                     if not model_obj:
                         continue
 
@@ -412,7 +423,7 @@ class LineageExplorer:
         if direction == "upstream" and main_node_id and self.lineage_service:
             try:
                 if self._start_model and self._start_column:
-                    model_obj = self.lineage_service.registry.get_model(self._start_model)
+                    model_obj = self.lineage_service.get_model(self._start_model)
                     col_obj = model_obj.columns.get(self._start_column)
                     if col_obj and col_obj.lineage:
                         for lin in col_obj.lineage:
@@ -462,7 +473,7 @@ class LineageExplorer:
 
                             if model_in_refs or is_starting_model:
                                 try:
-                                    model = self.lineage_service.registry.get_model(model_name)
+                                    model = self.lineage_service.get_model(model_name)
                                     if not model or not hasattr(model, "columns"):
                                         continue
 
@@ -509,6 +520,15 @@ class LineageExplorer:
     def set_lineage_service(self, lineage_service: "LineageService") -> None:
         """Set the lineage service for the explore server."""
         self.lineage_service = lineage_service
+
+    def set_context(self, context: Dict[str, Any]) -> None:
+        """Describe where this session's lineage came from.
+
+        Surfaced at ``/api/context`` and rendered as a badge in the sidebar so it is
+        obvious whether the graph reflects a live parse, a whole-project cache, or a
+        selector-scoped slice that deliberately omits the rest of the project.
+        """
+        self.context = context
 
     def _set_column_info(self, column: Column) -> None:
         """Set the main column info for display."""

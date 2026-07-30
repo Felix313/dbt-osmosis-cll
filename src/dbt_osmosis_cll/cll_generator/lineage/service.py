@@ -90,23 +90,46 @@ class LineageService:
         adapter: "str | None" = None,
         catalog_reader: "Any | None" = None,
         use_target_dir_fallback: bool = False,
+        lazy_lineage: bool = False,
     ):
         """*catalog_reader* lets callers inject a manifest-only reader
         (``ManifestCatalogReader``) so no ``catalog.json`` / warehouse is needed;
         *use_target_dir_fallback* reads compiled SQL from ``target/compiled/``
-        when the manifest has none inline."""
+        when the manifest has none inline.
+
+        With *lazy_lineage* the registry skips the whole-project SQL parse at load
+        and each model is parsed the first time this service touches it. Callers that
+        seed the registry from a precomputed artifact
+        (:meth:`~dbt_osmosis_cll.cll_generator.artifacts.registry.ModelRegistry.apply_cached_lineage`)
+        use this to pay for parsing only the models the artifact did not cover."""
         self.registry = ModelRegistry(
             str(catalog_path) if catalog_path else None,  # type: ignore[arg-type]
             str(manifest_path),
             adapter_override=adapter,
             _catalog_reader_override=catalog_reader,
             use_target_dir_fallback=use_target_dir_fallback,
+            lazy_lineage=lazy_lineage,
         )
         self.registry.load()
 
+    def get_model(self, model_name: str) -> Any:
+        """Resolve *model_name* and guarantee its lineage is available.
+
+        No-op beyond the lookup for eager registries; in lazy mode this is where a
+        model missing from the precomputed artifact gets parsed, on first touch.
+
+        Callers that go on to read ``model.columns`` or a column's ``lineage`` must
+        use this rather than ``service.registry.get_model``: a lazily-loaded model
+        carries only its documented YAML columns until it is parsed, so the bare
+        registry lookup would report parser-discovered columns as missing.
+        """
+        model = self.registry.get_model(model_name)
+        self.registry.ensure_lineage(model)
+        return model
+
     def get_model_info(self, selector: LineageSelector) -> Dict[str, Any]:
         """Get model information based on selector."""
-        model = self.registry.get_model(selector.model)
+        model = self.get_model(selector.model)
         return {
             "name": model.name,
             "schema": model.schema_name,
@@ -118,7 +141,7 @@ class LineageService:
 
     def get_column_info(self, selector: LineageSelector) -> Dict[str, Any]:
         """Get column information and lineage based on selector."""
-        model = self.registry.get_model(selector.model)
+        model = self.get_model(selector.model)
         if not selector.column or selector.column not in model.columns:
             raise ValueError(f"Column '{selector.column}' not found in model '{selector.model}'")
 
@@ -187,7 +210,7 @@ class LineageService:
     ) -> None:
         """Process a model reference and add it to upstream_refs."""
         try:
-            model_obj = self.registry.get_model(src_model)
+            model_obj = self.get_model(src_model)
 
             if src_model not in upstream_refs.models:
                 upstream_refs.models[src_model] = {}
@@ -218,7 +241,7 @@ class LineageService:
 
         visited.add(current_ref)
         upstream_refs = LineageReferences()
-        current_model = self.registry.get_model(model_name)
+        current_model = self.get_model(model_name)
 
         try:
             if column_name not in current_model.columns:
@@ -262,7 +285,7 @@ class LineageService:
         column_name = strip_sql_comments(column_name).lower()
         current_ref = f"{model_name}.{column_name}"
         downstream_refs = LineageReferences()
-        current_model = self.registry.get_model(model_name)
+        current_model = self.get_model(model_name)
 
         try:
             if column_name not in current_model.columns:
@@ -283,7 +306,7 @@ class LineageService:
                     continue
 
                 try:
-                    other_model = self.registry.get_model(other_name)
+                    other_model = self.get_model(other_name)
                     for col_name, col in sorted(other_model.columns.items()):
                         if not col.lineage:
                             continue
@@ -357,7 +380,7 @@ class LineageService:
                 current_ref = f"{current_model}.{current_col}"
 
                 try:
-                    current_model_obj = self.registry.get_model(current_model)
+                    current_model_obj = self.get_model(current_model)
                     if current_col not in current_model_obj.columns:
                         continue
 
@@ -376,7 +399,7 @@ class LineageService:
                             continue
 
                         try:
-                            other_model = self.registry.get_model(other_name)
+                            other_model = self.get_model(other_name)
                             for col_name, col in sorted(other_model.columns.items()):
                                 if not col.lineage:
                                     continue
@@ -463,7 +486,7 @@ class LineageService:
             - affected_exposures: list of affected exposures
         """
         try:
-            model = self.registry.get_model(model_name)
+            model = self.get_model(model_name)
             if column_name not in model.columns:
                 raise ValueError(f"Column '{column_name}' not found in model '{model_name}'")
 

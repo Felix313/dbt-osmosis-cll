@@ -109,6 +109,25 @@ class ColumnLineageResult:
     False (pure unknowns from parse failures also land here, so treat as a soft signal).
     """
 
+    transformation_type: str = "direct"
+    """Raw transformation kind as classified by the parser: one of ``direct``,
+    ``renamed``, ``derived``, ``aggregate``, ``window``, ``union``, ``literal``,
+    ``generated``.
+
+    Redundant with the ``is_*`` flags but stated once and unambiguously, so consumers
+    that need to reconstruct a :class:`~dbt_osmosis_cll.cll_generator.models.schema.ColumnLineage`
+    (the lineage explorer reading a cached result file) do not have to infer it from
+    seven booleans. Additive — older cached results deserialize with ``"direct"``."""
+
+    sql_expression: Optional[str] = None
+    """The SQL expression that produces this column, when the parser captured one.
+
+    Populated for every transformation kind, not just literals/generated values
+    (``literal_value`` and ``generated_value`` remain as the kind-specific aliases).
+    Lets a consumer render the expression without re-parsing the compiled SQL —
+    the lineage explorer's impact panel shows it. Additive — older cached results
+    deserialize with ``None``."""
+
     unique_id: Optional[str] = None
     """Manifest unique_id of *model* (e.g. ``model.my_pkg.stg_orders``), when known.
 
@@ -282,6 +301,8 @@ def get_column_lineage(
                         source_column=None,
                         is_computed=False,
                         is_first_in_chain=True,
+                        transformation_type="direct",
+                        sql_expression=None,
                         unique_id=model_obj.unique_id,
                     )
                 )
@@ -354,6 +375,8 @@ def get_column_lineage(
                     is_first_in_chain=is_first,
                     union_branches=union_branches,
                     progenitors=progenitors,
+                    transformation_type=ttype,
+                    sql_expression=lin.sql_expression,
                     unique_id=model_obj.unique_id,
                 )
             )
@@ -385,6 +408,8 @@ def get_column_lineage(
                         source_column=lin.source_column,
                         is_computed=is_computed,
                         is_first_in_chain=is_first,
+                        transformation_type=lin.transformation_type,
+                        sql_expression=lin.sql_expression,
                     )
                 )
 

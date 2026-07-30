@@ -10,25 +10,17 @@ from pathlib import Path
 import click
 import yaml as yaml_handler
 
-from dbt_osmosis_cll.osmosis_propagation import logger
 from dbt_osmosis_cll.integration.cll import maybe_bulk_compile
-from dbt_osmosis_cll.osmosis_propagation.config import (
-    DbtConfiguration,
-    create_dbt_project_context,
-    discover_profiles_dir,
-    discover_project_dir,
-)
+from dbt_osmosis_cll.osmosis_propagation import logger
 from dbt_osmosis_cll.osmosis_propagation.commands.diff import SchemaDiff
 from dbt_osmosis_cll.osmosis_propagation.commands.generators import (
     generate_sources_from_database,
     generate_staging_from_source,
 )
-from dbt_osmosis_cll.osmosis_propagation.path_management import create_missing_source_yamls
 from dbt_osmosis_cll.osmosis_propagation.commands.restructuring import (
     apply_restructure_plan,
     draft_restructure_delta_plan,
 )
-from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext, YamlRefactorSettings
 from dbt_osmosis_cll.osmosis_propagation.commands.sql_lint import SQLLinter, lint_sql_code
 from dbt_osmosis_cll.osmosis_propagation.commands.sql_operations import (
     compile_sql_code,
@@ -38,6 +30,14 @@ from dbt_osmosis_cll.osmosis_propagation.commands.test_suggestions import (
     suggest_tests_for_model,
     suggest_tests_for_project,
 )
+from dbt_osmosis_cll.osmosis_propagation.config import (
+    DbtConfiguration,
+    create_dbt_project_context,
+    discover_profiles_dir,
+    discover_project_dir,
+)
+from dbt_osmosis_cll.osmosis_propagation.path_management import create_missing_source_yamls
+from dbt_osmosis_cll.osmosis_propagation.settings import YamlRefactorContext, YamlRefactorSettings
 from dbt_osmosis_cll.osmosis_propagation.transforms import (
     annotate_column_origins,
     inherit_upstream_column_knowledge_cll,
@@ -941,12 +941,26 @@ def lineage():
     default=None,
     help="Override the sqlglot dialect (e.g. snowflake). Defaults to the manifest adapter type.",
 )
+@click.option(
+    "--from-cll",
+    "from_cll",
+    is_flag=False,
+    flag_value="auto",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Serve lineage from a precomputed CLL artifact instead of parsing every "
+    "model's compiled SQL at startup. Accepts a 'parse-cll' result file "
+    "(cll-result.json — the explorer is then scoped to that selector) or osmosis' "
+    "cll_cache.json (whole project). Pass the flag without a value to pick the "
+    "first of those found in the target folder.",
+)
 def explore(
     project_dir: str,
     manifest: str | None = None,
     host: str = "127.0.0.1",
     port: int = 8000,
     dialect: str | None = None,
+    from_cll: str | None = None,
 ) -> None:
     """Serve the interactive HTML lineage explorer for this project.
 
@@ -955,6 +969,12 @@ def explore(
     compiled SQL from inline ``compiled_code`` or ``target/compiled/`` — no
     ``catalog.json`` and no warehouse connection. Run ``dbt compile`` first so
     lineage has SQL to trace.
+
+    With ``--from-cll`` the compiled-SQL parse is skipped for every model the
+    artifact covers, so a project already analysed by ``parse-cll`` or by an
+    osmosis run starts instantly. Models the artifact misses — and models whose
+    source SQL changed since it was written — are parsed individually on first
+    access, so the graph is never silently stale or incomplete.
     """
     try:
         from dbt_osmosis_cll.cll_generator.lineage.display.html.explore import LineageExplorer
@@ -969,6 +989,12 @@ def explore(
     from pathlib import Path as _Path
 
     from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
+    from dbt_osmosis_cll.cll_generator.lineage.cll_artifact import (
+        CllArtifactError,
+        default_artifact_path,
+        load_cll_artifact,
+        source_sql_fingerprints,
+    )
     from dbt_osmosis_cll.cll_generator.lineage.service import LineageService
 
     manifest_path = _Path(manifest) if manifest else _Path(project_dir) / "target" / "manifest.json"
@@ -979,19 +1005,99 @@ def explore(
         )
         sys.exit(1)
 
+    artifact = None
+    if from_cll is not None:
+        if from_cll == "auto":
+            artifact_path = default_artifact_path(manifest_path.parent)
+            if artifact_path is None:
+                logger.error(
+                    ":x: No CLL artifact found in %s — expected cll-result.json (run "
+                    "'dbt-osmosis-cll parse-cll -s <selector>') or cll_cache.json (written "
+                    "by 'yaml document'/'yaml refactor'). Omit --from-cll to parse the "
+                    "project's compiled SQL instead.",
+                    manifest_path.parent,
+                )
+                sys.exit(1)
+        else:
+            artifact_path = _Path(from_cll)
+        try:
+            artifact = load_cll_artifact(artifact_path)
+        except CllArtifactError as exc:
+            logger.error(":x: %s", exc)
+            sys.exit(1)
+
     reader = ManifestCatalogReader(manifest_path=str(manifest_path))
     reader.load()
-    logger.info("Loading project lineage (parses compiled SQL for every model)...")
-    service = LineageService(
-        catalog_path=None,
-        manifest_path=manifest_path,
-        adapter=dialect,
-        catalog_reader=reader,
-        use_target_dir_fallback=True,
-    )
+
+    if artifact is None:
+        logger.info("Loading project lineage (parses compiled SQL for every model)...")
+        service = LineageService(
+            catalog_path=None,
+            manifest_path=manifest_path,
+            adapter=dialect,
+            catalog_reader=reader,
+            use_target_dir_fallback=True,
+        )
+        explorer_context = {"mode": "live"}
+    else:
+        stale = artifact.stale_models(source_sql_fingerprints(_Path(project_dir), reader.manifest))
+        if stale:
+            artifact.drop_models(stale)
+            logger.warning(
+                ":warning: %d cached model(s) have changed since %s was written and will be "
+                "re-parsed on access: %s",
+                len(stale),
+                artifact.path.name,
+                ", ".join(stale[:10]) + (", ..." if len(stale) > 10 else ""),
+            )
+        if not artifact.has_sql_expressions:
+            logger.warning(
+                ":warning: %s predates schema version 5 — SQL expressions are missing from "
+                "the impact panel. Rebuild it to restore them.",
+                artifact.path.name,
+            )
+
+        service = LineageService(
+            catalog_path=None,
+            manifest_path=manifest_path,
+            adapter=dialect,
+            catalog_reader=reader,
+            use_target_dir_fallback=True,
+            lazy_lineage=True,
+        )
+        applied, unknown = service.registry.apply_cached_lineage(artifact.lineage)
+        if unknown:
+            logger.warning(
+                ":warning: %d cached model(s) are not in this manifest and were ignored: %s",
+                len(unknown),
+                ", ".join(sorted(unknown)[:10]) + (", ..." if len(unknown) > 10 else ""),
+            )
+        if artifact.scope:
+            service.registry.restrict_to(artifact.scope)
+            logger.info(
+                "Scoped to selector %s — %d model(s) in the explorer.",
+                " ".join(artifact.selectors) or "(unspecified)",
+                len(service.registry.get_models()),
+            )
+        logger.info(
+            ":white_check_mark: Loaded lineage for %d model(s) from %s — no compiled SQL "
+            "parsed at startup.",
+            len(applied),
+            artifact.path,
+        )
+        explorer_context = {
+            "mode": "selector" if artifact.scope else "project",
+            "source": str(artifact.path),
+            "selectors": artifact.selectors,
+            "models": len(applied),
+            "stale_models": stale,
+            "has_sql_expressions": artifact.has_sql_expressions,
+        }
+
     logger.info("Lineage ready — serving explorer at http://%s:%d", host, port)
     explorer = LineageExplorer(host=host, port=port)
     explorer.set_lineage_service(service)  # pyright: ignore[reportArgumentType]
+    explorer.set_context(explorer_context)
     explorer.start()
 
 
@@ -1101,11 +1207,24 @@ def parse_cll(
             ", ".join(missing),
         )
 
+    # Per-model source-SQL hashes let `lineage explore --from-cll` detect which
+    # cached models went stale since this file was written, instead of serving an
+    # outdated graph. Same hash function osmosis' cll_cache.json uses.
+    from dbt_osmosis_cll.cll_generator.lineage.cll_artifact import source_sql_fingerprints
+
+    selected_lower = {m.lower() for m in selected_models}
+    fingerprints = {
+        name: digest
+        for name, digest in source_sql_fingerprints(Path(project_dir), reader.manifest).items()
+        if name in selected_lower
+    }
+
     output_path = Path(output) if output else manifest_path.parent / "cll-result.json"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "selectors": list(select),
         "models": selected_models,
+        "fingerprints": fingerprints,
         "results": [dataclasses.asdict(r) for r in results],
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)

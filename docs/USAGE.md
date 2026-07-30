@@ -87,7 +87,7 @@ Top-level commands currently exposed by `dbt-osmosis --help`:
 - `test` — suggest dbt tests
 - `diff` — report schema drift between YAML and the database
 - `lint` — lint SQL strings, models, or a whole project
-- `lineage` — serve the read-only interactive lineage explorer (`lineage explore`)
+- `lineage` — serve the read-only interactive lineage explorer (`lineage explore`, optionally fed from a precomputed CLL artifact via `--from-cll`)
 - `parse-cll` — build column-level lineage for a dbt selector and write it to a standalone JSON file
 
 For command-by-command flags and examples, use the docs-site CLI reference rather than relying on this landing page.
@@ -185,11 +185,36 @@ dbt-osmosis-cll parse-cll -s my_model -s "+other_model, 2+third_model, +both_way
 
 Selector syntax follows dbt's graph operators on a named model: `model`, `+model` / `N+model` (upstream), `model+` / `model+N` (downstream), and combinations like `+model+`. Method selectors (`tag:`, `path:`, `@model`) are rejected with a clear error.
 
-Results land in `<project-dir>/target/cll-result.json` by default (override with `-o/--output`). The payload contains the resolved selector (`models`) and one row per `(model, column)` pair with the full `ColumnLineageResult` fields (`progenitor_model`, `progenitor_column`, `is_rename`, `is_computed`, `union_branches`, `progenitors`, …). Source tables appear as progenitors inside model rows — CLL rows themselves exist only for models, so `+model` stops naturally at the source layer.
+Results land in `<project-dir>/target/cll-result.json` by default (override with `-o/--output`). The payload contains the resolved selector (`models`), a `fingerprints` map of per-model source-SQL hashes, and one row per `(model, column)` pair with the full `ColumnLineageResult` fields (`progenitor_model`, `progenitor_column`, `is_rename`, `is_computed`, `transformation_type`, `sql_expression`, `union_branches`, `progenitors`, …). Source tables appear as progenitors inside model rows — CLL rows themselves exist only for models, so `+model` stops naturally at the source layer.
 
 Like `lineage explore`, the command is manifest-only: column lists come from the manifest, compiled SQL from inline `compiled_code` or `target/compiled/`. Run `dbt compile` first so lineage has SQL to trace.
 
-**Cold-start cost tracks the selector, not the repo.** Lineage parsing is lazy: only the models the selector resolves to are SQL-parsed (`yaml refactor`/`document` likewise parse only the models a run actually touches, plus their upstream walks). A first `parse-cll -s +one_model` on a large repo therefore takes seconds, not minutes. Whole-project consumers (`lineage explore`, unfiltered calls) still parse everything and log progress while doing so.
+**Cold-start cost tracks the selector, not the repo.** Lineage parsing is lazy: only the models the selector resolves to are SQL-parsed (`yaml refactor`/`document` likewise parse only the models a run actually touches, plus their upstream walks). A first `parse-cll -s +one_model` on a large repo therefore takes seconds, not minutes.
+
+### Serving the explorer from a precomputed CLL artifact
+
+By default `lineage explore` parses every model's compiled SQL before it starts serving — on a large repo that is the whole cold-start cost. When the work has already been done, point the explorer at the result instead:
+
+```bash
+# Explore exactly the slice you just analysed (selector-scoped)
+dbt-osmosis-cll parse-cll -s +my_model
+dbt-osmosis-cll lineage explore --from-cll target/cll-result.json
+
+# Explore the whole project using the cache an osmosis run left behind
+dbt-osmosis-cll yaml document          # writes target/cll_cache.json as a side effect
+dbt-osmosis-cll lineage explore --from-cll target/cll_cache.json
+
+# Let it pick: cll-result.json if present, otherwise cll_cache.json
+dbt-osmosis-cll lineage explore --from-cll
+```
+
+The format is detected from the payload, not the filename, so a relocated or renamed artifact works too.
+
+**The two artifacts differ in scope, and the explorer honours that difference.** A `cll-result.json` states which models its selector resolved to, so the explorer restricts its model tree and graphs to exactly those (plus the sources they terminate at) — the rest of the project is deliberately absent rather than silently empty. A `cll_cache.json` makes no scope claim, so the explorer shows the full project. The sidebar carries a badge naming the source and scope, so a scoped session is never mistaken for a whole-project one.
+
+**Nothing is served stale or half-complete.** Both artifacts record a per-model hash of the source `.sql` file. Models whose SQL changed since the artifact was written are dropped from the cached set, and any model the artifact never covered is parsed individually the first time you click it. A partial or slightly outdated cache therefore still yields a complete, current graph — it just costs a few per-model parses instead of a whole-project one.
+
+Caches written before schema version 5 lack the `sql_expression` field; they still load, but the impact panel shows no SQL expressions until the cache is rebuilt. The explorer warns on startup when it reads one.
 
 ### `.osmosis` — project config file
 

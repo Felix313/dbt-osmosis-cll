@@ -83,3 +83,103 @@ def test_lineage_service_runs_manifest_only(tmp_path):
     assert model.unique_id == "model.pkg.stg_orders"
     lineage = model.columns["order_id"].lineage
     assert lineage and lineage[0].source_columns == {"raw_orders.id"}
+
+
+# ---------------------------------------------------------------------------
+# --from-cll: serving lineage from a precomputed artifact
+# ---------------------------------------------------------------------------
+
+
+def _write_cll_artifact(target: Path) -> Path:
+    """A minimal parse-cll payload covering the fixture's single model."""
+    path = target / "cll-result.json"
+    path.write_text(
+        json.dumps({
+            "schema_version": 2,
+            "selectors": ["+stg_orders"],
+            "models": ["stg_orders"],
+            "fingerprints": {},
+            "results": [
+                {
+                    "model": "stg_orders",
+                    "column": "order_id",
+                    "transformation_type": "renamed",
+                    "sql_expression": None,
+                    "progenitor_model": "raw_orders",
+                    "progenitor_column": "id",
+                    "is_rename": True,
+                    "source_column": "id",
+                    "progenitors": [["raw_orders", "id"]],
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _explore_project(tmp_path) -> Path:
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = json.loads(_write_manifest(tmp_path).read_text(encoding="utf-8"))
+    (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return target
+
+
+def test_from_cll_appears_in_help():
+    result = CliRunner().invoke(cli, ["lineage", "explore", "--help"])
+    assert result.exit_code == 0
+    assert "--from-cll" in result.output
+
+
+@pytest.mark.skipif(not _HAS_LINEAGE_UI, reason="needs the lineage-ui extra")
+def test_from_cll_serves_without_parsing_sql(tmp_path, monkeypatch):
+    """The explorer starts from the artifact alone — no whole-project SQL parse."""
+    from dbt_osmosis_cll.cll_generator.artifacts import registry as registry_module
+    from dbt_osmosis_cll.cll_generator.lineage.display.html import explore as explore_module
+
+    target = _explore_project(tmp_path)
+    _write_cll_artifact(target)
+
+    served = {}
+    monkeypatch.setattr(
+        explore_module.LineageExplorer, "start", lambda self: served.update(self.__dict__)
+    )
+    parsed: list[str] = []
+    original = registry_module.ModelRegistry._parse_model_lineage
+    monkeypatch.setattr(
+        registry_module.ModelRegistry,
+        "_parse_model_lineage",
+        lambda self, model: (parsed.append(model.name), original(self, model))[1],
+    )
+
+    result = CliRunner().invoke(
+        cli, ["lineage", "explore", "--project-dir", str(tmp_path), "--from-cll"]
+    )
+    assert result.exit_code == 0, result.output
+    assert parsed == []
+    assert served["context"]["mode"] == "selector"
+    assert served["context"]["selectors"] == ["+stg_orders"]
+
+    service = served["lineage_service"]
+    lineage = service.registry.get_model("stg_orders").columns["order_id"].lineage
+    assert lineage and lineage[0].source_columns == {"raw_orders.id"}
+
+
+@pytest.mark.skipif(not _HAS_LINEAGE_UI, reason="needs the lineage-ui extra")
+def test_from_cll_without_artifact_exits_one(tmp_path):
+    _explore_project(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["lineage", "explore", "--project-dir", str(tmp_path), "--from-cll"]
+    )
+    assert result.exit_code == 1
+
+
+@pytest.mark.skipif(not _HAS_LINEAGE_UI, reason="needs the lineage-ui extra")
+def test_from_cll_with_unreadable_artifact_exits_one(tmp_path):
+    target = _explore_project(tmp_path)
+    (target / "cll-result.json").write_text("{not json", encoding="utf-8")
+    result = CliRunner().invoke(
+        cli, ["lineage", "explore", "--project-dir", str(tmp_path), "--from-cll"]
+    )
+    assert result.exit_code == 1

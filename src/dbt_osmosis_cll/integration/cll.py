@@ -31,7 +31,7 @@ if t.TYPE_CHECKING:
     from dbt.contracts.graph.nodes import ResultNode
     from dbt_osmosis_cll.osmosis_propagation.dbt_protocols import YamlRefactorContextProtocol
 
-_CACHE_SCHEMA_VERSION = 4
+_CACHE_SCHEMA_VERSION = 5
 
 # (project_dir, model_name) → List[result]  in-memory, process-scoped
 _LINEAGE_CACHE: dict[tuple[str, str], list[t.Any]] = {}
@@ -88,6 +88,13 @@ _RESULT_FIELDS = (
     # one-time rebuild that backfills it.
     "union_branches",
     "progenitors",
+    # schema_version 5: the lineage explorer can be fed straight from this cache
+    # (`lineage explore --from-cll`) instead of re-parsing every model's compiled
+    # SQL. Reconstructing a ColumnLineage needs the transformation kind stated
+    # once (rather than inferred from seven flags) and the raw expression, which
+    # the impact panel renders.
+    "transformation_type",
+    "sql_expression",
 )
 
 
