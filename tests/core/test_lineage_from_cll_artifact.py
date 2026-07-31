@@ -613,3 +613,109 @@ def test_restrict_to_keeps_lineage_within_scope_intact(tmp_path):
     # The scope stops at stg_orders, but its source is kept so the chain still
     # terminates at the raw table rather than dangling.
     assert "id" in info["upstream"]["raw_orders"]
+
+
+# ---------------------------------------------------------------------------
+# Aliased models: artifact rows are keyed by dbt name, the registry by relation
+# ---------------------------------------------------------------------------
+
+
+def _aliased_manifest(tmp_path: Path) -> Path:
+    """A model whose relation differs from its name, as `alias:` produces.
+
+    Real repos use this for prefix conventions (DP_FOO writing to FOO). The
+    artifact keys its rows by the dbt name while the registry keys models by the
+    relation, so hydration has to speak both.
+    """
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {
+            "model.pkg.dp_orders": {
+                "name": "dp_orders",
+                "alias": "orders",
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {},
+                "compiled_code": "select id as order_id from raw_orders",
+                "original_file_path": "models/dp_orders.sql",
+                "depends_on": {"nodes": []},
+            },
+        },
+        "sources": {},
+        "exposures": {},
+    }
+    target = tmp_path / "target"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return target / "manifest.json"
+
+
+def test_cached_lineage_applies_to_a_model_with_a_custom_alias(tmp_path):
+    manifest_path = _aliased_manifest(tmp_path)
+    artifact_path = _project_artifact(tmp_path / "cll_cache.json", manifest_path)
+    artifact = load_cll_artifact(artifact_path)
+    # The artifact names the model the way dbt does, not the way SQL does.
+    assert "dp_orders" in artifact.lineage
+
+    service = _service(manifest_path, lazy=True)
+    applied, unknown = service.registry.apply_cached_lineage(artifact.lineage)
+    assert unknown == []
+    assert applied == ["dp_orders"]
+
+    lineage = service.registry.get_model("orders").columns["order_id"].lineage
+    assert lineage and lineage[0].source_columns == {"raw_orders.id"}
+
+
+def test_selector_scope_keeps_a_model_with_a_custom_alias(tmp_path):
+    """Scope entries are dbt names too — failing to resolve them dropped the model."""
+    manifest_path = _aliased_manifest(tmp_path)
+    service = _service(manifest_path, lazy=True)
+    service.registry.restrict_to(["dp_orders"])
+
+    assert "orders" in service.registry.get_models()
+
+
+def test_relation_names_still_win_over_dbt_names(tmp_path):
+    """A model named after another model's relation must not hijack it."""
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {
+            "model.pkg.dp_orders": {
+                "name": "dp_orders",
+                "alias": "orders",
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {},
+                "compiled_code": "select 1 as x",
+                "depends_on": {"nodes": []},
+            },
+            "model.pkg.orders": {
+                "name": "orders",
+                "alias": "orders_physical",
+                "resource_type": "model",
+                "language": "sql",
+                "schema": "main",
+                "database": "db",
+                "columns": {},
+                "compiled_code": "select 2 as y",
+                "depends_on": {"nodes": []},
+            },
+        },
+        "sources": {},
+        "exposures": {},
+    }
+    target = tmp_path / "target"
+    target.mkdir(parents=True, exist_ok=True)
+    manifest_path = target / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    service = _service(manifest_path, lazy=True)
+    # "orders" is dp_orders' relation and also another model's name — the relation wins.
+    assert service.registry.resolve_by_any_name("orders").unique_id == "model.pkg.dp_orders"
+    # The other model stays reachable under its own relation and its dbt name is
+    # only consulted when nothing claims it as a relation.
+    assert service.registry.resolve_by_any_name("orders_physical").unique_id == "model.pkg.orders"

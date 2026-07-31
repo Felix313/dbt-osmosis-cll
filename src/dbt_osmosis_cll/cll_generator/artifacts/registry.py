@@ -211,6 +211,8 @@ class ModelRegistry:
         # Keeps cold-start cost proportional to the models actually requested.
         self._lazy_lineage: bool = lazy_lineage
         self._lineage_done: Set[str] = set()
+        # Lazily built dbt-model-name → unique_id map for resolve_by_any_name.
+        self._name_index: Optional[Dict[str, str]] = None
         self._parse_lock = threading.RLock()
         # Build combined placeholder regex from caller-supplied patterns.
         # No default — placeholder replacement is repo-specific and opt-in via .osmosis.
@@ -261,6 +263,34 @@ class ModelRegistry:
         if uid is not None:
             return self._state.models.get(uid)
         return self._state.models.get(name)
+
+    def resolve_by_any_name(self, key: str) -> Optional[Model]:
+        """Resolve a relation name, a unique_id, **or** a dbt model name.
+
+        :meth:`_resolve_model` deliberately speaks only the SQL-relation namespace,
+        because that is what names parsed out of compiled SQL live in. Callers holding
+        dbt *model* names — precomputed CLL artifacts key their rows by
+        ``ColumnLineageResult.model``, which is the model name — need this wider
+        lookup: the two namespaces diverge for every model with a custom ``alias``,
+        and silently resolving to nothing there drops that model's lineage.
+
+        The relation namespace still wins, so a model named after another model's
+        relation cannot hijack it. Where several models share a dbt name (the same
+        name in two packages), the first in manifest order answers; use the unique_id
+        to address those unambiguously.
+        """
+        model = self._resolve_model(key)
+        if model is not None:
+            return model
+        if self._name_index is None:
+            index: Dict[str, str] = {}
+            for uid, m in self._state.models.items():
+                dbt_name = (m.name or "").lower()
+                if dbt_name:
+                    index.setdefault(dbt_name, uid)
+            self._name_index = index
+        uid = self._name_index.get(key.lower())
+        return self._state.models.get(uid) if uid else None
 
     def get_ephemeral_lineage(self) -> Dict[str, Dict]:
         """Return collected ephemeral CTE lineage (only populated when stop_at_ephemeral=True).
@@ -704,7 +734,7 @@ class ModelRegistry:
         unknown: list[str] = []
         with self._parse_lock:
             for key, columns in lineage_by_model.items():
-                model = self._resolve_model(key)
+                model = self.resolve_by_any_name(key)
                 if model is None:
                     unknown.append(key)
                     continue
@@ -734,7 +764,7 @@ class ModelRegistry:
 
         keep_ids: Set[str] = set()
         for key in model_keys:
-            model = self._resolve_model(key)
+            model = self.resolve_by_any_name(key)
             if model is not None:
                 keep_ids.add(model.unique_id or self._lookup_name(model))
 
@@ -761,6 +791,7 @@ class ModelRegistry:
         self._state = RegistryState(
             models=models, exposures=exposures, is_loaded=True, name_alias=name_alias
         )
+        self._name_index = None
 
     def get_models(self) -> Dict[str, Model]:
         """Get all models keyed by SQL relation name (backwards-compatible view).
