@@ -470,10 +470,12 @@ class SQLColumnParser:
                 # ordered (name, source) pairs. Without the star expansion such
                 # models produced ZERO columns (real-repo corpus finding).
                 expanded_branches = [
-                    self._expand_branch_columns(bs, cte_sources, cte_to_model)
+                    self._expand_branch_columns(
+                        bs, cte_sources, cte_to_model, cte_source_sets, cte_union_branches
+                    )
                     for bs in branch_selects
                 ]
-                for col_idx, (col_name, _src) in enumerate(expanded_branches[0]):
+                for col_idx, (col_name, _, _) in enumerate(expanded_branches[0]):
                     if not col_name or col_name == "*":
                         continue
                     branches = [
@@ -481,9 +483,15 @@ class SQLColumnParser:
                         for branch in expanded_branches
                         if col_idx < len(branch) and branch[col_idx][1]
                     ]
+                    all_sources = {
+                        src
+                        for branch in expanded_branches
+                        if col_idx < len(branch)
+                        for src in branch[col_idx][2]
+                    }
                     columns[col_name] = [
                         ColumnLineage(
-                            source_columns=set(),
+                            source_columns=all_sources,
                             transformation_type="union",
                             union_branches=branches,
                         )
@@ -675,6 +683,7 @@ class SQLColumnParser:
                     cte_base_tables,
                     cte_union_branches,
                     cte_to_model,
+                    cte_source_sets,
                 )
                 continue
 
@@ -765,52 +774,81 @@ class SQLColumnParser:
         branch_select: Any,
         cte_sources: Dict[str, Dict[str, str]],
         cte_to_model: Optional[Dict[str, str]],
-    ) -> str:
-        """Best-effort: return a ``model.column`` qualifier for this branch's column.
+        cte_source_sets: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        cte_union_branches: Optional[Dict[str, Dict[str, List[str]]]] = None,
+    ) -> tuple[str, list[str]]:
+        """Best-effort ``(branch_qualifier, all_sources)`` for one column of a set-op branch.
 
-        Used for the per-branch source list attached to union CTEs. We don't run
-        the full ExpressionAnalyzer here because branches don't have all the
-        ParserContext plumbing built up yet at CTE-build time. A best-effort
-        resolution covers the common cases (passthrough/aliased ColumnRef from a
-        single FROM table); branches that can't be resolved get an empty string.
+        ``branch_qualifier`` is the single ``model.column`` this branch passes
+        through, or ``""`` when the branch value is computed or multi-source.
+        ``all_sources`` lists every ``model.column`` the branch value is built
+        from. We don't run the full ExpressionAnalyzer here because branches don't
+        have all the ParserContext plumbing built up yet at CTE-build time.
         """
         # Unwrap aliases — UNION arms are usually `SELECT col FROM t` or `SELECT col AS x FROM t`.
         inner = branch_expr.this if isinstance(branch_expr, exp.Alias) else branch_expr
-        if not isinstance(inner, exp.Column):
-            return ""
-        col_name = str(inner.name).lower()
-        # Find the FROM table for this branch.
-        from_clause = branch_select.find(exp.From)
-        if from_clause is None:
-            return ""
-        table_node = from_clause.find(exp.Table)
-        if table_node is None:
-            return ""
-        table_name = str(table_node.name).lower()
-        return self._qualify_branch_column(col_name, table_name, cte_sources, cte_to_model)
+        from_table = self._branch_from_table(branch_select)
+        if isinstance(inner, exp.Column):
+            if from_table is None:
+                return "", []
+            return self._branch_column_sources(
+                str(inner.name).lower(),
+                from_table,
+                cte_sources,
+                cte_to_model,
+                cte_source_sets,
+                cte_union_branches,
+            )
+        # Computed branch value (CASE, COALESCE, ...): no single qualifier, but every
+        # column it reads is an input of the union column.
+        aliases = get_scoped_table_aliases(branch_select)
+        sources: list[str] = []
+        for col in inner.find_all(exp.Column):
+            table = aliases.get(str(col.table), str(col.table)).lower() if col.table else from_table
+            if not table:
+                continue
+            _, col_sources = self._branch_column_sources(
+                str(col.name).lower(),
+                table,
+                cte_sources,
+                cte_to_model,
+                cte_source_sets,
+                cte_union_branches,
+            )
+            sources.extend(src for src in col_sources if src not in sources)
+        return "", sources
 
-    def _qualify_branch_column(
+    def _branch_column_sources(
         self,
         col_name: str,
         table_name: str,
         cte_sources: Dict[str, Dict[str, str]],
         cte_to_model: Optional[Dict[str, str]],
-    ) -> str:
-        """Resolve ``col_name`` coming FROM ``table_name`` to a ``model.column`` qualifier.
+        cte_source_sets: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        cte_union_branches: Optional[Dict[str, Dict[str, List[str]]]] = None,
+    ) -> tuple[str, list[str]]:
+        """Resolve ``col_name`` coming FROM ``table_name`` to ``(qualifier, all_sources)``.
 
-        If the FROM references another CTE, trace through to the underlying source
-        column the CTE recorded; otherwise qualify against the CTE-to-model
-        mapping or fall back to the literal table name. An empty source recorded
-        for the upstream column (literal/computed/union sentinel) is preserved as
-        ``table.column`` so the branch still names the producing node.
+        If the FROM references another CTE, trace through to the source the CTE
+        recorded. A multi-source or computed upstream column (the ``""``
+        sentinel) has no single qualifier: it contributes its recorded source set
+        (or its own union branches) instead of being pinned to the CTE's first
+        FROM table. Otherwise qualify against the CTE-to-model mapping or fall back
+        to the literal table name.
         """
         if table_name in cte_sources and col_name in cte_sources[table_name]:
             resolved = cte_sources[table_name][col_name]
             if resolved:
-                return resolved
+                return resolved, [resolved]
+            multi = (cte_source_sets or {}).get(table_name, {}).get(col_name) or (
+                cte_union_branches or {}
+            ).get(table_name, {}).get(col_name, [])
+            return "", [src for src in multi if src]
         if cte_to_model and table_name in cte_to_model:
-            return f"{cte_to_model[table_name]}.{col_name}"
-        return f"{table_name}.{col_name}"
+            qualifier = f"{cte_to_model[table_name]}.{col_name}"
+        else:
+            qualifier = f"{table_name}.{col_name}"
+        return qualifier, [qualifier]
 
     def _branch_from_table(self, branch_select: Any) -> Optional[str]:
         """Return the lowercased name of the single FROM table for a set-op branch."""
@@ -827,8 +865,10 @@ class SQLColumnParser:
         branch_select: Any,
         cte_sources: Dict[str, Dict[str, str]],
         cte_to_model: Optional[Dict[str, str]],
-    ) -> List[tuple[str, str]]:
-        """Return ordered ``(output_col_name, branch_source_qualifier)`` for a branch.
+        cte_source_sets: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        cte_union_branches: Optional[Dict[str, Dict[str, List[str]]]] = None,
+    ) -> list[tuple[str, str, list[str]]]:
+        """Return ordered ``(output_col_name, branch_qualifier, all_sources)`` for a branch.
 
         Expands ``SELECT *`` / ``SELECT t.*`` against the columns of the
         referenced upstream CTE so that set-op branches written as ``SELECT *
@@ -837,7 +877,7 @@ class SQLColumnParser:
         Branch CTEs are declared before the consuming set-op CTE, so their
         ``cte_sources`` entries are already populated at this point.
         """
-        result: List[tuple[str, str]] = []
+        result: list[tuple[str, str, list[str]]] = []
         from_table = self._branch_from_table(branch_select)
         for expr in branch_select.expressions:
             if self._star_handler.is_star_expression(expr):
@@ -847,8 +887,13 @@ class SQLColumnParser:
                     for up_col in cte_sources[from_table].keys():
                         result.append((
                             up_col.lower(),
-                            self._qualify_branch_column(
-                                up_col.lower(), from_table, cte_sources, cte_to_model
+                            *self._branch_column_sources(
+                                up_col.lower(),
+                                from_table,
+                                cte_sources,
+                                cte_to_model,
+                                cte_source_sets,
+                                cte_union_branches,
                             ),
                         ))
                 # A star on a non-CTE table can't be expanded to names here; skip.
@@ -856,8 +901,10 @@ class SQLColumnParser:
             col_name = strip_sql_comments(expr.alias_or_name).lower()
             if not col_name or col_name == "*":
                 continue
-            source = self._resolve_branch_source(expr, branch_select, cte_sources, cte_to_model)
-            result.append((col_name, source))
+            qualifier, sources = self._resolve_branch_source(
+                expr, branch_select, cte_sources, cte_to_model, cte_source_sets, cte_union_branches
+            )
+            result.append((col_name, qualifier, sources))
         return result
 
     def _process_union_cte(
@@ -870,6 +917,7 @@ class SQLColumnParser:
         cte_base_tables: Dict[str, Set[str]],
         cte_union_branches: Dict[str, Dict[str, List[str]]],
         cte_to_model: Optional[Dict[str, str]],
+        cte_source_sets: Optional[Dict[str, Dict[str, List[str]]]] = None,
     ) -> None:
         """Populate CTE state for a set-op CTE.
 
@@ -877,8 +925,12 @@ class SQLColumnParser:
         transformation_type="union" plus a per-branch source list keyed by the
         CTE's column name. Downstream lookups in get_cte_transformation_info /
         expand_from_cte then see the union flag and surface the branches via
-        ColumnLineage.union_branches.
+        ColumnLineage.union_branches. The full input set, including inputs of
+        computed / multi-source branches that have no single branch qualifier,
+        goes to cte_source_sets so it survives later CTE hops.
         """
+        if cte_source_sets is None:
+            cte_source_sets = {}
         branch_selects = [
             b for b in self._flatten_set_operation(union_body) if isinstance(b, exp.Select)
         ]
@@ -889,7 +941,10 @@ class SQLColumnParser:
         # UNION columns match by ordinal position; output names come from the
         # FIRST branch.
         expanded_branches = [
-            self._expand_branch_columns(bs, cte_sources, cte_to_model) for bs in branch_selects
+            self._expand_branch_columns(
+                bs, cte_sources, cte_to_model, cte_source_sets, cte_union_branches
+            )
+            for bs in branch_selects
         ]
 
         # Record each branch's underlying base table for star_sources tracking.
@@ -910,16 +965,20 @@ class SQLColumnParser:
                 cte_base_tables.setdefault(cte_name, set()).add(tbl_name)
 
         first_branch_cols = expanded_branches[0]
-        for col_idx, (col_name, _) in enumerate(first_branch_cols):
+        for col_idx, (col_name, _, _) in enumerate(first_branch_cols):
             if not col_name or col_name == "*":
                 continue
             branches: List[str] = []
+            all_sources: set[str] = set()
             for branch in expanded_branches:
                 if col_idx >= len(branch):
                     continue
-                source = branch[col_idx][1]
-                if source:
-                    branches.append(source)
+                _, qualifier, sources = branch[col_idx]
+                if qualifier:
+                    branches.append(qualifier)
+                all_sources.update(sources)
+            if all_sources:
+                cte_source_sets.setdefault(cte_name, {})[col_name] = sorted(all_sources)
             cte_sources[cte_name][col_name] = ""  # multi-source sentinel
             cte_transformation_types[cte_name][col_name] = "union"
             cte_sql_expressions[cte_name][col_name] = None
