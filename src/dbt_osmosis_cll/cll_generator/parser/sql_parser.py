@@ -972,6 +972,11 @@ class SQLColumnParser:
                     src_set = context.cte_source_sets.get(from_table, {}).get(src_col_name)
                     if src_set:
                         context.cte_source_sets.setdefault(cte_name, {})[src_col_name] = src_set
+                    src_branches = context.cte_union_branches.get(from_table, {}).get(src_col_name)
+                    if src_branches:
+                        context.cte_union_branches.setdefault(cte_name, {})[src_col_name] = list(
+                            src_branches
+                        )
                     if from_table in context.cte_transformation_types:
                         context.cte_transformation_types[cte_name][src_col_name] = (
                             context.cte_transformation_types[from_table].get(src_col_name, "direct")
@@ -1001,6 +1006,18 @@ class SQLColumnParser:
                 return val
         return None
 
+    @staticmethod
+    def _get_union_branches(table: str, col_name: str, context: ParserContext) -> list[str]:
+        """Case-insensitive lookup of the per-branch sources of a set-op CTE column."""
+        table_map = context.cte_union_branches.get(table)
+        if not table_map:
+            return []
+        col_lower = col_name.lower()
+        for key, val in table_map.items():
+            if key.lower() == col_lower:
+                return [b for b in val if b]
+        return []
+
     def _store_column_lineage_in_cte(
         self,
         cte_name: str,
@@ -1029,6 +1046,13 @@ class SQLColumnParser:
             context.cte_sources[cte_name][col_name] = ""
         context.cte_transformation_types[cte_name][col_name] = lineage.transformation_type
         context.cte_sql_expressions[cte_name][col_name] = lineage.sql_expression
+        # A column read from a set-op CTE resolves to the "" sentinel plus per-branch
+        # sources. Record the branches under this CTE too, otherwise the next hop only
+        # sees the sentinel and the union lineage is gone.
+        if lineage.transformation_type == "union" and lineage.union_branches:
+            context.cte_union_branches.setdefault(cte_name, {})[col_name] = list(
+                lineage.union_branches
+            )
 
     def _resolve_column_source(
         self,
@@ -1263,6 +1287,10 @@ class SQLColumnParser:
                 source_set = self._get_source_set(table, col_name, context)
                 if source_set:
                     columns.update(source_set)
+                    continue
+                branches = self._get_union_branches(table, col_name, context)
+                if branches:
+                    columns.update(branches)
                     continue
             columns.add(resolved)
         return columns
