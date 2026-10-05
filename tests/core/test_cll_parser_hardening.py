@@ -217,3 +217,110 @@ class TestSchemaAwareResolution:
         parser = SQLColumnParser(table_columns=self.TABLE_COLUMNS)
         result = parser.parse_column_lineage(sql)
         assert _lineage(result, "amount").source_columns == {"customers.amount"}
+
+
+# ---------------------------------------------------------------------------
+# 4. Union branches survive CTE hops
+# ---------------------------------------------------------------------------
+
+
+class TestUnionBranchesThroughCteHops:
+    """A set-op CTE consumed by a LATER CTE must keep its per-branch sources.
+
+    Real-repo pattern (dbt models with `u AS (... UNION ALL ...)` followed by
+    ranking / dedup CTEs): the branches were only reachable when the final
+    SELECT read the set-op CTE directly. One CTE hop later every column came out
+    as `union` / `aggregate` with no sources and no branches.
+    """
+
+    UNION_CTE = "u AS (SELECT a.id, a.v FROM tbl_a a UNION ALL SELECT b.id, b.v FROM tbl_b b)"
+
+    def test_passthrough_hop_keeps_branches(self):
+        sql = f"WITH {self.UNION_CTE}, r AS (SELECT u.id, u.v FROM u) SELECT r.id, r.v FROM r"
+        result = SQLColumnParser().parse_column_lineage(sql)
+        lin = _lineage(result, "id")
+        assert lin.transformation_type == "union"
+        assert lin.union_branches == ["tbl_a.id", "tbl_b.id"]
+
+    def test_aliased_passthrough_hop_keeps_branches(self):
+        sql = f"WITH {self.UNION_CTE}, r AS (SELECT u.id AS the_id FROM u) SELECT the_id FROM r"
+        result = SQLColumnParser().parse_column_lineage(sql)
+        assert _lineage(result, "the_id").union_branches == ["tbl_a.id", "tbl_b.id"]
+
+    def test_star_hop_keeps_branches(self):
+        sql = f"WITH {self.UNION_CTE}, r AS (SELECT * FROM u) SELECT r.id FROM r"
+        result = SQLColumnParser().parse_column_lineage(sql)
+        assert _lineage(result, "id").union_branches == ["tbl_a.id", "tbl_b.id"]
+
+    def test_star_exclude_hop_keeps_branches(self):
+        sql = f"WITH {self.UNION_CTE}, r AS (SELECT * EXCLUDE (v) FROM u) SELECT * FROM r"
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert _lineage(result, "id").union_branches == ["tbl_a.id", "tbl_b.id"]
+        assert "v" not in result.column_lineage
+
+    def test_aggregate_over_union_column_gets_all_branch_sources(self):
+        sql = (
+            f"WITH {self.UNION_CTE}, r AS (SELECT u.id, MAX(u.v) AS v FROM u GROUP BY u.id) "
+            "SELECT r.id, r.v FROM r"
+        )
+        result = SQLColumnParser().parse_column_lineage(sql)
+        lin = _lineage(result, "v")
+        assert lin.transformation_type == "aggregate"
+        assert lin.source_columns == {"tbl_a.v", "tbl_b.v"}
+
+    def test_two_hops_keep_branches(self):
+        sql = (
+            f"WITH {self.UNION_CTE}, r AS (SELECT u.id FROM u), s AS (SELECT r.id FROM r) "
+            "SELECT s.id FROM s"
+        )
+        result = SQLColumnParser().parse_column_lineage(sql)
+        assert _lineage(result, "id").union_branches == ["tbl_a.id", "tbl_b.id"]
+
+
+class TestUnionBranchInputs:
+    """A union branch that is computed, or reads a multi-source CTE column, has no
+    single qualifier. It must not be pinned to the upstream CTE's first FROM table
+    (old behaviour: `tbl_a.m` for `COALESCE(a.x, b.y) AS m`); its real inputs go to
+    source_columns instead, and survive further CTE hops.
+    """
+
+    BASE = "base AS (SELECT a.k, COALESCE(a.x, b.y) AS m FROM tbl_a a JOIN tbl_b b ON a.k = b.k)"
+
+    def test_branch_over_multi_source_cte_column_is_not_misattributed(self):
+        sql = (
+            f"WITH {self.BASE}, "
+            "u AS (SELECT k, m FROM base UNION ALL SELECT k, m FROM base WHERE k > 0) "
+            "SELECT u.m FROM u"
+        )
+        lin = _lineage(SQLColumnParser().parse_column_lineage(sql), "m")
+        assert lin.transformation_type == "union"
+        assert "tbl_a.m" not in lin.union_branches
+        assert lin.source_columns == {"tbl_a.x", "tbl_b.y"}
+
+    def test_computed_branch_contributes_its_inputs(self):
+        sql = (
+            "WITH u AS ("
+            "  SELECT CASE WHEN a.f = '1' THEN a.x END AS v FROM tbl_a a "
+            "  UNION ALL SELECT b.v FROM tbl_b b"
+            ") SELECT v FROM u"
+        )
+        lin = _lineage(SQLColumnParser().parse_column_lineage(sql), "v")
+        assert lin.union_branches == ["tbl_b.v"]
+        assert lin.source_columns == {"tbl_a.f", "tbl_a.x", "tbl_b.v"}
+
+    def test_top_level_union_computed_branch_contributes_its_inputs(self):
+        sql = "SELECT a.x + a.z AS v FROM tbl_a a UNION ALL SELECT b.v FROM tbl_b b"
+        lin = _lineage(SQLColumnParser().parse_column_lineage(sql), "v")
+        assert lin.union_branches == ["tbl_b.v"]
+        assert lin.source_columns == {"tbl_a.x", "tbl_a.z", "tbl_b.v"}
+
+    def test_inputs_survive_window_and_case_hops(self):
+        sql = (
+            f"WITH {self.BASE}, "
+            "u AS (SELECT k, m FROM base UNION ALL SELECT k, m FROM base WHERE k > 0), "
+            "ranked AS (SELECT *, MAX(CASE WHEN m = 'VIP' THEN 3 END) "
+            "OVER (PARTITION BY k) AS rnk FROM u) "
+            "SELECT CASE WHEN rnk = 3 THEN 'VIP' ELSE m END AS d FROM ranked"
+        )
+        lin = _lineage(SQLColumnParser().parse_column_lineage(sql), "d")
+        assert {"tbl_a.x", "tbl_b.y"} <= lin.source_columns
