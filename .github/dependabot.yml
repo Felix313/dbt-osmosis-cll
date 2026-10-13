@@ -5,7 +5,8 @@
 
 version: 2
 updates:
-  - package-ecosystem: "pip" # See documentation for possible values
+  # "uv" (not "pip") so update PRs bump pyproject.toml AND relock uv.lock.
+  - package-ecosystem: "uv" # See documentation for possible values
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
