@@ -474,7 +474,7 @@ requires-dist = [
     { name = "dbt-duckdb", marker = "extra == 'lineage-ui'", specifier = ">=1,<2" },
     { name = "dbt-sqlite", marker = "extra == 'lineage-ui'", specifier = ">=1.6.0" },
     { name = "duckdb", marker = "extra == 'lineage-ui'", specifier = ">=1.2.1,<2.0.0" },
-    { name = "fastapi", marker = "extra == 'lineage-ui'", specifier = ">=0.115.12,<0.116.0" },
+    { name = "fastapi", marker = "extra == 'lineage-ui'", specifier = ">=0.115.12,<0.143.0" },
     { name = "graphviz", marker = "extra == 'lineage-ui'", specifier = ">=0.20.3,<0.22.0" },
     { name = "hypothesis", marker = "extra == 'dev'" },
     { name = "mutmut", marker = "extra == 'dev'" },
@@ -487,9 +487,9 @@ requires-dist = [
     { name = "rapidfuzz", specifier = ">=3.0.0" },
     { name = "rich", specifier = ">=10" },
     { name = "ruamel-yaml", specifier = ">=0.17,<0.20" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.4,<0.16.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.4,<0.17.0" },
     { name = "sqlglot", specifier = ">=26.8.0,<31.0.0" },
-    { name = "uvicorn", marker = "extra == 'lineage-ui'", specifier = ">=0.34.0,<0.35.0" },
+    { name = "uvicorn", marker = "extra == 'lineage-ui'", specifier = ">=0.34.0,<0.55.0" },
 ]
 provides-extras = ["lineage-ui", "dev"]
 
