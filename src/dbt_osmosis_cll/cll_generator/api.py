@@ -153,7 +153,8 @@ class ColumnLineageResult:
     - single-source columns: ``[(progenitor_model, progenitor_column)]``
     - multi-source computed columns (``COALESCE(a.x, b.y)``, arithmetic over two
       tables, …): one pair per contributing source column, sorted by source string
-    - union columns: identical to ``union_branches`` (declaration order)
+    - union columns: ``union_branches`` (declaration order), followed by the inputs
+      of computed / multi-source branches that have no single branch qualifier
 
     Lets consumers state what feeds a computed endpoint column ("Computed here from
     A.X, B.Y") instead of a bare "no single progenitor". Additive — older cached
@@ -335,20 +336,20 @@ def get_column_lineage(
             # union_branches). Unions reuse their branch pairs; everything else
             # derives from the full source-column set (preserved through CTE
             # hops by the parser).
-            if is_union:
-                progenitors: List[Tuple[str, str]] = list(union_branches)
-            else:
-                progenitors = []
-                for src in sorted(lin.source_columns):
-                    if src and "." in src:
-                        m, c = src.rsplit(".", 1)
-                        m = m.lower()
-                        # Same ephemeral-prefix strip as _resolve_progenitor.
-                        if m.startswith("__dbt__cte__"):
-                            m = m[len("__dbt__cte__") :]
-                        # Drop phantom nodes from Jinja context leakage.
-                        if m in _JINJA_RESERVED:
-                            continue
+            progenitors: List[Tuple[str, str]] = list(union_branches) if is_union else []
+            # Unions add the inputs that no single branch qualifier covers (computed
+            # or multi-source branches); everything else is the source-column set.
+            for src in sorted(lin.source_columns):
+                if src and "." in src:
+                    m, c = src.rsplit(".", 1)
+                    m = m.lower()
+                    # Same ephemeral-prefix strip as _resolve_progenitor.
+                    if m.startswith("__dbt__cte__"):
+                        m = m[len("__dbt__cte__") :]
+                    # Drop phantom nodes from Jinja context leakage.
+                    if m in _JINJA_RESERVED:
+                        continue
+                    if (m, c.lower()) not in progenitors:
                         progenitors.append((m, c.lower()))
             # first-in-chain: only for pure passthroughs (direct/renamed) that reach a terminal node
             is_passthrough = ttype in ("direct", "renamed")
