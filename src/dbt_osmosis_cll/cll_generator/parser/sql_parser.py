@@ -107,8 +107,9 @@ class StarExpressionHandler:
 
     def get_excluded_columns(self, star_expr: exp.Star) -> List[str]:
         excluded = []
-        if hasattr(star_expr, "args") and "except" in star_expr.args:
-            except_clause = star_expr.args["except"]
+        if hasattr(star_expr, "args"):
+            # sqlglot >= 30 renamed the Star arg "except" to "except_".
+            except_clause = star_expr.args.get("except_") or star_expr.args.get("except")
             if except_clause:
                 for col_expr in except_clause:
                     if isinstance(col_expr, exp.Column):
