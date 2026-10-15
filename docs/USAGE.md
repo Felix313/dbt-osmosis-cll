@@ -191,6 +191,27 @@ Like `lineage explore`, the command is manifest-only: column lists come from the
 
 **Cold-start cost tracks the selector, not the repo.** Lineage parsing is lazy: only the models the selector resolves to are SQL-parsed (`yaml refactor`/`document` likewise parse only the models a run actually touches, plus their upstream walks). A first `parse-cll -s +one_model` on a large repo therefore takes seconds, not minutes.
 
+#### Join / filter / qualify columns (`usages`)
+
+Projected lineage alone misses every column a model *needs* without outputting it. Since schema version 3, `cll-result.json` carries a separate `usages` list — never merged into `results`, because whether a column that only filters is still needed after a migration is a business decision the tool cannot make. One row per (model, usage, source column, scope, predicate):
+
+| `usage` | Where the column appears |
+| --- | --- |
+| `join_key` | `JOIN … ON` conjunct relating two relations (`a.k = b.k`, range joins, `x BETWEEN b.from AND b.to`) — both sides are reported |
+| `join_filter` | `JOIN … ON` conjunct constraining one side only (`AND b.flg = 'Y'`) |
+| `filter` | `WHERE`, including the projection of a filtering subquery (`x IN (SELECT y …)`) |
+| `qualify` | `QUALIFY`, window specification included (`detail`: `partition_by` / `order_by` / `predicate`) |
+| `window` | `PARTITION BY` / `ORDER BY` of a window function in a projection |
+| `group_by` | `GROUP BY` keys; `GROUP BY ALL` expands to the non-aggregate projections, ordinals map to projections |
+| `having` | `HAVING` |
+| `compile_time` | read by a compile-time Jinja query such as `get_column_values(ref('cfg'), column='flag', order_by='MAX(ts) DESC')` — the column decides which SQL is generated without appearing in the compiled SQL; `dbt_vars` names the result variable, `controls_branch` says whether it drives an `{% if %}` |
+
+Each row names the model whose SQL reads the column, the `source_model` / `source_column` it resolves to **through every CTE of that model** (a `QUALIFY` on a column a CTE never projects still lands on the base relation), the `scope` (CTE name, `<final>`, `…/subquery`, `<jinja>`), the normalized `predicate_sql`, and `resolution` — `qualified`, `single_table`, `unqualified_resolved` (unqualified reference matched through the parent models' column lists; parents without YAML columns are parsed on demand), `select_alias`, or `ambiguous` (one row per candidate instead of silently picking the first `FROM` table). `origins` / `via_models` follow the used column upstream through the projected lineage to sources, seeds, or models without compiled SQL (`--no-usage-origins` skips that walk). `is_self_reference` marks incremental `{{ this }}` joins. Predicates whose literals match a string `var` from `dbt_project.yml` list the var in `dbt_vars`.
+
+Rows are sorted and de-duplicated; two runs over the same artifacts write byte-identical files. The same data is available programmatically via `dbt_osmosis_cll.cll_generator.api.get_column_usage()`.
+
+`parse-cll` reads `compiled-sql-placeholder-patterns` from the project's `.osmosis-cll`, so custom-materialization tokens are neutralized exactly as in osmosis' own CLL runs. Models that choose their SQL body from a compile-time query must be compiled with the intended branch pinned (for example by overriding the dispatched `get_column_values` in the root project and passing the value via `--vars`), otherwise `target/compiled/` holds the fallback branch.
+
 ### Serving the explorer from a precomputed CLL artifact
 
 By default `lineage explore` parses every model's compiled SQL before it starts serving — on a large repo that is the whole cold-start cost. When the work has already been done, point the explorer at the result instead:

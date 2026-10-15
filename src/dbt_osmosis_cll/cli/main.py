@@ -1140,12 +1140,19 @@ def explore(
     "(i.e. <project-dir>/target/cll-result.json). Deliberately separate from "
     "osmosis' cll_cache.json, which is never touched.",
 )
+@click.option(
+    "--usage-origins/--no-usage-origins",
+    default=True,
+    help="Trace every join/filter/qualify/window/group-by column upstream to its "
+    "origin models (parses upstream models with compiled SQL along that path).",
+)
 def parse_cll(
     select: tuple[str, ...],
     project_dir: str,
     manifest: str | None = None,
     dialect: str | None = None,
     output: str | None = None,
+    usage_origins: bool = True,
 ) -> None:
     """Build column-level lineage for a dbt selector and write it to a JSON file.
 
@@ -1187,6 +1194,13 @@ def parse_cll(
         "Selector resolved to %d model(s): %s", len(selected_models), ", ".join(selected_models)
     )
 
+    from dbt_osmosis_cll.cll_generator.api import get_column_usage
+    from dbt_osmosis_cll.config import get_config
+
+    # Placeholder patterns (custom-materialization tokens) come from the project's
+    # .osmosis-cll, exactly as for osmosis' own CLL runs.
+    placeholder_patterns = get_config(Path(project_dir)).compiled_sql_placeholder_patterns or None
+
     reader = ManifestCatalogReader(manifest_path=str(manifest_path))
     reader.load()
     results = get_column_lineage(
@@ -1195,6 +1209,17 @@ def parse_cll(
         compiled_sql_source="target_dir",
         dialect=dialect,
         _catalog_reader_override=reader,
+        placeholder_patterns=placeholder_patterns,
+    )
+    usages = get_column_usage(
+        manifest_path=str(manifest_path),
+        models=selected_models,
+        compiled_sql_source="target_dir",
+        dialect=dialect,
+        trace_origins=usage_origins,
+        var_values=_project_vars(Path(project_dir)),
+        _catalog_reader_override=reader,
+        placeholder_patterns=placeholder_patterns,
     )
 
     models_with_rows = {r.model.lower() for r in results}
@@ -1221,22 +1246,50 @@ def parse_cll(
 
     output_path = Path(output) if output else manifest_path.parent / "cll-result.json"
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "selectors": list(select),
         "models": selected_models,
         "fingerprints": fingerprints,
         "results": [dataclasses.asdict(r) for r in results],
+        # Join / filter / qualify / window / group-by / compile-time column usage,
+        # kept apart from the projected lineage in "results" (schema_version 3).
+        "usages": [dataclasses.asdict(u) for u in usages],
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json_handler.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     logger.info(
-        ":white_check_mark: Wrote %d lineage row(s) for %d model(s) to %s",
+        ":white_check_mark: Wrote %d lineage row(s) and %d usage row(s) for %d model(s) to %s",
         len(results),
+        len(usages),
         len(models_with_rows),
         output_path,
     )
+
+
+def _project_vars(project_dir: Path) -> dict:
+    """Top-level ``vars`` of dbt_project.yml with literal string / list values.
+
+    Jinja-valued vars (``{{ ... }}``) render per run and cannot be matched; they are
+    skipped. Used only to tag predicates built from ``var()``.
+    """
+    from ruamel.yaml import YAML
+
+    path = project_dir / "dbt_project.yml"
+    if not path.exists():
+        return {}
+    try:
+        data = YAML(typ="safe").load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 — tagging is best effort
+        return {}
+    out = {}
+    for key, value in (data.get("vars") or {}).items():
+        if isinstance(value, str) and "{{" not in value:
+            out[str(key)] = value
+        elif isinstance(value, list) and all(isinstance(v, str) for v in value):
+            out[str(key)] = list(value)
+    return out
 
 
 @diff.command(context_settings=_CONTEXT)

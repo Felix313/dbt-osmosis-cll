@@ -14,7 +14,9 @@ class ManifestReader:
     def load(self) -> None:
         if not self.manifest_path or not self.manifest_path.exists():
             raise FileNotFoundError(f"Manifest file not found: {self.manifest_path}")
-        with open(self.manifest_path, "r") as f:
+        # dbt writes UTF-8; the platform default (cp1252 on Windows) breaks on raw_code
+        # with non-ASCII characters such as names in change-history comments.
+        with open(self.manifest_path, "r", encoding="utf-8") as f:
             self.manifest = json.load(f)
         self._node_index = self._build_node_index()
 
@@ -145,6 +147,13 @@ class ManifestReader:
         if not node:
             return None
         return node.get("compiled_sql") or node.get("compiled_code") or None
+
+    def get_raw_sql(self, model_name: str, unique_id: Optional[str] = None) -> Optional[str]:
+        """Return the node's uncompiled (Jinja) code, or None."""
+        node = (self.get_node(unique_id) if unique_id else None) or self._find_node(model_name)
+        if not node:
+            return None
+        return node.get("raw_code") or node.get("raw_sql") or None
 
     def get_compiled_sql_from_disk(
         self, model_name: str, unique_id: Optional[str] = None
