@@ -174,6 +174,7 @@ def get_column_lineage(
     include_ephemeral: bool = False,
     _catalog_reader_override: Optional[object] = None,
     placeholder_patterns: Optional[List[str]] = None,
+    compile_time_macros: Optional[List[str]] = None,
 ) -> List[ColumnLineageResult]:
     """Resolve column-level lineage for dbt models.
 
@@ -259,6 +260,7 @@ def get_column_lineage(
         stop_at_ephemeral=include_ephemeral,
         placeholder_patterns=placeholder_patterns,
         catalog_reader_override=_catalog_reader_override,
+        compile_time_macros=compile_time_macros,
     )
 
     all_nodes = registry.get_models_by_id()
@@ -500,6 +502,7 @@ def get_column_usage(
     var_values: Optional[dict] = None,
     _catalog_reader_override: Optional[object] = None,
     placeholder_patterns: Optional[List[str]] = None,
+    compile_time_macros: Optional[List[str]] = None,
 ) -> List[ColumnUsageResult]:
     """Resolve the join / filter / qualify / window / group-by usage of upstream columns.
 
@@ -537,6 +540,7 @@ def get_column_usage(
         stop_at_ephemeral=False,
         placeholder_patterns=placeholder_patterns,
         catalog_reader_override=_catalog_reader_override,
+        compile_time_macros=compile_time_macros,
     )
 
     from dbt_osmosis_cll.cll_generator.parser.jinja_usage import (
@@ -625,6 +629,62 @@ def get_column_usage(
     return results
 
 
+def get_lineage_coverage(
+    manifest_path: str,
+    models: List[str],
+    dialect: Optional[str] = None,
+    compiled_sql_source: Literal["manifest", "target_dir", "auto_compile"] = "target_dir",
+    _catalog_reader_override: Optional[object] = None,
+    placeholder_patterns: Optional[List[str]] = None,
+    compile_time_macros: Optional[List[str]] = None,
+) -> dict:
+    """Where lineage for *models* is blind for lack of column lists.
+
+    Returns ``relations_without_columns`` — direct parents of *models* (models,
+    sources, seeds) with no known column after parsing — and ``star_over_unknown`` —
+    ``(model, relation)`` pairs where a ``SELECT *`` reads such a relation, so its
+    columns could not be expanded. Uses the cached registry of the lineage calls.
+    """
+    registry, _ = _load_registry_cached(
+        manifest_path=manifest_path,
+        catalog_path=None,
+        live_db=False,
+        project_dir=None,
+        profiles_dir=None,
+        target=None,
+        dialect=dialect,
+        use_target_dir=compiled_sql_source in ("target_dir", "auto_compile"),
+        stop_at_ephemeral=False,
+        placeholder_patterns=placeholder_patterns,
+        catalog_reader_override=_catalog_reader_override,
+        compile_time_macros=compile_time_macros,
+    )
+    wanted = {m.lower() for m in models}
+    by_id = registry.get_models_by_id()
+    selected = [
+        m for m in by_id.values() if m.resource_type == "model" and m.name.lower() in wanted
+    ]
+    blind: set = set()
+    star_blind: set = set()
+    for model in selected:
+        registry.ensure_lineage(model)
+        for parent_name in sorted(model.upstream):
+            parent = registry.resolve_by_any_name(parent_name)
+            if parent is not None and not parent.columns and parent.resource_type == "model":
+                # A parent model without YAML columns may still have SQL-derived ones.
+                registry.ensure_lineage(parent)
+            if parent is not None and not parent.columns:
+                blind.add(parent.name.lower())
+        for star in (model.metadata or {}).get("star_sources", []):
+            src = registry.resolve_by_any_name(str(star))
+            if src is None or not src.columns:
+                star_blind.add((model.name.lower(), (src.name if src else str(star)).lower()))
+    return {
+        "relations_without_columns": sorted(blind),
+        "star_over_unknown": [list(p) for p in sorted(star_blind)],
+    }
+
+
 class _OriginTracer:
     """Follow a (model, column) upstream through projected lineage to its origins."""
 
@@ -697,6 +757,7 @@ def _load_registry_cached(
     stop_at_ephemeral: bool,
     placeholder_patterns: Optional[List[str]],
     catalog_reader_override: Optional[object],
+    compile_time_macros: Optional[List[str]] = None,
 ):
     """Return a loaded (registry, terminal_node_names), using the process cache.
 
@@ -719,6 +780,7 @@ def _load_registry_cached(
         stop_at_ephemeral,
         tuple(placeholder_patterns) if placeholder_patterns else None,
         catalog_disc,
+        tuple(compile_time_macros) if compile_time_macros else None,
     )
     cached = _REGISTRY_CACHE.get(cache_key)
     if cached is not None:
@@ -747,6 +809,7 @@ def _load_registry_cached(
         # lineage per requested model, so cold-start cost tracks the request size
         # (per-node osmosis calls, selector-scoped parse-cll) instead of repo size.
         lazy_lineage=True,
+        compile_time_macros=compile_time_macros,
     )
     registry.load()
 

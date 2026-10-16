@@ -1146,6 +1146,28 @@ def explore(
     help="Trace every join/filter/qualify/window/group-by column upstream to its "
     "origin models (parses upstream models with compiled SQL along that path).",
 )
+@click.option(
+    "--column-sources",
+    default=None,
+    help="Comma-separated column-list sources in priority order: manifest, catalog, live. "
+    "Relations without YAML columns are filled from catalog.json, then (live) from the "
+    "warehouse. Default: cll-column-sources in .osmosis-cll, else 'manifest'.",
+)
+@click.option(
+    "--catalog",
+    "catalog_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="catalog.json for the 'catalog' column source. Default: cll-catalog-path "
+    "in .osmosis-cll (target/catalog.json).",
+)
+@click.option(
+    "--profiles-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="profiles.yml directory for the 'live' column source.",
+)
+@click.option("--target", default=None, help="dbt target for the 'live' column source.")
 def parse_cll(
     select: tuple[str, ...],
     project_dir: str,
@@ -1153,6 +1175,10 @@ def parse_cll(
     dialect: str | None = None,
     output: str | None = None,
     usage_origins: bool = True,
+    column_sources: str | None = None,
+    catalog_path: str | None = None,
+    profiles_dir: str | None = None,
+    target: str | None = None,
 ) -> None:
     """Build column-level lineage for a dbt selector and write it to a JSON file.
 
@@ -1161,16 +1187,16 @@ def parse_cll(
     ``cll-result.json`` in the target folder.
 
     \f
-    Manifest-only like ``lineage explore``: column lists come from the manifest
-    (``ManifestCatalogReader``), compiled SQL from inline ``compiled_code`` or
-    ``target/compiled/`` — no ``catalog.json`` and no warehouse connection.
-    Run ``dbt compile`` first so lineage has SQL to trace.
+    Column lists come from the manifest by default; ``--column-sources`` adds
+    ``catalog.json`` and (opt-in) the warehouse for relations without documented
+    columns. Compiled SQL comes from inline ``compiled_code`` or ``target/compiled/`` —
+    run ``dbt compile`` (or ``compile-cll`` for models that need compile-time
+    introspection) first so lineage has SQL to trace.
     """
     import dataclasses
     import json as json_handler
 
     from dbt_osmosis_cll.cll_generator.api import get_column_lineage
-    from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
     from dbt_osmosis_cll.cll_generator.selector import parse_selectors, resolve_selected_models
 
     manifest_path = Path(manifest) if manifest else Path(project_dir) / "target" / "manifest.json"
@@ -1194,33 +1220,81 @@ def parse_cll(
         "Selector resolved to %d model(s): %s", len(selected_models), ", ".join(selected_models)
     )
 
-    from dbt_osmosis_cll.cll_generator.api import get_column_usage
+    from dbt_osmosis_cll.cll_generator.api import get_column_usage, get_lineage_coverage
+    from dbt_osmosis_cll.cll_generator.artifacts.layered_catalog import LayeredCatalogReader
+    from dbt_osmosis_cll.cll_generator.offline_compile import load_sidecar
     from dbt_osmosis_cll.config import get_config
 
-    # Placeholder patterns (custom-materialization tokens) come from the project's
-    # .osmosis-cll, exactly as for osmosis' own CLL runs.
-    placeholder_patterns = get_config(Path(project_dir)).compiled_sql_placeholder_patterns or None
+    # Project-specific behaviour comes from the project's .osmosis-cll only:
+    # placeholder tokens, compile-time query macros, column sources.
+    cfg = get_config(Path(project_dir))
+    placeholder_patterns = cfg.compiled_sql_placeholder_patterns or None
+    compile_time_macros = cfg.compile_time_query_macros or None
+    sources = (
+        [s.strip().lower() for s in column_sources.split(",") if s.strip()]
+        if column_sources
+        else cfg.cll_column_sources
+    )
+    catalog_file = Path(catalog_path) if catalog_path else Path(project_dir) / cfg.cll_catalog_path
 
-    reader = ManifestCatalogReader(manifest_path=str(manifest_path))
+    # Live lookups are limited to what the selection reads: its models and their parents.
+    needed = {uid.lower() for uid in _selection_and_parents(manifest_data, selected_models)}
+    try:
+        reader = LayeredCatalogReader(
+            manifest_path=str(manifest_path),
+            sources=sources,
+            catalog_path=str(catalog_file),
+            project_dir=project_dir,
+            profiles_dir=profiles_dir,
+            target=target,
+            live_relations=needed,
+        )
+    except ValueError as exc:
+        logger.error(":x: %s", exc)
+        sys.exit(1)
     reader.load()
-    results = get_column_lineage(
+    common = dict(
         manifest_path=str(manifest_path),
         models=selected_models,
         compiled_sql_source="target_dir",
         dialect=dialect,
         _catalog_reader_override=reader,
         placeholder_patterns=placeholder_patterns,
+        compile_time_macros=compile_time_macros,
     )
+    results = get_column_lineage(**common)
     usages = get_column_usage(
-        manifest_path=str(manifest_path),
-        models=selected_models,
-        compiled_sql_source="target_dir",
-        dialect=dialect,
-        trace_origins=usage_origins,
-        var_values=_project_vars(Path(project_dir)),
-        _catalog_reader_override=reader,
-        placeholder_patterns=placeholder_patterns,
+        **common, trace_origins=usage_origins, var_values=_project_vars(Path(project_dir))
     )
+    coverage = get_lineage_coverage(**common)
+    coverage["ambiguous_usages"] = sum(1 for u in usages if u.resolution == "ambiguous")
+    coverage["unresolved_usages"] = sum(1 for u in usages if u.resolution == "unresolved")
+    origin_counts: dict[str, int] = {}
+    origin_by_uid = {uid.lower(): src for uid, src in reader.column_origin.items()}
+    for uid in needed:
+        if uid.split(".")[0] not in ("model", "source", "seed", "snapshot"):
+            continue
+        origin = origin_by_uid.get(uid, "not_in_manifest") or "none"
+        origin_counts[origin] = origin_counts.get(origin, 0) + 1
+    coverage["column_sources"] = dict(sorted(origin_counts.items()))
+    _warn_coverage(coverage)
+
+    # Assumptions of an offline compile (compile-cll) that produced the SQL.
+    sidecar = load_sidecar(manifest_path.parent)
+    compile_info = None
+    if sidecar:
+        selected_lower = {m.lower() for m in selected_models}
+        compile_info = {
+            m: info for m, info in (sidecar.get("models") or {}).items() if m in selected_lower
+        }
+        uncovered = sorted(selected_lower - set(sidecar.get("compiled_models") or []))
+        if uncovered:
+            logger.warning(
+                ":warning: %d selected model(s) were not part of the last compile-cll run "
+                "(their SQL may come from another compile): %s",
+                len(uncovered),
+                ", ".join(uncovered),
+            )
 
     models_with_rows = {r.model.lower() for r in results}
     missing = [m for m in selected_models if m.lower() not in models_with_rows]
@@ -1254,7 +1328,12 @@ def parse_cll(
         # Join / filter / qualify / window / group-by / compile-time column usage,
         # kept apart from the projected lineage in "results" (schema_version 3).
         "usages": [dataclasses.asdict(u) for u in usages],
+        # Where lineage is blind for lack of column lists, and which source supplied them.
+        "coverage": coverage,
     }
+    if compile_info is not None:
+        # Per-model assumptions of the offline compile (is_incremental, pinned values, ...).
+        payload["compile"] = compile_info
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json_handler.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1266,6 +1345,110 @@ def parse_cll(
         len(models_with_rows),
         output_path,
     )
+
+
+def _selection_and_parents(manifest_data: dict, selected: list[str]) -> set[str]:
+    """unique_ids of the selected models and of every node they depend on directly."""
+    wanted = {m.lower() for m in selected}
+    out: set[str] = set()
+    for uid, node in (manifest_data.get("nodes") or {}).items():
+        if node.get("resource_type") == "model" and str(node.get("name", "")).lower() in wanted:
+            out.add(uid)
+            out.update((node.get("depends_on") or {}).get("nodes") or [])
+    return out
+
+
+def _warn_coverage(coverage: dict) -> None:
+    blind = coverage.get("relations_without_columns") or []
+    if blind:
+        logger.warning(
+            ":warning: %d relation(s) read by the selection have no known columns — star "
+            "expansion and unqualified references cannot use them (add YAML columns, or "
+            "--column-sources manifest,catalog[,live]): %s",
+            len(blind),
+            ", ".join(blind),
+        )
+    for model, relation in coverage.get("star_over_unknown") or []:
+        logger.warning(":warning: %s selects * from %s, whose columns are unknown", model, relation)
+    if coverage.get("ambiguous_usages"):
+        logger.warning(
+            ":warning: %d usage row(s) are ambiguous (unqualified column, several candidate "
+            "relations) — each candidate is listed",
+            coverage["ambiguous_usages"],
+        )
+
+
+@cli.command("compile-cll", context_settings=_CONTEXT)
+@logging_opts
+@click.option(
+    "-s",
+    "--select",
+    "select",
+    multiple=True,
+    required=True,
+    help="dbt selector(s) of the models to compile (passed to dbt compile --select).",
+)
+@click.option("--exclude", "exclude", multiple=True, help="dbt --exclude selector(s).")
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, dir_okay=True, file_okay=False),
+    default=discover_project_dir,
+    help="dbt project root. Default is the current working directory and its parents.",
+)
+@click.option(
+    "--profiles-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Use this profiles.yml instead of the generated offline profile (it is never "
+    "connected). Default: profiles-dir in [compile] of .osmosis-cll, else generated.",
+)
+def compile_cll(
+    select: tuple[str, ...],
+    exclude: tuple[str, ...],
+    project_dir: str,
+    profiles_dir: str | None = None,
+) -> None:
+    """Compile models for column lineage without a warehouse connection.
+
+    Macros that query the warehouse at compile time (get_column_values-style calls,
+    is_incremental(), star, and any macro listed under macro-stubs) are replaced by
+    stubs configured in the [compile] section of the project's .osmosis-cll. Every
+    assumption is logged and written to target/cll-compile.json; parse-cll reports it.
+
+    \f
+    Nothing in the dbt project is modified: the stubs only exist in the in-process
+    manifest of this run.
+    """
+    from dbt_osmosis_cll.cll_generator.offline_compile import (
+        OfflineCompileError,
+        SIDECAR_NAME,
+        run_offline_compile,
+    )
+
+    try:
+        report = run_offline_compile(
+            Path(project_dir),
+            select=[s for value in select for s in value.replace(",", " ").split()],
+            exclude=[s for value in exclude for s in value.replace(",", " ").split()],
+            profiles_dir=Path(profiles_dir) if profiles_dir else None,
+        )
+    except OfflineCompileError as exc:
+        logger.error(":x: %s", exc)
+        sys.exit(1)
+
+    for warning in report.warnings():
+        logger.warning(":warning: %s", warning)
+    for error in report.errors:
+        logger.error(":x: %s", error)
+    logger.info(
+        "%s Compiled %d model(s) offline (%d introspective macro(s) stubbed); assumptions in %s",
+        ":white_check_mark:" if not report.errors else ":warning:",
+        len(report.compiled_models),
+        len(report.stubbed_macros),
+        Path(project_dir) / "target" / SIDECAR_NAME,
+    )
+    if report.errors:
+        sys.exit(1)
 
 
 def _project_vars(project_dir: Path) -> dict:

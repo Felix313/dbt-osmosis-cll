@@ -130,6 +130,21 @@ class OsmosisConfig:
             %%CUSTOM_PLACEHOLDER%%
     """
 
+    compile_time_query_macros: list[str] = field(default_factory=lambda: ["get_column_values"])
+    """Macro names (any namespace) that query the warehouse at compile time with the
+    ``get_column_values(table, column, order_by, max_records, default, where)``
+    signature. Their calls in the raw model code are reported as ``compile_time``
+    column usage. Configured as a comma-separated list (``compile-time-query-macros``)."""
+
+    # ── Column sources for parse-cll ─────────────────────────────────────────
+    cll_column_sources: list[str] = field(default_factory=lambda: ["manifest"])
+    """Where ``parse-cll`` takes relation column lists from, in order: ``manifest``
+    (YAML columns), ``catalog`` (``cll-catalog-path``, from ``dbt docs generate``),
+    ``live`` (query the warehouse, only for relations still without columns)."""
+
+    cll_catalog_path: str = "target/catalog.json"
+    """catalog.json used when ``cll-column-sources`` includes ``catalog``."""
+
     # ── Central column docs ───────────────────────────────────────────────────
     column_docs_path: str = ""
     """Path (relative to dbt project root, or absolute) to a flat YAML file
@@ -258,6 +273,16 @@ def _load_column_docs_file(docs_path: str, project_root: Path) -> dict[str, str]
         return {}
 
 
+def find_config_file(start: Path | None = None) -> Path | None:
+    """The nearest ``.osmosis-cll`` at or above *start* (default: cwd), or None."""
+    start = (start or Path.cwd()).resolve()
+    for directory in [start, *start.parents]:
+        candidate = directory / _CONFIG_FILENAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _load_config(start: Path) -> OsmosisConfig:
     for directory in [start, *start.parents]:
         osmosis_file = directory / _CONFIG_FILENAME
@@ -353,6 +378,9 @@ def _load_config(start: Path) -> OsmosisConfig:
             meta_key_derived_from=_str("col-derived-from", OsmosisConfig.meta_key_derived_from),
             meta_key_computed_in=_str("col-computed-in", OsmosisConfig.meta_key_computed_in),
             legacy_strip_markers=_strlist("legacy-strip-markers", []),
+            compile_time_query_macros=_strlist("compile-time-query-macros", ["get_column_values"]),
+            cll_column_sources=[s.lower() for s in _strlist("cll-column-sources", ["manifest"])],
+            cll_catalog_path=_str("cll-catalog-path", OsmosisConfig.cll_catalog_path),
         )
         logger.debug("Loaded dbt-osmosis-cll config from %s: %s", osmosis_file, cfg)
         return cfg

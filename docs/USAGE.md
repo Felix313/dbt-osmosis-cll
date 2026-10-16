@@ -210,7 +210,46 @@ Each row names the model whose SQL reads the column, the `source_model` / `sourc
 
 Rows are sorted and de-duplicated; two runs over the same artifacts write byte-identical files. The same data is available programmatically via `dbt_osmosis_cll.cll_generator.api.get_column_usage()`.
 
-`parse-cll` reads `compiled-sql-placeholder-patterns` from the project's `.osmosis-cll`, so custom-materialization tokens are neutralized exactly as in osmosis' own CLL runs. Models that choose their SQL body from a compile-time query must be compiled with the intended branch pinned (for example by overriding the dispatched `get_column_values` in the root project and passing the value via `--vars`), otherwise `target/compiled/` holds the fallback branch.
+`parse-cll` reads `compiled-sql-placeholder-patterns` and `compile-time-query-macros` from the project's `.osmosis-cll`, so repo-specific tokens and introspective macros are handled by configuration, not code.
+
+#### Column sources and coverage
+
+Star expansion and unqualified references need every relation's columns. The manifest only knows documented YAML columns; relations without them can be filled from further sources, in order:
+
+```ini
+[osmosis]
+cll-column-sources = manifest, catalog, live   # default: manifest
+cll-catalog-path   = target/catalog.json       # from `dbt docs generate`
+```
+
+`live` queries the warehouse (needs `--profiles-dir` / `--target`) and only for relations the selection reads that are still without columns. `--column-sources` / `--catalog` override the config per run. Every `cll-result.json` carries a `coverage` block — relations read by the selection without any known column, `SELECT *` over such relations, ambiguous / unresolved usage counts, and which source supplied each relation's columns — and the same findings are logged as warnings.
+
+### Offline compile for lineage (`compile-cll`)
+
+Lineage needs the SQL a model really runs. Projects that decide it at compile time — a body gated by `get_column_values(ref('load_config'), 'load_flg')`, `is_incremental()`, `dbt_utils.star(from=ref('x'))`, in-house introspective macros — cannot be compiled without a warehouse, or compile to the wrong branch. `compile-cll` compiles them offline, configured entirely in `.osmosis-cll`:
+
+```ini
+[compile]
+adapter = snowflake               # adapter of the generated offline profile
+target = prod                     # target.name the models see
+introspection-values =            # pinned results of get_column_values-style calls
+    load_config.load_flg = Y
+    load_config.run_dt = 2000-01-31
+is-incremental = false            # what is_incremental() returns (default false)
+is-incremental-models = model_a   # models compiled with is_incremental() = true
+vars = {"run_ts": "2000-01-01T00:00:00"}   # pin time-dependent vars for identical output
+macro-stubs =                     # any other introspective macro: name = Jinja expression
+    my_pkg.latest_loaded_ts = '2000-01-01'
+```
+
+```bash
+dbt-osmosis-cll compile-cll -s "1+my_model"
+dbt-osmosis-cll parse-cll   -s "1+my_model"
+```
+
+How it works: dbt parses the project in-process; in the parsed manifest — never on disk — every macro named `is_incremental`, every `get_column_values`-style macro (any package, signature-checked) and every `star` is replaced by a stub, plus the `macro-stubs` you list. The compile then runs with a generated profile whose credentials cannot reach a warehouse, without cache population or introspection; any remaining connection attempt fails with a message naming the setting to add. Nothing in the dbt project is modified.
+
+Every assumption is logged and written to `target/cll-compile.json`, and `parse-cll` copies it per model into `cll-result.json` (`compile`): the `is_incremental()` value each model was compiled with (the full-build branch is assumed to hold the complete logic — models whose incremental branch is the only real one need `is-incremental-models`), pinned and *unpinned* compile-time values (an unpinned call returns the macro default), `star` calls over relations without known columns, and models whose compiled SQL looks like an empty shell (`LIMIT 0`, `WHERE 1 = 0` / `FALSE`, reading only their own relation).
 
 ### Serving the explorer from a precomputed CLL artifact
 

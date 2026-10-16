@@ -196,6 +196,7 @@ class ModelRegistry:
         stop_at_ephemeral: bool = False,
         placeholder_patterns: Optional[list] = None,
         lazy_lineage: bool = False,
+        compile_time_macros: Optional[list] = None,
     ):
         if _catalog_reader_override is not None:
             self._catalog_reader = _catalog_reader_override
@@ -213,6 +214,8 @@ class ModelRegistry:
         # compiled SQL is parsed on first access via ensure_lineage()/ensure_all_lineage().
         # Keeps cold-start cost proportional to the models actually requested.
         self._lazy_lineage: bool = lazy_lineage
+        # Macro names whose raw-code calls are compile-time warehouse queries.
+        self._compile_time_macros = list(compile_time_macros) if compile_time_macros else None
         self._lineage_done: Set[str] = set()
         # Lazily built dbt-model-name → unique_id map for resolve_by_any_name.
         self._name_index: Optional[Dict[str, str]] = None
@@ -436,7 +439,7 @@ class ModelRegistry:
             # Compile-time Jinja queries (e.g. get_column_values on a config table)
             # never reach the compiled SQL; read them from the raw model code.
             raw_sql = self._manifest_reader.get_raw_sql(model_name, unique_id=model.unique_id)
-            jinja_usages = extract_compile_time_usages(raw_sql or "")
+            jinja_usages = extract_compile_time_usages(raw_sql or "", self._compile_time_macros)
             if jinja_usages:
                 merged = {u.sort_key(): u for u in parse_result.column_usages}
                 for usage in jinja_usages:

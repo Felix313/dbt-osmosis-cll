@@ -29,9 +29,16 @@ logger = logging.getLogger(__name__)
 JINJA_SCOPE = "<jinja>"
 
 # Introspective macro name → positional parameter names (dbt_utils signature).
-_COMPILE_TIME_MACROS: dict[str, tuple[str, ...]] = {
-    "get_column_values": ("table", "column", "order_by", "max_records", "default", "where"),
-}
+_VALUE_MACRO_PARAMS: tuple[str, ...] = (
+    "table",
+    "column",
+    "order_by",
+    "max_records",
+    "default",
+    "where",
+)
+"""Positional parameters shared by get_column_values-style macros (dbt_utils signature)."""
+DEFAULT_COMPILE_TIME_MACROS: tuple[str, ...] = ("get_column_values",)
 
 
 def _dotted_name(node) -> str | None:
@@ -95,7 +102,7 @@ def _names_in(node) -> set[str]:
     return {n.name for n in node.find_all(nodes.Name)}
 
 
-def _assign_targets(template) -> list[tuple[str | None, object]]:
+def _assign_targets(template, macros: set[str]) -> list[tuple[str | None, object]]:
     """(target variable or None, call node) for every introspective macro call."""
     from jinja2 import nodes
 
@@ -107,12 +114,12 @@ def _assign_targets(template) -> list[tuple[str | None, object]]:
         calls += list(assign.node.find_all(nodes.Call))
         for call in calls:
             short = (_dotted_name(call.node) or "").split(".")[-1]
-            if short in _COMPILE_TIME_MACROS and id(call) not in claimed:
+            if short in macros and id(call) not in claimed:
                 claimed.add(id(call))
                 found.append((target, call))
     for call in template.find_all(nodes.Call):
         short = (_dotted_name(call.node) or "").split(".")[-1]
-        if short in _COMPILE_TIME_MACROS and id(call) not in claimed:
+        if short in macros and id(call) not in claimed:
             claimed.add(id(call))
             found.append((None, call))
     return found
@@ -125,9 +132,12 @@ def _parse_template(raw_code: str):
     return env.parse(raw_code)
 
 
-def extract_compile_time_usages(raw_code: str) -> list[ColumnUsage]:
+def extract_compile_time_usages(
+    raw_code: str, macros: Iterable[str] | None = None
+) -> list[ColumnUsage]:
     """``compile_time`` usages for introspective macro calls in *raw_code*."""
-    if not raw_code or "get_column_values" not in raw_code:
+    names = {m.split(".")[-1] for m in (macros or DEFAULT_COMPILE_TIME_MACROS)}
+    if not raw_code or not any(n in raw_code for n in names):
         return []
     try:
         template = _parse_template(raw_code)
@@ -142,9 +152,9 @@ def extract_compile_time_usages(raw_code: str) -> list[ColumnUsage]:
         branch_names |= _names_in(if_node.test)
 
     rows: dict[tuple, ColumnUsage] = {}
-    for target, call in _assign_targets(template):
+    for target, call in _assign_targets(template, names):
         macro = _dotted_name(call.node) or "get_column_values"
-        args = _call_args(call, _COMPILE_TIME_MACROS[macro.split(".")[-1]])
+        args = _call_args(call, _VALUE_MACRO_PARAMS)
         relation = _relation_of(args.get("table"))
         column = _const(args.get("column")) if args.get("column") is not None else None
         if not relation or not isinstance(column, str):
