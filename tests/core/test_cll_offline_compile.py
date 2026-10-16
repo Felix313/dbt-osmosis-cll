@@ -65,6 +65,16 @@ FILES = {
         {% if is_incremental() %} where f.id > (select max(id) from {{ this }}) {% endif %}
     """,
     "models/shell.sql": "select * from {{ this }} limit 0\n",
+    "models/probe.sql": """
+        -- depends_on: {{ ref('facts') }}
+        {%- set present = adapter.get_relation(database=target.database, schema=target.schema, identifier='facts') -%}
+        {%- set absent = adapter.get_relation(database=target.database, schema=target.schema, identifier='not_there') -%}
+        {% if present is not none and absent is none %}
+        select f.id from {{ ref('facts') }} as f
+        {% else %}
+        select 1 as broken
+        {% endif %}
+    """,
 }
 
 CONFIG = """
@@ -223,3 +233,15 @@ def test_layered_catalog_fills_relations_without_yaml_columns(tmp_path):
 
     with pytest.raises(ValueError, match="Unknown column source"):
         LayeredCatalogReader(str(tmp_path / "manifest.json"), sources=["nope"])
+
+
+def test_direct_adapter_introspection_is_answered_from_the_manifest(tmp_path):
+    project = _project(tmp_path)
+    result = CliRunner().invoke(cli, ["compile-cll", "-s", "probe", "--project-dir", str(project)])
+    assert result.exit_code == 0, result.output
+    assert "broken" not in _compiled(project, "probe")
+    sidecar = json.loads((project / "target" / "cll-compile.json").read_text(encoding="utf-8"))
+    probe = sidecar["models"]["probe"]
+    assert probe["relations_assumed_existing"] == ["facts"]
+    assert probe["relations_assumed_missing"] == ["not_there"]
+    assert any("not_there" in w for w in sidecar["warnings"])

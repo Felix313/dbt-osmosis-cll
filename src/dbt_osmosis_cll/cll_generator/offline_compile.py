@@ -31,6 +31,13 @@ shell (``LIMIT 0``, ``WHERE 1 = 0``, reading only their own relation) are flagge
     vars = {"run_ts": "2000-01-01T00:00:00"}
     macro-stubs =                  # any other introspective macro: name = Jinja expression
         my_pkg.get_max_loaded_ts = '2000-01-01'
+    relations-exist = audit_log    # adapter.get_relation(): treat as existing ...
+    relations-missing = tmp_table  # ... or as missing (default: exists iff in the manifest)
+
+Direct adapter calls in model Jinja are answered offline as well:
+``adapter.get_relation()`` returns a relation for everything the manifest knows (or
+``relations-exist``) and None otherwise; ``adapter.get_columns_in_relation()`` returns the
+manifest's documented columns. Each answer is recorded per model.
 """
 
 from __future__ import annotations
@@ -79,6 +86,8 @@ class CompileConfig:
     macro_stubs: dict[str, str] = field(default_factory=dict)
     value_macros: list[str] = field(default_factory=lambda: ["get_column_values"])
     """Macro names with the ``get_column_values(table, column, ...)`` signature."""
+    relations_exist: list[str] = field(default_factory=list)
+    relations_missing: list[str] = field(default_factory=list)
 
 
 def _pairs(raw: str | None) -> list[tuple[str, str]]:
@@ -118,6 +127,8 @@ def load_compile_config(project_dir: Path) -> CompileConfig:
         "introspection-values",
         "vars",
         "macro-stubs",
+        "relations-exist",
+        "relations-missing",
     }
     unknown = set(sec) - known
     if unknown:
@@ -142,6 +153,19 @@ def load_compile_config(project_dir: Path) -> CompileConfig:
         except json.JSONDecodeError as exc:
             raise OfflineCompileError(f"[compile] vars must be JSON: {exc}") from exc
     cfg.macro_stubs = dict(_pairs(sec.get("macro-stubs")))
+    for key, attr in (
+        ("relations-exist", "relations_exist"),
+        ("relations-missing", "relations_missing"),
+    ):
+        setattr(
+            cfg,
+            attr,
+            sorted(
+                r.strip().lower()
+                for r in sec.get(key, "").replace("\n", ",").split(",")
+                if r.strip()
+            ),
+        )
     return cfg
 
 
@@ -432,6 +456,8 @@ class OfflineCompileReport:
                 out.append(f"{model}: star over {rel} without known columns — rendered as '*'")
             for flag in info.get("empty_shell", []):
                 out.append(f"{model}: compiled SQL looks like an empty shell ({flag})")
+            for rel in info.get("relations_assumed_missing", []):
+                out.append(f"{model}: adapter.get_relation({rel}) answered 'does not exist'")
         return out
 
     def to_json(self) -> dict[str, Any]:
@@ -445,32 +471,113 @@ class OfflineCompileReport:
         }
 
 
-@contextmanager
-def _refuse_connections(adapter: str) -> Generator[None, None, None]:
-    """Make any attempt to open a warehouse connection fail loudly."""
+def _manifest_relations(manifest: Any) -> dict[str, list[tuple[str, str | None]]]:
+    """relation identifier (lowercase) → documented ``(column, data_type)`` pairs."""
+    out: dict[str, list[tuple[str, str | None]]] = {}
+    for node in list(manifest.nodes.values()) + list(manifest.sources.values()):
+        if getattr(node, "resource_type", None) not in ("model", "seed", "snapshot", "source"):
+            continue
+        ident = (
+            getattr(node, "identifier", None) or getattr(node, "alias", None) or node.name
+        ).lower()
+        cols = [(c.name, getattr(c, "data_type", None)) for c in (node.columns or {}).values()]
+        out.setdefault(ident, [])
+        out[ident].extend(c for c in cols if c not in out[ident])
+    return out
+
+
+def _current_model() -> str:
     try:
+        from dbt_common.events.contextvars import get_node_info
+
+        info = get_node_info() or {}
+        return str(info.get("node_name") or "").lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+@contextmanager
+def _offline_adapter(
+    adapter: str, manifest: Any, cfg: CompileConfig, events: list[dict[str, Any]]
+) -> Generator[None, None, None]:
+    """Answer the adapter's introspection offline and refuse real connections.
+
+    ``get_relation`` / ``get_columns_in_relation`` are answered from the manifest
+    (overridable via ``relations-exist`` / ``relations-missing``); opening a
+    connection raises with a hint which setting to add.
+    """
+    try:
+        from dbt.adapters.contracts.relation import RelationType
         from dbt.adapters.factory import FACTORY
 
-        manager = FACTORY.get_adapter_class_by_name(adapter).ConnectionManager
+        adapter_cls = FACTORY.get_adapter_class_by_name(adapter)
     except Exception:  # noqa: BLE001 — unknown adapter: dbt's own errors will surface
         yield
         return
-    original = manager.__dict__.get("open")
+    manager = adapter_cls.ConnectionManager
+    known = _manifest_relations(manifest)
+    exist = set(cfg.relations_exist)
+    missing = set(cfg.relations_missing)
+    saved = {
+        "open": manager.__dict__.get("open"),
+        "get_relation": adapter_cls.__dict__.get("get_relation"),
+        "get_columns_in_relation": adapter_cls.__dict__.get("get_columns_in_relation"),
+    }
 
     def _refuse(cls, connection):
         raise OfflineCompileError(
-            "A macro tried to open a warehouse connection during the offline compile. "
-            "Pin its result via [compile] introspection-values / macro-stubs in .osmosis-cll."
+            "A model or macro tried to open a warehouse connection during the offline compile "
+            f"({_current_model() or 'unknown model'}). Pin the result via [compile] "
+            "introspection-values / macro-stubs in .osmosis-cll."
         )
 
+    def _get_relation(self, database, schema, identifier):
+        ident = str(identifier or "").strip('"').lower()
+        if ident in missing:
+            exists, reason = False, "relations-missing"
+        elif ident in exist:
+            exists, reason = True, "relations-exist"
+        else:
+            exists, reason = ident in known, "manifest"
+        events.append({
+            "kind": "get_relation",
+            "model": _current_model(),
+            "relation": ident,
+            "exists": exists,
+            "reason": reason,
+        })
+        if not exists:
+            return None
+        return self.Relation.create(
+            database=database, schema=schema, identifier=identifier, type=RelationType.Table
+        )
+
+    def _get_columns(self, relation):
+        ident = str(getattr(relation, "identifier", "") or "").strip('"').lower()
+        cols = known.get(ident, [])
+        events.append({
+            "kind": "columns",
+            "model": _current_model(),
+            "relation": ident,
+            "known_columns": bool(cols),
+        })
+        return [self.Column.create(name, dtype or "TEXT") for name, dtype in cols]
+
     manager.open = classmethod(_refuse)
+    adapter_cls.get_relation = _get_relation
+    adapter_cls.get_columns_in_relation = _get_columns
     try:
         yield
     finally:
-        if original is not None:
-            manager.open = original
-        else:
-            del manager.open
+        for owner, name in (
+            (manager, "open"),
+            (adapter_cls, "get_relation"),
+            (adapter_cls, "get_columns_in_relation"),
+        ):
+            if saved[name] is not None:
+                setattr(owner, name, saved[name])
+            else:
+                delattr(owner, name)
 
 
 def run_offline_compile(
@@ -548,7 +655,7 @@ def run_offline_compile(
             "--no-introspect",
             "--no-write-json",
         ]
-        with _refuse_connections(adapter):
+        with _offline_adapter(adapter, manifest, cfg, stub_events):
             compiled = dbtRunner(manifest=manifest, callbacks=[_collect]).invoke(args)
     finally:
         if tmp is not None:
@@ -592,6 +699,15 @@ def run_offline_compile(
         elif kind == "macro_stub":
             info["stubbed_calls"] = sorted(
                 set(info.get("stubbed_calls", [])) | {ev.get("macro", "")}
+            )
+        elif kind == "get_relation":
+            bucket = (
+                "relations_assumed_existing" if ev.get("exists") else "relations_assumed_missing"
+            )
+            info[bucket] = sorted(set(info.get(bucket, [])) | {ev.get("relation", "")})
+        elif kind == "columns" and not ev.get("known_columns"):
+            info["star_without_columns"] = sorted(
+                set(info.get("star_without_columns", [])) | {ev.get("relation", "")}
             )
 
     target_dir = project_dir / "target"

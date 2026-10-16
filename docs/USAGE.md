@@ -240,7 +240,11 @@ is-incremental-models = model_a   # models compiled with is_incremental() = true
 vars = {"run_ts": "2000-01-01T00:00:00"}   # pin time-dependent vars for identical output
 macro-stubs =                     # any other introspective macro: name = Jinja expression
     my_pkg.latest_loaded_ts = '2000-01-01'
+relations-exist = audit_log       # adapter.get_relation(): treat as existing ...
+relations-missing = tmp_backfill  # ... or as missing (default: exists iff the manifest knows it)
 ```
+
+Direct adapter calls in model Jinja are answered offline too: `adapter.get_relation()` returns a relation for everything the manifest knows (override with `relations-exist` / `relations-missing`), `adapter.get_columns_in_relation()` returns the manifest's documented columns. Each answer is recorded per model (`relations_assumed_existing` / `relations_assumed_missing`).
 
 ```bash
 dbt-osmosis-cll compile-cll -s "1+my_model"
