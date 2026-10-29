@@ -1101,6 +1101,137 @@ def explore(
     explorer.start()
 
 
+@lineage.command(context_settings=_CONTEXT)
+@logging_opts
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, dir_okay=True, file_okay=False),
+    default=discover_project_dir,
+    help="dbt project root. Default is the current working directory and its parents.",
+)
+@click.option(
+    "--cll",
+    "cll_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="parse-cll result to report on. Defaults to <project-dir>/target/cll-result.json.",
+)
+@click.option(
+    "--manifest",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to manifest.json. Defaults to <project-dir>/target/manifest.json.",
+)
+@click.option(
+    "-d",
+    "--data-product",
+    "data_products",
+    multiple=True,
+    help="Model to treat as data product (repeatable; space/comma-separated values allowed). "
+    "Replaces the [data-products] list of .osmosis-cll.",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="HTML report path. Defaults to <project-dir>/target/cll-report.html; CSV and "
+    "Markdown files are written next to it.",
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "de"]),
+    default="en",
+    show_default=True,
+    help="Language of the HTML report.",
+)
+def report(
+    project_dir: str,
+    cll_path: str | None = None,
+    manifest: str | None = None,
+    data_products: tuple[str, ...] = (),
+    output: str | None = None,
+    lang: str = "en",
+) -> None:
+    """Report which columns each data product needs, and the order to build them in.
+
+    Data products (the [data-products] section of .osmosis-cll, or --data-product)
+    are lineage anchors: tracing stops at them. Every data-product column must be
+    rebuildable; interim models only need the columns some data product reaches,
+    as value or as join / filter / QUALIFY / window / GROUP BY input.
+
+    \f
+    Writes a self-contained HTML report (data products can be toggled in it), the
+    column status as CSV, the data-product dependencies with build waves as CSV and
+    a Markdown summary. Input is a ``parse-cll`` result covering the data products'
+    upstream (e.g. ``parse-cll -s +dp_a +dp_b``) plus the manifest for metadata.
+    """
+    import json as json_handler
+
+    from dbt_osmosis_cll.cll_generator.report.analysis import analyse, build_graph
+    from dbt_osmosis_cll.cll_generator.report.data_products import (
+        load_data_products,
+        parse_model_list,
+    )
+    from dbt_osmosis_cll.cll_generator.report.render import (
+        render_html,
+        write_columns_csv,
+        write_data_products_csv,
+        write_markdown,
+    )
+
+    root = Path(project_dir)
+    cll_file = Path(cll_path) if cll_path else root / "target" / "cll-result.json"
+    manifest_file = Path(manifest) if manifest else root / "target" / "manifest.json"
+    for path, hint in ((cll_file, "Run parse-cll first."), (manifest_file, "Run dbt parse.")):
+        if not path.exists():
+            logger.error(":x: %s not found. %s", path, hint)
+            sys.exit(1)
+    selected = (
+        parse_model_list("\n".join(data_products)) if data_products else load_data_products(root)
+    )
+    if not selected:
+        logger.error(
+            ":x: No data products: pass --data-product or add a [data-products] section "
+            "with 'models =' to .osmosis-cll."
+        )
+        sys.exit(1)
+
+    graph = build_graph(
+        json_handler.loads(cll_file.read_text(encoding="utf-8")),
+        json_handler.loads(manifest_file.read_text(encoding="utf-8")),
+        selected,
+    )
+    result = analyse(graph, selected)
+    out = Path(output) if output else root / "target" / "cll-report.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_html(graph, lang), encoding="utf-8")
+    stem = out.with_suffix("")
+    n_cols = write_columns_csv(graph, result, Path(f"{stem}_columns.csv"))
+    write_data_products_csv(result, Path(f"{stem}_data_products.csv"))
+    write_markdown(graph, result, out.with_suffix(".md"))
+
+    for dp in result.missing:
+        logger.warning(":warning: Data product %s is not in the analysed scope of %s", dp, cll_file)
+    unresolved = sum(1 for g in graph.gaps if g[2] == "unresolved")
+    if unresolved or result.dangling:
+        logger.warning(
+            ":warning: Lineage coverage incomplete: %d column(s) without traced SQL, %d "
+            "reference(s) to columns the upstream model does not output — see the "
+            "report's quality tab.",
+            unresolved,
+            len(result.dangling),
+        )
+    waves = max(result.waves.values(), default=0)
+    logger.info(
+        ":white_check_mark: %d data product(s) in %d build wave(s), %d column(s) classified -> %s",
+        len(result.data_products),
+        waves,
+        n_cols,
+        out,
+    )
+
+
 @cli.command("parse-cll", context_settings=_CONTEXT)
 @logging_opts
 @click.option(

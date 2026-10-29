@@ -244,7 +244,7 @@ relations-exist = audit_log       # adapter.get_relation(): treat as existing ..
 relations-missing = tmp_backfill  # ... or as missing (default: exists iff the manifest knows it)
 ```
 
-Direct adapter calls in model Jinja are answered offline too: `adapter.get_relation()` returns a relation for everything the manifest knows (override with `relations-exist` / `relations-missing`), `adapter.get_columns_in_relation()` returns the manifest's documented columns. Each answer is recorded per model (`relations_assumed_existing` / `relations_assumed_missing`).
+Direct adapter calls in model Jinja are answered offline too: `adapter.get_relation()` returns a relation for everything the manifest knows (override with `relations-exist` / `relations-missing`), `adapter.get_columns_in_relation()` and column-listing statements sent through `run_query` (`SHOW COLUMNS IN TABLE x`, `DESCRIBE TABLE x` — common in generated staging layers) return the manifest's documented columns, for relations without YAML columns those of `cll-catalog-path` (catalog.json) when it exists. Any other `run_query` fails with a message naming the macro to stub. Each answer is recorded per model (`relations_assumed_existing` / `relations_assumed_missing`, `star_without_columns`).
 
 ```bash
 dbt-osmosis-cll compile-cll -s "1+my_model"
@@ -254,6 +254,34 @@ dbt-osmosis-cll parse-cll   -s "1+my_model"
 How it works: dbt parses the project in-process; in the parsed manifest — never on disk — every macro named `is_incremental`, every `get_column_values`-style macro (any package, signature-checked) and every `star` is replaced by a stub, plus the `macro-stubs` you list. The compile then runs with a generated profile whose credentials cannot reach a warehouse, without cache population or introspection; any remaining connection attempt fails with a message naming the setting to add. Nothing in the dbt project is modified.
 
 Every assumption is logged and written to `target/cll-compile.json`, and `parse-cll` copies it per model into `cll-result.json` (`compile`): the `is_incremental()` value each model was compiled with (the full-build branch is assumed to hold the complete logic — models whose incremental branch is the only real one need `is-incremental-models`), pinned and *unpinned* compile-time values (an unpinned call returns the macro default), `star` calls over relations without known columns, and models whose compiled SQL looks like an empty shell (`LIMIT 0`, `WHERE 1 = 0` / `FALSE`, reading only their own relation).
+
+### Data-product column requirements (`lineage report`)
+
+Declare which models are **data products** — every one of their columns must be rebuildable — and the report works out what the rest of the pipeline has to keep:
+
+```ini
+# .osmosis-cll
+[data-products]
+models =
+    orders_mart
+    customer_360
+```
+
+```bash
+dbt-osmosis-cll compile-cll -s "+orders_mart +customer_360"   # if models need it
+dbt-osmosis-cll parse-cll   -s "+orders_mart +customer_360"
+dbt-osmosis-cll lineage report            # or: -d "orders_mart customer_360" --lang de
+```
+
+Data products are **lineage anchors**: tracing a column upstream stops at another data product, which becomes the column's origin. From that the report derives
+
+- **build order** — data product A depends on B when any A column (value or predicate input) traces to B; dependencies are layered into waves (wave 1 reads only interim models and sources). dbt dependencies without any column use are listed separately;
+- **column requirements** — a data product needs all its columns; an interim model only the columns some data product reaches, either as value (`data`) or as input of a join, filter, QUALIFY, window, GROUP BY or compile-time query (`logic`). Everything else in an interim model is `droppable`. Once a model is needed at all, all of its column usages count — conservative by design;
+- **anchored origins** of every data-product column.
+
+Output (next to `target/cll-report.html` unless `-o` says otherwise): a self-contained HTML report — data products can be added and removed in it and everything recomputes in the browser; the current selection exports as an `.osmosis-cll` snippet or CSV — plus `cll-report_columns.csv` (one row per column: role, status, kind, usages, needed by), `cll-report_data_products.csv` (waves and dependencies) and a Markdown summary.
+
+The **quality** tab and the coverage banner list what limits the result: columns whose SQL could not be traced, references to columns the upstream model does not output (lineage attribution errors), relations without known columns, and columns documented in YAML that the SQL does not produce (ignored; `parse-cll` marks them `in_sql: false`).
 
 ### Serving the explorer from a precomputed CLL artifact
 
