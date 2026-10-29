@@ -324,3 +324,72 @@ class TestUnionBranchInputs:
         )
         lin = _lineage(SQLColumnParser().parse_column_lineage(sql), "d")
         assert {"tbl_a.x", "tbl_b.y"} <= lin.source_columns
+
+
+# ---------------------------------------------------------------------------
+# Constant inputs: literal / generated values must neither hide real inputs
+# nor surface as an empty, gap-looking lineage.
+# ---------------------------------------------------------------------------
+
+
+class TestConstantInputs:
+    def test_constant_cte_column_keeps_real_inputs_through_cte_hop(self):
+        """A CASE mixing a literal-CTE column with a real column keeps the real one."""
+        sql = (
+            "WITH params AS (SELECT '2000-01-31'::DATE AS run_dt), "
+            "clean AS (SELECT CASE WHEN EXTRACT(YEAR FROM params.run_dt) = "
+            "CAST(SUBSTR(f.period, 1, 4) AS NUMBER(4, 0)) THEN 'A' ELSE 'X' END AS year_type "
+            "FROM facts AS f CROSS JOIN params) "
+            "SELECT year_type FROM clean"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert _lineage(result, "year_type").source_columns == {"facts.period"}
+
+    def test_constant_cte_column_adds_no_empty_source(self):
+        sql = (
+            "WITH params AS (SELECT '2000-01-31'::DATE AS run_dt) "
+            "SELECT CASE WHEN params.run_dt = f.period THEN 'A' END AS year_type "
+            "FROM facts AS f CROSS JOIN params"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert _lineage(result, "year_type").source_columns == {"facts.period"}
+
+    def test_lateral_alias_of_generated_value_is_generated(self):
+        sql = "SELECT CURRENT_TIMESTAMP() AS created_ts, created_ts AS loaded_ts, s.id FROM src s"
+        lin = _lineage(SQLColumnParser(dialect="snowflake").parse_column_lineage(sql), "loaded_ts")
+        assert lin.transformation_type == "generated"
+        assert lin.source_columns == set()
+
+    def test_lateral_alias_of_column_still_traces_the_column(self):
+        sql = "SELECT s.a AS x, x AS y FROM src s"
+        lin = _lineage(SQLColumnParser(dialect="snowflake").parse_column_lineage(sql), "y")
+        assert lin.source_columns == {"src.a"}
+
+    def test_top_level_union_of_literals_is_literal(self):
+        sql = (
+            "SELECT s.id, 'Y' AS flg, CURRENT_TIMESTAMP AS ts FROM src s "
+            "UNION ALL SELECT t.id, 'N' AS flg, CURRENT_TIMESTAMP AS ts FROM tgt t"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        flg = _lineage(result, "flg")
+        assert flg.transformation_type == "literal"
+        assert flg.sql_expression == "'Y' | 'N'"
+        assert _lineage(result, "ts").transformation_type == "generated"
+        assert _lineage(result, "id").transformation_type == "union"
+
+    def test_union_cte_of_constants_is_classified_across_hop(self):
+        sql = (
+            "WITH u AS (SELECT s.id, 'A' AS origin FROM src s "
+            "UNION ALL SELECT t.id, 'B'::VARCHAR AS origin FROM tgt t) "
+            "SELECT id, origin FROM u"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        lin = _lineage(result, "origin")
+        assert lin.transformation_type == "generated"
+        assert lin.source_columns == set()
+
+    def test_union_with_one_column_branch_stays_union(self):
+        sql = "SELECT 'Y' AS flg FROM src s UNION ALL SELECT t.flg FROM tgt t"
+        lin = _lineage(SQLColumnParser(dialect="snowflake").parse_column_lineage(sql), "flg")
+        assert lin.transformation_type == "union"
+        assert lin.union_branches == ["tgt.flg"]

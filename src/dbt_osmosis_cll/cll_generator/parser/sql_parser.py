@@ -561,6 +561,20 @@ class SQLColumnParser:
                         if col_idx < len(branch)
                         for src in branch[col_idx][2]
                     }
+                    constant = (
+                        None
+                        if all_sources or branches
+                        else self._constant_set_op_column(branch_selects, col_idx)
+                    )
+                    if constant is not None:
+                        columns[col_name] = [
+                            ColumnLineage(
+                                source_columns=set(),
+                                transformation_type=constant[0],  # type: ignore[arg-type]
+                                sql_expression=constant[1],
+                            )
+                        ]
+                        continue
                     columns[col_name] = [
                         ColumnLineage(
                             source_columns=all_sources,
@@ -985,6 +999,36 @@ class SQLColumnParser:
             result.append((col_name, qualifier, sources))
         return result
 
+    def _constant_set_op_column(
+        self, branch_selects: List[Any], col_idx: int
+    ) -> Optional[tuple[str, str]]:
+        """``(kind, value)`` when every branch yields a constant at position ``col_idx``.
+
+        A set-op column whose branches are all literals or zero-input functions
+        (``'Y' ... UNION ALL ... 'N'``, ``CURRENT_TIMESTAMP`` in each arm) has no
+        upstream column. Report it as ``literal`` (all literals) or ``generated``
+        instead of an empty ``union`` that reads like an unresolved gap. Returns
+        None as soon as one branch is not positionally inspectable or reads a column.
+        """
+        kinds: list[str] = []
+        values: list[str] = []
+        for branch in branch_selects:
+            exprs = branch.expressions
+            if col_idx >= len(exprs) or any(
+                self._star_handler.is_star_expression(e) for e in exprs[: col_idx + 1]
+            ):
+                return None
+            kind, value = _classify_expression(exprs[col_idx])
+            if kind not in ("literal", "generated") or value is None:
+                return None
+            kinds.append(kind)
+            if value not in values:
+                values.append(value)
+        if not kinds:
+            return None
+        kind = "literal" if all(k == "literal" for k in kinds) else "generated"
+        return kind, " | ".join(values)
+
     def _process_union_cte(
         self,
         cte_name: str,
@@ -1058,6 +1102,15 @@ class SQLColumnParser:
             if all_sources:
                 cte_source_sets.setdefault(cte_name, {})[col_name] = sorted(all_sources)
             cte_sources[cte_name][col_name] = ""  # multi-source sentinel
+            constant = (
+                None
+                if all_sources or branches
+                else self._constant_set_op_column(branch_selects, col_idx)
+            )
+            if constant is not None:
+                cte_transformation_types[cte_name][col_name] = constant[0]
+                cte_sql_expressions[cte_name][col_name] = constant[1]
+                continue
             cte_transformation_types[cte_name][col_name] = "union"
             cte_sql_expressions[cte_name][col_name] = None
             cte_union_branches.setdefault(cte_name, {})[col_name] = branches
@@ -1162,8 +1215,8 @@ class SQLColumnParser:
         lineage: ColumnLineage,
         context: ParserContext,
     ) -> None:
-        if lineage.source_columns:
-            sorted_sources = sorted(lineage.source_columns)
+        sorted_sources = sorted(s for s in lineage.source_columns if s)
+        if sorted_sources:
             if len(sorted_sources) > 1:
                 # Multiple upstream columns — store sentinel so downstream expansion
                 # emits no single traceable progenitor, but record the full set in
@@ -1251,6 +1304,18 @@ class SQLColumnParser:
                     context,
                     visited_forward_refs={col_name},
                 )
+                if not forward_sources:
+                    # Lateral alias of a constant (`CURRENT_TIMESTAMP() AS ts, ts AS ts2`):
+                    # inherit the referenced value's kind instead of an empty "derived".
+                    kind, value = _classify_expression(forward_expr)
+                    if kind in ("literal", "generated"):
+                        return [
+                            ColumnLineage(
+                                source_columns=set(),
+                                transformation_type=kind,  # type: ignore[arg-type]
+                                sql_expression=value,
+                            )
+                        ]
                 return [
                     ColumnLineage(
                         source_columns=forward_sources,
@@ -1429,6 +1494,10 @@ class SQLColumnParser:
                 if branches:
                     columns.update(branches)
                     continue
+                # Zero-source upstream column (literal / generated CTE value): it adds
+                # no input. Emitting the "" sentinel here made a mixed expression look
+                # multi-source and lost its real inputs at the next CTE hop.
+                continue
             columns.add(resolved)
         return columns
 
