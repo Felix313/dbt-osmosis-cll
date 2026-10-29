@@ -36,8 +36,11 @@ shell (``LIMIT 0``, ``WHERE 1 = 0``, reading only their own relation) are flagge
 
 Direct adapter calls in model Jinja are answered offline as well:
 ``adapter.get_relation()`` returns a relation for everything the manifest knows (or
-``relations-exist``) and None otherwise; ``adapter.get_columns_in_relation()`` returns the
-manifest's documented columns. Each answer is recorded per model.
+``relations-exist``) and None otherwise; ``adapter.get_columns_in_relation()`` and
+column-listing queries sent through ``run_query`` (``SHOW COLUMNS IN ...``, ``DESCRIBE
+TABLE ...``) return the manifest's documented columns, for relations without YAML
+columns those of ``cll-catalog-path`` (catalog.json) when it exists. Each answer is
+recorded per model.
 """
 
 from __future__ import annotations
@@ -486,6 +489,21 @@ def _manifest_relations(manifest: Any) -> dict[str, list[tuple[str, str | None]]
     return out
 
 
+def _catalog_relations(path: Path) -> dict[str, list[tuple[str, str | None]]]:
+    """relation identifier (lowercase) → ``(column, data_type)`` from a catalog.json."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, list[tuple[str, str | None]]] = {}
+    for entry in [*(data.get("nodes") or {}).values(), *(data.get("sources") or {}).values()]:
+        ident = str((entry.get("metadata") or {}).get("name") or "").lower()
+        columns = sorted((entry.get("columns") or {}).values(), key=lambda c: c.get("index") or 0)
+        if ident and columns and ident not in out:
+            out[ident] = [(str(c.get("name")), c.get("type")) for c in columns if c.get("name")]
+    return out
+
+
 def _current_model() -> str:
     try:
         from dbt_common.events.contextvars import get_node_info
@@ -496,15 +514,56 @@ def _current_model() -> str:
         return ""
 
 
+_COLUMN_QUERY = re.compile(
+    r"^\s*(?P<verb>show\s+columns|desc(?:ribe)?)\s+"
+    r"(?:(?:in|from)\s+)?(?:(?:table|view)\s+)?(?P<name>[\w$\".]+)\s*;?\s*$",
+    re.IGNORECASE,
+)
+
+# Result layouts of the column-listing statements (Snowflake's, the common case):
+# macros index rows positionally, e.g. ``results.columns[2]`` for SHOW COLUMNS.
+_SHOW_COLUMNS_LAYOUT = (
+    "table_name", "schema_name", "column_name", "data_type", "null?", "default",
+    "kind", "expression", "comment", "database_name", "autoincrement",
+)  # fmt: skip
+_DESCRIBE_LAYOUT = (
+    "name", "type", "kind", "null?", "default", "primary key", "unique key",
+    "check", "expression", "comment", "policy name",
+)  # fmt: skip
+
+
+def _column_query_table(verb: str, ident: str, cols: list[tuple[str, str | None]]) -> Any:
+    """An agate table shaped like the warehouse's answer to a column-listing statement."""
+    import agate
+
+    show = verb.lower().startswith("show")
+    names = _SHOW_COLUMNS_LAYOUT if show else _DESCRIBE_LAYOUT
+    rows = []
+    for name, dtype in cols:
+        if show:
+            row = [ident.upper(), "", name.upper(), dtype or "TEXT", "true", "", "COLUMN"]
+        else:
+            row = [name.upper(), dtype or "TEXT", "COLUMN", "Y", "", "N", "N"]
+        rows.append(row + [""] * (len(names) - len(row)))
+    return agate.Table(rows, list(names), [agate.Text()] * len(names))
+
+
 @contextmanager
 def _offline_adapter(
-    adapter: str, manifest: Any, cfg: CompileConfig, events: list[dict[str, Any]]
+    adapter: str,
+    manifest: Any,
+    cfg: CompileConfig,
+    events: list[dict[str, Any]],
+    catalog: dict[str, list[tuple[str, str | None]]] | None = None,
 ) -> Generator[None, None, None]:
     """Answer the adapter's introspection offline and refuse real connections.
 
     ``get_relation`` / ``get_columns_in_relation`` are answered from the manifest
-    (overridable via ``relations-exist`` / ``relations-missing``); opening a
-    connection raises with a hint which setting to add.
+    (overridable via ``relations-exist`` / ``relations-missing``), column lists of
+    relations without YAML columns from *catalog*. Column-listing statements sent
+    through ``run_query`` (``SHOW COLUMNS IN``, ``DESCRIBE TABLE``) get the same
+    columns in the warehouse's result layout; any other query, and opening a
+    connection, raises with a hint which setting to add.
     """
     try:
         from dbt.adapters.contracts.relation import RelationType
@@ -516,12 +575,16 @@ def _offline_adapter(
         return
     manager = adapter_cls.ConnectionManager
     known = _manifest_relations(manifest)
+    for ident, cols in (catalog or {}).items():
+        if not known.get(ident):
+            known[ident] = cols
     exist = set(cfg.relations_exist)
     missing = set(cfg.relations_missing)
     saved = {
         "open": manager.__dict__.get("open"),
         "get_relation": adapter_cls.__dict__.get("get_relation"),
         "get_columns_in_relation": adapter_cls.__dict__.get("get_columns_in_relation"),
+        "execute": adapter_cls.__dict__.get("execute"),
     }
 
     def _refuse(cls, connection):
@@ -563,9 +626,33 @@ def _offline_adapter(
         })
         return [self.Column.create(name, dtype or "TEXT") for name, dtype in cols]
 
+    def _execute(self, sql, auto_begin=False, fetch=False, limit=None):
+        from dbt.adapters.contracts.connection import AdapterResponse
+
+        model = _current_model()
+        match = _COLUMN_QUERY.match(str(sql or ""))
+        if match is None:
+            raise OfflineCompileError(
+                f"{model or 'A model'} runs a warehouse query during the offline compile: "
+                f"{' '.join(str(sql).split())[:160]!r}. Stub the macro that issues it via "
+                "[compile] macro-stubs in .osmosis-cll."
+            )
+        ident = match.group("name").replace('"', "").split(".")[-1].lower()
+        cols = known.get(ident, [])
+        events.append({
+            "kind": "columns",
+            "model": model,
+            "relation": ident,
+            "known_columns": bool(cols),
+        })
+        return AdapterResponse(_message="OFFLINE"), _column_query_table(
+            match.group("verb"), ident, cols
+        )
+
     manager.open = classmethod(_refuse)
     adapter_cls.get_relation = _get_relation
     adapter_cls.get_columns_in_relation = _get_columns
+    adapter_cls.execute = _execute
     try:
         yield
     finally:
@@ -573,6 +660,7 @@ def _offline_adapter(
             (manager, "open"),
             (adapter_cls, "get_relation"),
             (adapter_cls, "get_columns_in_relation"),
+            (adapter_cls, "execute"),
         ):
             if saved[name] is not None:
                 setattr(owner, name, saved[name])
@@ -655,7 +743,11 @@ def run_offline_compile(
             "--no-introspect",
             "--no-write-json",
         ]
-        with _offline_adapter(adapter, manifest, cfg, stub_events):
+        catalog_path = Path(get_config(project_dir).cll_catalog_path)
+        if not catalog_path.is_absolute():
+            catalog_path = project_dir / catalog_path
+        catalog = _catalog_relations(catalog_path)
+        with _offline_adapter(adapter, manifest, cfg, stub_events, catalog):
             compiled = dbtRunner(manifest=manifest, callbacks=[_collect]).invoke(args)
     finally:
         if tmp is not None:

@@ -245,3 +245,84 @@ def test_direct_adapter_introspection_is_answered_from_the_manifest(tmp_path):
     assert probe["relations_assumed_existing"] == ["facts"]
     assert probe["relations_assumed_missing"] == ["not_there"]
     assert any("not_there" in w for w in sidecar["warnings"])
+
+
+COLUMN_QUERY_FILES = {
+    "macros/list_columns.sql": """
+        {% macro list_columns(rel, verb='show') %}
+            {% if verb == 'show' %}
+                {% set res = run_query('SHOW COLUMNS IN TABLE ' ~ rel) %}
+                {% set names = res.columns[2].values() if execute else [] %}
+            {% else %}
+                {% set res = run_query('DESCRIBE TABLE ' ~ rel) %}
+                {% set names = res.columns[0].values() if execute else [] %}
+            {% endif %}
+            {{ return(names) }}
+        {% endmacro %}
+    """,
+    "models/models.yml": """
+        version: 2
+        models:
+          - name: facts
+            columns:
+              - name: id
+              - name: status_cd
+    """,
+    "models/raw_bare.sql": "select 1 as bare_id, 'x' as bare_txt\n",
+    "models/copy_show.sql": """
+        -- depends_on: {{ ref('facts') }}
+        select {{ list_columns(ref('facts')) | join(', ') | lower }} from {{ ref('facts') }}
+    """,
+    "models/copy_describe.sql": """
+        -- depends_on: {{ ref('raw_bare') }}
+        select {{ list_columns(ref('raw_bare'), 'describe') | join(', ') | lower }}
+        from {{ ref('raw_bare') }}
+    """,
+    "models/other_query.sql": """
+        {% set res = run_query('select max(id) from loaded') %}
+        select 1 as id
+    """,
+}
+
+
+def _column_query_project(tmp_path: Path) -> Path:
+    project = _project(tmp_path)
+    for rel, body in COLUMN_QUERY_FILES.items():
+        (project / rel).write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
+    return project
+
+
+def test_column_listing_queries_are_answered_offline(tmp_path):
+    project = _column_query_project(tmp_path)
+    (project / "target").mkdir(exist_ok=True)
+    catalog = {
+        "nodes": {
+            "model.cll_offline_fixture.raw_bare": {
+                "metadata": {"name": "raw_bare"},
+                "columns": {
+                    "BARE_TXT": {"name": "BARE_TXT", "type": "TEXT", "index": 2},
+                    "BARE_ID": {"name": "BARE_ID", "type": "INTEGER", "index": 1},
+                },
+            }
+        },
+        "sources": {},
+    }
+    (project / "target" / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli, ["compile-cll", "-s", "copy_show copy_describe", "--project-dir", str(project)]
+    )
+    assert result.exit_code == 0, result.output
+    # YAML columns answer SHOW COLUMNS; catalog.json fills the undocumented relation.
+    assert "select id, status_cd from" in " ".join(_compiled(project, "copy_show").split())
+    assert "select bare_id, bare_txt" in " ".join(_compiled(project, "copy_describe").split())
+
+
+def test_other_warehouse_queries_fail_with_a_hint(tmp_path):
+    project = _column_query_project(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["compile-cll", "-s", "other_query", "--project-dir", str(project)]
+    )
+    assert result.exit_code == 1
+    sidecar = json.loads((project / "target" / "cll-compile.json").read_text(encoding="utf-8"))
+    assert any("macro-stubs" in e and "select max(id)" in e for e in sidecar["errors"])
