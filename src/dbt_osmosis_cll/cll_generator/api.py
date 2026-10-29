@@ -174,6 +174,7 @@ def get_column_lineage(
     include_ephemeral: bool = False,
     _catalog_reader_override: Optional[object] = None,
     placeholder_patterns: Optional[List[str]] = None,
+    compile_time_macros: Optional[List[str]] = None,
 ) -> List[ColumnLineageResult]:
     """Resolve column-level lineage for dbt models.
 
@@ -259,6 +260,7 @@ def get_column_lineage(
         stop_at_ephemeral=include_ephemeral,
         placeholder_patterns=placeholder_patterns,
         catalog_reader_override=_catalog_reader_override,
+        compile_time_macros=compile_time_macros,
     )
 
     all_nodes = registry.get_models_by_id()
@@ -417,6 +419,326 @@ def get_column_lineage(
     return results
 
 
+@dataclass
+class ColumnUsageResult:
+    """One non-projection use of an upstream column by a model.
+
+    Deliberately a separate result type from :class:`ColumnLineageResult`: a column a
+    model only joins, filters, qualifies, windows or groups on is a requirement of that
+    model just like an output column, but whether it stays one after a migration is a
+    business call — so the usage kind is carried on every row instead of the column
+    being merged into the projected lineage.
+    """
+
+    model: str
+    """Short model name of the model whose SQL uses the column."""
+
+    usage: str
+    """``join_key``, ``join_filter``, ``filter``, ``qualify``, ``window``, ``group_by``,
+    ``having`` or ``compile_time`` (see ``ColumnUsage`` in the schema module)."""
+
+    source_model: Optional[str]
+    """dbt name of the model / source / seed the column belongs to, resolved through
+    every CTE of *model*; the relation name when it is no manifest node; None when the
+    column has no upstream (``resolution == "no_upstream"``)."""
+
+    source_column: Optional[str]
+    """Column name in *source_model* (lowercase)."""
+
+    scope: str
+    """CTE the clause sits in, ``<final>``, ``…/subquery`` or ``<jinja>``."""
+
+    resolution: str
+    """How the reference was mapped: ``qualified``, ``single_table``,
+    ``unqualified_resolved``, ``select_alias``, ``ambiguous`` (one row per candidate),
+    ``unresolved``, ``no_upstream``, ``jinja``."""
+
+    column_ref: str = ""
+    """The reference as written, e.g. ``rdv.dw_from_timestamp``."""
+
+    detail: Optional[str] = None
+    """Position in the clause: ``predicate``, ``partition_by``, ``order_by``,
+    ``window_function``, ``key``, ``subquery``, ``value_column``, ``where``."""
+
+    predicate_sql: Optional[str] = None
+    """The conjunct / window / Jinja call the column appears in."""
+
+    dbt_vars: List[str] = field(default_factory=list)
+    """Jinja variables tied to the row: the result variable of a compile-time query,
+    or ``var()`` names whose value matches a literal of the predicate."""
+
+    controls_branch: bool = False
+    """True when a compile-time result decides an ``{% if %}`` branch of the model."""
+
+    is_self_reference: bool = False
+    """True when *source_model* is *model* itself (incremental ``{{ this }}`` joins)."""
+
+    source_unique_id: Optional[str] = None
+    """Manifest unique_id of *source_model*, when it is a manifest node."""
+
+    unique_id: Optional[str] = None
+    """Manifest unique_id of *model*."""
+
+    origins: List[Tuple[str, str]] = field(default_factory=list)
+    """``(model, column)`` pairs the used column ultimately comes from, following the
+    projected lineage of *source_model* upstream until a source, a seed or a model
+    without parsed lineage (no compiled SQL) is reached. Sorted, de-duplicated."""
+
+    via_models: List[str] = field(default_factory=list)
+    """Models passed between *source_model* and the *origins* (sorted)."""
+
+
+def get_column_usage(
+    manifest_path: str,
+    catalog_path: Optional[str] = None,
+    live_db: bool = False,
+    project_dir: Optional[str] = None,
+    profiles_dir: Optional[str] = None,
+    target: Optional[str] = None,
+    models: Optional[List[str]] = None,
+    dialect: Optional[str] = None,
+    compiled_sql_source: Literal["manifest", "target_dir", "auto_compile"] = "manifest",
+    trace_origins: bool = True,
+    var_values: Optional[dict] = None,
+    _catalog_reader_override: Optional[object] = None,
+    placeholder_patterns: Optional[List[str]] = None,
+    compile_time_macros: Optional[List[str]] = None,
+) -> List[ColumnUsageResult]:
+    """Resolve the join / filter / qualify / window / group-by usage of upstream columns.
+
+    Takes the same inputs as :func:`get_column_lineage` (and shares its registry cache,
+    so calling both parses each model once). *trace_origins* follows every used column
+    upstream through the projected lineage of its source model (see
+    ``ColumnUsageResult.origins``); upstream models are parsed only along that path.
+    *var_values* (``{var name: value}``, e.g. the ``vars`` of ``dbt_project.yml``) lets
+    predicates built from ``var()`` be tagged with the variable name.
+
+    Rows are sorted and de-duplicated, so repeated runs over the same artifacts produce
+    identical results.
+    """
+    if _catalog_reader_override is None:
+        if catalog_path and live_db:
+            raise ValueError("Provide either catalog_path or live_db=True, not both.")
+        if not catalog_path and not live_db:
+            raise ValueError("Either catalog_path or live_db=True is required.")
+    if compiled_sql_source == "auto_compile":
+        if not project_dir:
+            raise ValueError("project_dir is required when compiled_sql_source='auto_compile'.")
+        _run_dbt_compile(project_dir=project_dir, profiles_dir=profiles_dir, target=target)
+    if compiled_sql_source == "manifest":
+        _assert_compiled_sql_present(manifest_path)
+
+    registry, _terminal = _load_registry_cached(
+        manifest_path=manifest_path,
+        catalog_path=catalog_path,
+        live_db=live_db,
+        project_dir=project_dir,
+        profiles_dir=profiles_dir,
+        target=target,
+        dialect=dialect,
+        use_target_dir=compiled_sql_source in ("target_dir", "auto_compile"),
+        stop_at_ephemeral=False,
+        placeholder_patterns=placeholder_patterns,
+        catalog_reader_override=_catalog_reader_override,
+        compile_time_macros=compile_time_macros,
+    )
+
+    from dbt_osmosis_cll.cll_generator.parser.jinja_usage import (
+        extract_var_names,
+        tag_var_predicates,
+    )
+
+    model_filter = {m.lower() for m in models} if models else None
+    selected = sorted(
+        (
+            m
+            for m in registry.get_models_by_id().values()
+            if m.resource_type == "model"
+            and (model_filter is None or m.name.lower() in model_filter)
+        ),
+        key=lambda m: (m.name.lower(), m.unique_id or ""),
+    )
+    if model_filter is None:
+        registry.ensure_all_lineage()
+
+    tracer = _OriginTracer(registry)
+    results: List[ColumnUsageResult] = []
+    for model_obj in selected:
+        registry.ensure_lineage(model_obj)
+        usages = model_obj.column_usages
+        if var_values:
+            raw = registry._manifest_reader.get_raw_sql(  # noqa: SLF001
+                model_obj.name, unique_id=model_obj.unique_id
+            )
+            used_vars = extract_var_names(raw or "")
+            known = {k: var_values[k] for k in used_vars if k in var_values}
+            usages = tag_var_predicates(usages, known)
+        for usage in usages:
+            src_model_name: Optional[str] = None
+            src_column: Optional[str] = None
+            src_uid: Optional[str] = None
+            src_obj = None
+            if usage.source and "." in usage.source:
+                rel, src_column = usage.source.rsplit(".", 1)
+                src_obj = registry.resolve_by_any_name(rel)
+                if src_obj is not None:
+                    src_model_name = src_obj.name.lower()
+                    src_uid = src_obj.unique_id
+                else:
+                    src_model_name = rel
+            origins: List[Tuple[str, str]] = []
+            via: List[str] = []
+            is_self = bool(src_obj is not None and src_obj.unique_id == model_obj.unique_id)
+            if trace_origins and src_obj is not None and src_column and not is_self:
+                found, passed = tracer.trace(src_obj, src_column)
+                origins = sorted(found)
+                via = sorted(passed - {src_model_name})
+            results.append(
+                ColumnUsageResult(
+                    model=model_obj.name.lower(),
+                    usage=usage.usage,
+                    source_model=src_model_name,
+                    source_column=src_column,
+                    scope=usage.scope,
+                    resolution=usage.resolution,
+                    column_ref=usage.column_ref,
+                    detail=usage.detail,
+                    predicate_sql=usage.predicate_sql,
+                    dbt_vars=list(usage.dbt_vars),
+                    controls_branch=usage.controls_branch,
+                    is_self_reference=is_self,
+                    source_unique_id=src_uid,
+                    unique_id=model_obj.unique_id,
+                    origins=origins,
+                    via_models=via,
+                )
+            )
+    results.sort(
+        key=lambda r: (
+            r.model,
+            r.unique_id or "",
+            r.usage,
+            r.source_model or "",
+            r.source_column or "",
+            r.scope,
+            r.detail or "",
+            r.column_ref,
+            r.predicate_sql or "",
+        )
+    )
+    return results
+
+
+def get_lineage_coverage(
+    manifest_path: str,
+    models: List[str],
+    dialect: Optional[str] = None,
+    compiled_sql_source: Literal["manifest", "target_dir", "auto_compile"] = "target_dir",
+    _catalog_reader_override: Optional[object] = None,
+    placeholder_patterns: Optional[List[str]] = None,
+    compile_time_macros: Optional[List[str]] = None,
+) -> dict:
+    """Where lineage for *models* is blind for lack of column lists.
+
+    Returns ``relations_without_columns`` — direct parents of *models* (models,
+    sources, seeds) with no known column after parsing — and ``star_over_unknown`` —
+    ``(model, relation)`` pairs where a ``SELECT *`` reads such a relation, so its
+    columns could not be expanded. Uses the cached registry of the lineage calls.
+    """
+    registry, _ = _load_registry_cached(
+        manifest_path=manifest_path,
+        catalog_path=None,
+        live_db=False,
+        project_dir=None,
+        profiles_dir=None,
+        target=None,
+        dialect=dialect,
+        use_target_dir=compiled_sql_source in ("target_dir", "auto_compile"),
+        stop_at_ephemeral=False,
+        placeholder_patterns=placeholder_patterns,
+        catalog_reader_override=_catalog_reader_override,
+        compile_time_macros=compile_time_macros,
+    )
+    wanted = {m.lower() for m in models}
+    by_id = registry.get_models_by_id()
+    selected = [
+        m for m in by_id.values() if m.resource_type == "model" and m.name.lower() in wanted
+    ]
+    blind: set = set()
+    star_blind: set = set()
+    for model in selected:
+        registry.ensure_lineage(model)
+        for parent_name in sorted(model.upstream):
+            parent = registry.resolve_by_any_name(parent_name)
+            if parent is not None and not parent.columns and parent.resource_type == "model":
+                # A parent model without YAML columns may still have SQL-derived ones.
+                registry.ensure_lineage(parent)
+            if parent is not None and not parent.columns:
+                blind.add(parent.name.lower())
+        for star in (model.metadata or {}).get("star_sources", []):
+            src = registry.resolve_by_any_name(str(star))
+            if src is None or not src.columns:
+                star_blind.add((model.name.lower(), (src.name if src else str(star)).lower()))
+    return {
+        "relations_without_columns": sorted(blind),
+        "star_over_unknown": [list(p) for p in sorted(star_blind)],
+    }
+
+
+class _OriginTracer:
+    """Follow a (model, column) upstream through projected lineage to its origins."""
+
+    def __init__(self, registry) -> None:
+        self._registry = registry
+        self._memo: dict = {}
+
+    def trace(self, model, column: str) -> Tuple[set, set]:
+        return self._trace(model, column.lower(), frozenset())
+
+    def _trace(self, model, column: str, stack: frozenset) -> Tuple[set, set]:
+        uid = model.unique_id or model.name
+        key = (uid, column)
+        if key in self._memo:
+            return self._memo[key]
+        name = model.name.lower()
+        if model.resource_type in ("source", "seed") or key in stack:
+            return {(name, column)}, set()
+        self._registry.ensure_lineage(model)
+        col = model.columns.get(column) or next(
+            (c for k, c in model.columns.items() if k.lower() == column), None
+        )
+        if col is None or not col.lineage:
+            result: Tuple[set, set] = ({(name, column)}, set())
+            self._memo[key] = result
+            return result
+        lin = col.lineage[0]
+        sources = {s for s in set(lin.source_columns) | set(lin.union_branches) if s and "." in s}
+        if not sources:
+            # Literal / generated column: the value originates in this model.
+            result = ({(name, column)}, set())
+            self._memo[key] = result
+            return result
+        origins: set = set()
+        passed: set = {name}
+        for src in sorted(sources):
+            rel, src_col = src.rsplit(".", 1)
+            rel = rel.lower()
+            if rel.startswith("__dbt__cte__"):
+                rel = rel[len("__dbt__cte__") :]
+            if rel in _JINJA_RESERVED:
+                continue
+            upstream = self._registry.resolve_by_any_name(rel)
+            if upstream is None:
+                origins.add((rel, src_col.lower()))
+                continue
+            found, via = self._trace(upstream, src_col.lower(), stack | {key})
+            origins |= found
+            passed |= via
+        result = (origins, passed)
+        self._memo[key] = result
+        return result
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -435,6 +757,7 @@ def _load_registry_cached(
     stop_at_ephemeral: bool,
     placeholder_patterns: Optional[List[str]],
     catalog_reader_override: Optional[object],
+    compile_time_macros: Optional[List[str]] = None,
 ):
     """Return a loaded (registry, terminal_node_names), using the process cache.
 
@@ -457,6 +780,7 @@ def _load_registry_cached(
         stop_at_ephemeral,
         tuple(placeholder_patterns) if placeholder_patterns else None,
         catalog_disc,
+        tuple(compile_time_macros) if compile_time_macros else None,
     )
     cached = _REGISTRY_CACHE.get(cache_key)
     if cached is not None:
@@ -485,6 +809,7 @@ def _load_registry_cached(
         # lineage per requested model, so cold-start cost tracks the request size
         # (per-node osmosis calls, selector-scoped parse-cll) instead of repo size.
         lazy_lineage=True,
+        compile_time_macros=compile_time_macros,
     )
     registry.load()
 

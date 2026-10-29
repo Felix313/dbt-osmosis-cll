@@ -160,6 +160,9 @@ from dbt_osmosis_cll.cll_generator.artifacts.exceptions import (  # noqa: E402
     RegistryError,
 )
 from dbt_osmosis_cll.cll_generator.parser import SQLColumnParser  # noqa: E402
+from dbt_osmosis_cll.cll_generator.parser.jinja_usage import (  # noqa: E402
+    extract_compile_time_usages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +196,7 @@ class ModelRegistry:
         stop_at_ephemeral: bool = False,
         placeholder_patterns: Optional[list] = None,
         lazy_lineage: bool = False,
+        compile_time_macros: Optional[list] = None,
     ):
         if _catalog_reader_override is not None:
             self._catalog_reader = _catalog_reader_override
@@ -210,10 +214,14 @@ class ModelRegistry:
         # compiled SQL is parsed on first access via ensure_lineage()/ensure_all_lineage().
         # Keeps cold-start cost proportional to the models actually requested.
         self._lazy_lineage: bool = lazy_lineage
+        # Macro names whose raw-code calls are compile-time warehouse queries.
+        self._compile_time_macros = list(compile_time_macros) if compile_time_macros else None
         self._lineage_done: Set[str] = set()
         # Lazily built dbt-model-name → unique_id map for resolve_by_any_name.
         self._name_index: Optional[Dict[str, str]] = None
         self._parse_lock = threading.RLock()
+        # Relations whose columns are being discovered on demand (cycle guard).
+        self._column_lookup_active: Set[str] = set()
         # Build combined placeholder regex from caller-supplied patterns.
         # No default — placeholder replacement is repo-specific and opt-in via .osmosis.
         if placeholder_patterns:
@@ -420,10 +428,23 @@ class ModelRegistry:
         if self._placeholder_re is not None:
             sql = self._placeholder_re.sub(_replace_placeholder, sql)
 
+        # A model being parsed must not be re-parsed by its own column lookup
+        # (incremental models join {{ this }}).
+        uid = model.unique_id or model_name
+        self._column_lookup_active.add(uid)
         try:
             parse_result = self._sql_parser.parse_column_lineage(
                 sql, stop_at_ephemeral=self._stop_at_ephemeral
             )
+            # Compile-time Jinja queries (e.g. get_column_values on a config table)
+            # never reach the compiled SQL; read them from the raw model code.
+            raw_sql = self._manifest_reader.get_raw_sql(model_name, unique_id=model.unique_id)
+            jinja_usages = extract_compile_time_usages(raw_sql or "", self._compile_time_macros)
+            if jinja_usages:
+                merged = {u.sort_key(): u for u in parse_result.column_usages}
+                for usage in jinja_usages:
+                    merged.setdefault(usage.sort_key(), usage)
+                parse_result.column_usages = sorted(merged.values(), key=lambda u: u.sort_key())
             self._apply_column_lineage(model, parse_result)
             # Collect ephemeral CTE lineage from this model's parse result
             for cte_name, cte_cols in parse_result.ephemeral_cte_lineage.items():
@@ -434,6 +455,8 @@ class ModelRegistry:
                 f"Failed to process lineage for model {model_name}: {type(e).__name__}: {str(e)}"
             )
             return "failed"
+        finally:
+            self._column_lookup_active.discard(uid)
 
     def _process_lineage(self, models: Dict[str, Model]) -> None:
         """Process and apply column lineage to models (eager, whole set)."""
@@ -500,6 +523,8 @@ class ModelRegistry:
                 # ``Column.full_name`` is the qualified name lineage is matched against.
                 model.columns[col_name] = Column(name=col_name, model_name=self._lookup_name(model))
             model.columns[col_name].lineage = lineage
+
+        model.column_usages = list(parse_result.column_usages)
 
         if parse_result.star_sources:
             model.metadata = model.metadata or {}
@@ -575,6 +600,32 @@ class ModelRegistry:
                 for existing in target_col.lineage
             ):
                 target_col.lineage.append(star_lineage)
+
+    def _discover_relation_columns(self, relation: str) -> Optional[Set[str]]:
+        """Columns of *relation* for unqualified-reference resolution, or None.
+
+        Called by the parser for relations without a catalog/YAML column list. In
+        lazy mode an unparsed parent model is parsed on demand so its SQL-derived
+        columns become known; only relations a scope actually needs are touched.
+        """
+        model = self._resolve_model(relation)
+        if model is None:
+            return None
+        uid = model.unique_id or self._lookup_name(model)
+        if (
+            not model.columns
+            and self._lazy_lineage
+            and model.language == "sql"
+            and uid not in self._lineage_done
+            and uid not in self._column_lookup_active
+        ):
+            self._column_lookup_active.add(uid)
+            try:
+                with self._parse_lock:
+                    self._ensure_lineage_locked(model, in_progress=set())
+            finally:
+                self._column_lookup_active.discard(uid)
+        return set(model.columns) or None
 
     def ensure_lineage(self, model: Model) -> None:
         """Guarantee *model*'s column lineage is parsed (lazy mode only).
@@ -697,7 +748,9 @@ class ModelRegistry:
                 if lookup and m.columns:
                     table_columns.setdefault(lookup, set()).update(m.columns.keys())
             self._sql_parser = SQLColumnParser(
-                dialect=self._dialect, table_columns=table_columns or None
+                dialect=self._dialect,
+                table_columns=table_columns or None,
+                column_lookup=self._discover_relation_columns,
             )
             self._apply_dependencies(models)
             if not self._lazy_lineage:

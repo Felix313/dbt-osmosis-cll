@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass, field
 from sqlglot import parse_one, exp
 from typing import Dict, List, Set, Optional, Any, Callable, Literal, cast
-from dbt_osmosis_cll.cll_generator.models.schema import ColumnLineage, SQLParseResult
+from dbt_osmosis_cll.cll_generator.models.schema import ColumnLineage, ColumnUsage, SQLParseResult
 from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import (
     get_scoped_table_aliases,
     get_scoped_tables_from_select,
@@ -15,6 +15,12 @@ from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import (
 )
 
 logging.getLogger("sqlglot").setLevel(logging.ERROR)
+
+_EMPTY_TYPE_PARAMS_RE = re.compile(
+    r"\b(VARCHAR|NVARCHAR|CHAR|CHARACTER|STRING|TEXT|NUMBER|NUMERIC|DECIMAL|BINARY|VARBINARY)"
+    r"\s*\(\s*\)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -341,11 +347,16 @@ class SQLColumnParser:
         self,
         dialect: Optional[str] = None,
         table_columns: Optional[Dict[str, Set[str]]] = None,
+        column_lookup: Optional[Callable[[str], Optional[Set[str]]]] = None,
     ):
         """*table_columns* optionally maps relation name → known column names
         (e.g. from ManifestCatalogReader). When provided, unqualified column
         references in multi-table scopes resolve to the table that actually has
-        the column instead of blindly to the first FROM table."""
+        the column instead of blindly to the first FROM table.
+
+        *column_lookup* is consulted for relations *table_columns* does not list
+        (e.g. a parent model without YAML columns whose columns the registry can
+        discover by parsing it), for both projected lineage and the usage pass."""
         self.dialect = dialect
         self._table_columns: Optional[Dict[str, Set[str]]] = (
             {
@@ -355,6 +366,7 @@ class SQLColumnParser:
             if table_columns
             else None
         )
+        self._column_lookup = column_lookup
         self._cte_handler = CTEHandler()
         self._star_handler = StarExpressionHandler()
         self._star_handler._cte_handler = self._cte_handler
@@ -363,31 +375,74 @@ class SQLColumnParser:
     def _pick_table_for_unqualified(self, col_name: str, context: ParserContext) -> str:
         """Schema-aware table choice for an unqualified column reference.
 
-        Active only when the parser was constructed with *table_columns*. When
+        Active only when the parser has *table_columns* or a *column_lookup*. When
         exactly one in-scope table is known to have the column, that table wins;
         ambiguous or unknown columns keep the historical first-FROM-table answer.
         CTE columns recorded in cte_sources participate as known column lists.
         """
-        if self._table_columns is None or len(context.scope_tables) < 2:
+        if (self._table_columns is None and self._column_lookup is None) or len(
+            context.scope_tables
+        ) < 2:
             return context.table_context
         col = col_name.lower()
         candidates = []
         for tbl in context.scope_tables:
-            cols = self._table_columns.get(tbl)
-            if cols is None and tbl in context.cte_sources:
+            if tbl in context.cte_sources:
                 cols = {c.lower() for c in context.cte_sources[tbl]}
+            else:
+                cols = self._known_table_columns(tbl)
             if cols and col in cols:
                 candidates.append(tbl)
         if len(candidates) == 1:
             return candidates[0]
         return context.table_context
 
+    def _known_table_columns(self, table: str) -> Optional[Set[str]]:
+        """Known column names of a base relation, or None when unknown."""
+        table = table.lower()
+        if self._table_columns is not None and table in self._table_columns:
+            return self._table_columns[table]
+        if self._column_lookup is not None:
+            cols = self._column_lookup(table)
+            if cols:
+                return {c.lower() for c in cols}
+        return None
+
     def parse_column_lineage(self, sql: str, stop_at_ephemeral: bool = False) -> SQLParseResult:
         # Snowflake's GROUP BY ALL confuses sqlglot's parser state after
-        # correlated subqueries (EXISTS/IN). Strip it — GROUP BY has no effect
-        # on which columns appear in the output or their transformation types.
-        sql = re.sub(r"\bGROUP\s+BY\s+ALL\b", "", sql, flags=re.IGNORECASE)
+        # correlated subqueries (EXISTS/IN). Rewrite it to a plain marker column —
+        # GROUP BY has no effect on which columns appear in the output, and the
+        # usage pass expands the marker back to the non-aggregate projections.
+        sql = re.sub(
+            r"\bGROUP\s+BY\s+ALL\b", f"GROUP BY {GROUP_BY_ALL_MARKER}", sql, flags=re.IGNORECASE
+        )
+        # Snowflake accepts an empty length (`x::VARCHAR()`) meaning "no length";
+        # sqlglot rejects it and the whole model would lose its lineage.
+        sql = _EMPTY_TYPE_PARAMS_RE.sub(r"\1", sql)
         parsed = parse_one(sql, dialect=self.dialect)
+        result, usage_state = self._parse_lineage_tree(parsed, stop_at_ephemeral)
+        result.column_usages = self._collect_usages(parsed, usage_state)
+        return result
+
+    def _collect_usages(self, parsed: Any, usage_state: Optional[tuple]) -> List[ColumnUsage]:
+        """Run the usage pass on the CTE state the lineage pass built.
+
+        Never fails the lineage parse: a usage-pass error is logged and yields no rows.
+        """
+        if usage_state is None:
+            return []
+        base_context, ctes = usage_state
+        try:
+            return UsageCollector(self, base_context, ctes).collect(parsed)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "Column-usage pass failed: %s: %s", type(e).__name__, e
+            )
+            return []
+
+    def _parse_lineage_tree(
+        self, parsed: Any, stop_at_ephemeral: bool
+    ) -> tuple[SQLParseResult, Optional[tuple]]:
         # Collect CTE nodes once — they are needed by several passes below and a full
         # AST walk per pass is wasteful on large Snowflake CTE chains.
         ctes = list(parsed.find_all(exp.CTE))
@@ -417,6 +472,22 @@ class SQLColumnParser:
             cte_base_tables,
             cte_union_branches,
             cte_source_sets,
+        )
+
+        usage_state = (
+            ParserContext(
+                aliases={},
+                table_context="",
+                cte_sources=cte_sources,
+                cte_to_model=cte_to_model,
+                cte_transformation_types=cte_transformation_types,
+                cte_sql_expressions=cte_sql_expressions,
+                cte_base_tables=cte_base_tables,
+                cte_union_branches=cte_union_branches,
+                cte_source_sets=cte_source_sets,
+                ephemeral_cte_names=ephemeral_cte_names,
+            ),
+            ctes,
         )
 
         # Collect ephemeral CTE lineage — the fully-traced column sources for
@@ -497,10 +568,13 @@ class SQLColumnParser:
                             union_branches=branches,
                         )
                     ]
-            return SQLParseResult(
-                column_lineage=columns,
-                star_sources=star_sources,
-                ephemeral_cte_lineage=ephemeral_cte_lineage,
+            return (
+                SQLParseResult(
+                    column_lineage=columns,
+                    star_sources=star_sources,
+                    ephemeral_cte_lineage=ephemeral_cte_lineage,
+                ),
+                usage_state,
             )
         elif not final_select:
             selects_to_process: List[Any] = list(parsed.find_all(exp.Select))
@@ -615,10 +689,13 @@ class SQLColumnParser:
                 lineage = self._expression_analyzer.analyze(expr, context)
                 columns[target_col] = lineage
 
-        return SQLParseResult(
-            column_lineage=columns,
-            star_sources=star_sources,
-            ephemeral_cte_lineage=ephemeral_cte_lineage,
+        return (
+            SQLParseResult(
+                column_lineage=columns,
+                star_sources=star_sources,
+                ephemeral_cte_lineage=ephemeral_cte_lineage,
+            ),
+            usage_state,
         )
 
     def _extract_cte_model_mappings(self, sql: str) -> Dict[str, str]:
@@ -1354,3 +1431,10 @@ class SQLColumnParser:
                     continue
             columns.add(resolved)
         return columns
+
+
+# Imported last: usage.py type-references ParserContext / SQLColumnParser from here.
+from dbt_osmosis_cll.cll_generator.parser.usage import (  # noqa: E402
+    GROUP_BY_ALL_MARKER,
+    UsageCollector,
+)

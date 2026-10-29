@@ -191,6 +191,70 @@ Like `lineage explore`, the command is manifest-only: column lists come from the
 
 **Cold-start cost tracks the selector, not the repo.** Lineage parsing is lazy: only the models the selector resolves to are SQL-parsed (`yaml refactor`/`document` likewise parse only the models a run actually touches, plus their upstream walks). A first `parse-cll -s +one_model` on a large repo therefore takes seconds, not minutes.
 
+#### Join / filter / qualify columns (`usages`)
+
+Projected lineage alone misses every column a model *needs* without outputting it. Since schema version 3, `cll-result.json` carries a separate `usages` list — never merged into `results`, because whether a column that only filters is still needed after a migration is a business decision the tool cannot make. One row per (model, usage, source column, scope, predicate):
+
+| `usage` | Where the column appears |
+| --- | --- |
+| `join_key` | `JOIN … ON` conjunct relating two relations (`a.k = b.k`, range joins, `x BETWEEN b.from AND b.to`) — both sides are reported |
+| `join_filter` | `JOIN … ON` conjunct constraining one side only (`AND b.flg = 'Y'`) |
+| `filter` | `WHERE`, including the projection of a filtering subquery (`x IN (SELECT y …)`) |
+| `qualify` | `QUALIFY`, window specification included (`detail`: `partition_by` / `order_by` / `predicate`) |
+| `window` | `PARTITION BY` / `ORDER BY` of a window function in a projection |
+| `group_by` | `GROUP BY` keys; `GROUP BY ALL` expands to the non-aggregate projections, ordinals map to projections |
+| `having` | `HAVING` |
+| `compile_time` | read by a compile-time Jinja query such as `get_column_values(ref('cfg'), column='flag', order_by='MAX(ts) DESC')` — the column decides which SQL is generated without appearing in the compiled SQL; `dbt_vars` names the result variable, `controls_branch` says whether it drives an `{% if %}` |
+
+Each row names the model whose SQL reads the column, the `source_model` / `source_column` it resolves to **through every CTE of that model** (a `QUALIFY` on a column a CTE never projects still lands on the base relation), the `scope` (CTE name, `<final>`, `…/subquery`, `<jinja>`), the normalized `predicate_sql`, and `resolution` — `qualified`, `single_table`, `unqualified_resolved` (unqualified reference matched through the parent models' column lists; parents without YAML columns are parsed on demand), `select_alias`, or `ambiguous` (one row per candidate instead of silently picking the first `FROM` table). `origins` / `via_models` follow the used column upstream through the projected lineage to sources, seeds, or models without compiled SQL (`--no-usage-origins` skips that walk). `is_self_reference` marks incremental `{{ this }}` joins. Predicates whose literals match a string `var` from `dbt_project.yml` list the var in `dbt_vars`.
+
+Rows are sorted and de-duplicated; two runs over the same artifacts write byte-identical files. The same data is available programmatically via `dbt_osmosis_cll.cll_generator.api.get_column_usage()`.
+
+`parse-cll` reads `compiled-sql-placeholder-patterns` and `compile-time-query-macros` from the project's `.osmosis-cll`, so repo-specific tokens and introspective macros are handled by configuration, not code.
+
+#### Column sources and coverage
+
+Star expansion and unqualified references need every relation's columns. The manifest only knows documented YAML columns; relations without them can be filled from further sources, in order:
+
+```ini
+[osmosis]
+cll-column-sources = manifest, catalog, live   # default: manifest
+cll-catalog-path   = target/catalog.json       # from `dbt docs generate`
+```
+
+`live` queries the warehouse (needs `--profiles-dir` / `--target`) and only for relations the selection reads that are still without columns. `--column-sources` / `--catalog` override the config per run. Every `cll-result.json` carries a `coverage` block — relations read by the selection without any known column, `SELECT *` over such relations, ambiguous / unresolved usage counts, and which source supplied each relation's columns — and the same findings are logged as warnings.
+
+### Offline compile for lineage (`compile-cll`)
+
+Lineage needs the SQL a model really runs. Projects that decide it at compile time — a body gated by `get_column_values(ref('load_config'), 'load_flg')`, `is_incremental()`, `dbt_utils.star(from=ref('x'))`, in-house introspective macros — cannot be compiled without a warehouse, or compile to the wrong branch. `compile-cll` compiles them offline, configured entirely in `.osmosis-cll`:
+
+```ini
+[compile]
+adapter = snowflake               # adapter of the generated offline profile
+target = prod                     # target.name the models see
+introspection-values =            # pinned results of get_column_values-style calls
+    load_config.load_flg = Y
+    load_config.run_dt = 2000-01-31
+is-incremental = false            # what is_incremental() returns (default false)
+is-incremental-models = model_a   # models compiled with is_incremental() = true
+vars = {"run_ts": "2000-01-01T00:00:00"}   # pin time-dependent vars for identical output
+macro-stubs =                     # any other introspective macro: name = Jinja expression
+    my_pkg.latest_loaded_ts = '2000-01-01'
+relations-exist = audit_log       # adapter.get_relation(): treat as existing ...
+relations-missing = tmp_backfill  # ... or as missing (default: exists iff the manifest knows it)
+```
+
+Direct adapter calls in model Jinja are answered offline too: `adapter.get_relation()` returns a relation for everything the manifest knows (override with `relations-exist` / `relations-missing`), `adapter.get_columns_in_relation()` returns the manifest's documented columns. Each answer is recorded per model (`relations_assumed_existing` / `relations_assumed_missing`).
+
+```bash
+dbt-osmosis-cll compile-cll -s "1+my_model"
+dbt-osmosis-cll parse-cll   -s "1+my_model"
+```
+
+How it works: dbt parses the project in-process; in the parsed manifest — never on disk — every macro named `is_incremental`, every `get_column_values`-style macro (any package, signature-checked) and every `star` is replaced by a stub, plus the `macro-stubs` you list. The compile then runs with a generated profile whose credentials cannot reach a warehouse, without cache population or introspection; any remaining connection attempt fails with a message naming the setting to add. Nothing in the dbt project is modified.
+
+Every assumption is logged and written to `target/cll-compile.json`, and `parse-cll` copies it per model into `cll-result.json` (`compile`): the `is_incremental()` value each model was compiled with (the full-build branch is assumed to hold the complete logic — models whose incremental branch is the only real one need `is-incremental-models`), pinned and *unpinned* compile-time values (an unpinned call returns the macro default), `star` calls over relations without known columns, and models whose compiled SQL looks like an empty shell (`LIMIT 0`, `WHERE 1 = 0` / `FALSE`, reading only their own relation).
+
 ### Serving the explorer from a precomputed CLL artifact
 
 By default `lineage explore` parses every model's compiled SQL before it starts serving — on a large repo that is the whole cold-start cost. When the work has already been done, point the explorer at the result instead:

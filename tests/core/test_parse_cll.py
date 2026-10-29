@@ -212,7 +212,8 @@ def test_parse_cll_writes_dedicated_result_file(tmp_path):
     assert not (target / "cll_cache.json").exists()
 
     payload = json.loads(out_path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
+    assert isinstance(payload["usages"], list)
     assert payload["selectors"] == ["+mart_orders"]
     assert payload["models"] == ["int_orders", "mart_orders", "stg_orders"]
 
