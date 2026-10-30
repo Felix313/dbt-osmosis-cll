@@ -258,6 +258,13 @@ class StarExpressionHandler:
 _SHADOW_SUFFIX = "__cll_cte"
 
 
+def _replace_keeping_name(column: Any, replacement: Any) -> None:
+    """Replace *column*; a bare projection keeps its output name as alias."""
+    if isinstance(column.parent, exp.Select) and column in column.parent.expressions:
+        replacement = exp.alias_(replacement, column.name)
+    column.replace(replacement)
+
+
 def _rename_shadowing_ctes(parsed: Any) -> Any:
     """Give CTEs that share their name with a schema-qualified relation a unique name.
 
@@ -360,7 +367,7 @@ def _inline_table_function_columns(parsed: Any) -> Any:
             if column.name.lower() in names and (
                 not qualifier or (alias_name and qualifier == alias_name)
             ):
-                column.replace(exp.Paren(this=source.copy()))
+                _replace_keeping_name(column, exp.Paren(this=source.copy()))
     return parsed
 
 
@@ -416,7 +423,7 @@ def _inline_pivot_columns(parsed: Any) -> Any:
                     ]
                 ),
             )
-            column.replace(replacement)
+            _replace_keeping_name(column, replacement)
     return parsed
 
 

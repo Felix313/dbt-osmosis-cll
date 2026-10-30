@@ -484,3 +484,19 @@ class TestAttribution:
             "division_id": {"dim.division_id"},
             "flag": {"other.flag"},
         }
+
+    def test_bare_table_function_and_pivot_projections_keep_their_names(self):
+        flat = (
+            "WITH x AS (SELECT s.id, index FROM sch.src s, LATERAL FLATTEN(INPUT => s.js)) "
+            "SELECT a.id FROM x a JOIN x b ON a.index = b.index + 1"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(flat)
+        joins = {u.source for u in result.column_usages if u.usage == "join_key"}
+        assert joins == {"src.js"}
+        pivot = (
+            "WITH pre AS (SELECT u.k, u.typ, u.amt FROM sch.up u), "
+            "p AS (SELECT k, \"'a'\" FROM pre PIVOT(SUM(amt) FOR typ IN ('a'))) "
+            "SELECT * FROM p"
+        )
+        out = SQLColumnParser(dialect="snowflake").parse_column_lineage(pivot).column_lineage
+        assert "'a'" in out and out["'a'"][0].source_columns == {"up.amt", "up.typ"}
