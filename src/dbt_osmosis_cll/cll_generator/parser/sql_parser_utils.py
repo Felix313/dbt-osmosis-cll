@@ -25,8 +25,39 @@ def strip_sql_comments(text: str) -> str:
     return text.strip()
 
 
+class AliasMap(dict):
+    """Table aliases, matched case-insensitively like unquoted SQL identifiers.
+
+    ``FROM fin1 T`` is referenced as ``t.*`` just as well; a case-sensitive map
+    missed it and the column fell back to a guessed relation.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self.update(*args, **kwargs)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(str(key).lower(), value)
+
+    def __getitem__(self, key: Any) -> Any:
+        return super().__getitem__(str(key).lower())
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(str(key).lower())
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return super().get(str(key).lower(), default)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def copy(self) -> "AliasMap":
+        return AliasMap(self)
+
+
 def get_table_aliases(parsed: Any) -> Dict[str, str]:
-    aliases = {}
+    aliases = AliasMap()
     for table in parsed.find_all((exp.Table, exp.From, exp.Join)):
         if table.alias:
             aliases[table.alias] = str(table.name).lower()
@@ -41,7 +72,7 @@ def get_scoped_table_aliases(scope_root: Any) -> Dict[str, str]:
     inner ``FROM customers o`` can neither shadow nor leak into the outer
     SELECT's alias map (the "global alias map" wrong-edge bug).
     """
-    aliases: Dict[str, str] = {}
+    aliases: Dict[str, str] = AliasMap()
     for table in scope_root.find_all((exp.Table, exp.From, exp.Join)):
         if not table.alias:
             continue
@@ -136,11 +167,15 @@ def get_final_select(parsed: Any) -> Optional[Any]:
 
 
 def split_qualified_name(qualified_name: str) -> tuple[str, str]:
-    """Split a qualified name into table and column parts, stripping SQL comments."""
+    """Split a qualified name into table and column parts.
+
+    SQL comments and identifier quotes are stripped: ``amd."TYPE"`` and ``amd.type``
+    name the same column, and downstream matching compares bare names.
+    """
     if "." not in qualified_name:
-        return ("", strip_sql_comments(qualified_name))
+        return ("", strip_sql_comments(qualified_name).strip().strip('"'))
     qualified_name = strip_sql_comments(qualified_name)
-    parts = qualified_name.split(".")
+    parts = [part.strip().strip('"') for part in qualified_name.split(".")]
     table_part = ".".join(parts[:-1])
     column_part = strip_sql_comments(parts[-1])
     return (table_part, column_part)

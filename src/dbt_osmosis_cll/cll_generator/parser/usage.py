@@ -24,6 +24,7 @@ from sqlglot import exp
 
 from dbt_osmosis_cll.cll_generator.models.schema import ColumnUsage
 from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import (
+    AliasMap,
     get_scoped_table_aliases,
     get_scoped_tables_from_select,
     get_table_context,
@@ -158,7 +159,7 @@ class UsageCollector:
 
     def _context_for(self, select: exp.Select) -> ParserContext:
         """Scope context: own aliases, plus enclosing scopes' aliases for correlation."""
-        aliases: dict[str, str] = {}
+        aliases: dict[str, str] = AliasMap()
         chain = []
         parent = select.parent
         while parent is not None:

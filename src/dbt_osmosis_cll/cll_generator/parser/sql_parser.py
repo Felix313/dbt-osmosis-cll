@@ -5,6 +5,7 @@ from sqlglot import parse_one, exp
 from typing import Dict, List, Set, Optional, Any, Callable, Literal, cast
 from dbt_osmosis_cll.cll_generator.models.schema import ColumnLineage, ColumnUsage, SQLParseResult
 from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import (
+    AliasMap,
     get_scoped_table_aliases,
     get_scoped_tables_from_select,
     get_table_context,
@@ -254,6 +255,171 @@ class StarExpressionHandler:
         return False
 
 
+_SHADOW_SUFFIX = "__cll_cte"
+
+
+def _rename_shadowing_ctes(parsed: Any) -> Any:
+    """Give CTEs that share their name with a schema-qualified relation a unique name.
+
+    ``WITH orders AS (... FROM sales.orders ...)`` is valid SQL: the qualified name is
+    the real relation, only unqualified ``orders`` means the CTE. The parser keys
+    relations by bare name, so the CTE swallowed the relation and its columns were
+    attributed by guesswork. Renaming the CTE and its unqualified references keeps
+    the two apart; qualified references stay untouched.
+    """
+    ctes = list(parsed.find_all(exp.CTE))
+    if not ctes:
+        return parsed
+    cte_names = {cte.alias.lower() for cte in ctes}
+    qualified = {
+        t.name.lower()
+        for t in parsed.find_all(exp.Table)
+        if t.name and (t.args.get("db") or t.args.get("catalog"))
+    }
+    shadowing = cte_names & qualified
+    if not shadowing:
+        return parsed
+    for cte in ctes:
+        name = cte.alias.lower()
+        if name in shadowing:
+            cte.set("alias", exp.TableAlias(this=exp.to_identifier(name + _SHADOW_SUFFIX)))
+    for table in parsed.find_all(exp.Table):
+        name = (table.name or "").lower()
+        if name in shadowing and not (table.args.get("db") or table.args.get("catalog")):
+            table.set("this", exp.to_identifier(name + _SHADOW_SUFFIX))
+    for column in parsed.find_all(exp.Column):
+        qualifier = (column.table or "").lower()
+        if qualifier not in shadowing or column.args.get("db"):
+            continue
+        # `orders.amount` next to an unaliased `FROM sales.orders` means the relation.
+        select = column.find_ancestor(exp.Select)
+        own_tables = [
+            t
+            for t in (select.find_all(exp.Table) if select else [])
+            if t.find_ancestor(exp.Select) is select
+        ]
+        if any(
+            (t.name or "").lower() == qualifier and not t.alias and t.args.get("db")
+            for t in own_tables
+        ):
+            continue
+        column.set("table", exp.to_identifier(qualifier + _SHADOW_SUFFIX))
+    return parsed
+
+
+_TABLE_FUNCTION_COLUMNS = {
+    "flatten": ("seq", "key", "path", "index", "value", "this"),
+    "split_to_table": ("seq", "index", "value"),
+}
+
+
+def _table_function_input(node: Any) -> tuple[Optional[str], Optional[Any]]:
+    """``(function, input expression)`` of a lateral table function, else ``(None, None)``."""
+    fn = node.this
+    if isinstance(fn, exp.Explode):  # FLATTEN(INPUT => x, ...)
+        args = [fn.this, *fn.expressions]
+        for arg in args:
+            if isinstance(arg, exp.Kwarg) and arg.this.name.lower() == "input":
+                return "flatten", arg.expression
+        positional = [a for a in args if not isinstance(a, exp.Kwarg)]
+        return ("flatten", positional[0]) if positional else (None, None)
+    if isinstance(fn, exp.Anonymous) and fn.name.lower() in _TABLE_FUNCTION_COLUMNS:
+        return (fn.name.lower(), fn.expressions[0]) if fn.expressions else (None, None)
+    split_to_table = getattr(exp, "SplitToTable", None)  # typed node in newer sqlglot
+    if split_to_table is not None and isinstance(fn, split_to_table):
+        return "split_to_table", fn.this
+    return None, None
+
+
+def _inline_table_function_columns(parsed: Any) -> Any:
+    """Replace references to lateral table-function output columns by the function input.
+
+    ``FROM t, LATERAL FLATTEN(INPUT => PARSE_JSON(t.js))`` exposes ``VALUE``, ``KEY``,
+    ``INDEX``, ... (``SPLIT_TO_TABLE``: ``SEQ``, ``INDEX``, ``VALUE``). They carry no
+    relation of their own, so an unqualified ``value`` was attributed to ``t``, a
+    column ``t`` does not have. Every such reference in the function's SELECT scope
+    (unqualified, or qualified by the function's alias) is replaced by a copy of the
+    input expression, which makes the lineage point at what the value is made of.
+    """
+    for node in list(parsed.find_all(exp.Lateral, exp.TableFromRows)):
+        kind, source = _table_function_input(node)
+        select = node.find_ancestor(exp.Select)
+        if kind is None or source is None or select is None:
+            continue
+        alias = node.args.get("alias")
+        alias_name = alias.name.lower() if alias is not None and alias.name else ""
+        names = set(_TABLE_FUNCTION_COLUMNS[kind])
+        if alias is not None and alias.columns:
+            names |= {c.name.lower() for c in alias.columns}
+        for column in list(select.find_all(exp.Column)):
+            if column.find_ancestor(exp.Select) is not select:
+                continue
+            if column.find_ancestor(exp.Lateral, exp.TableFromRows) is node:
+                continue  # the function's own input
+            qualifier = (column.table or "").lower()
+            if column.name.lower() in names and (
+                not qualifier or (alias_name and qualifier == alias_name)
+            ):
+                column.replace(exp.Paren(this=source.copy()))
+    return parsed
+
+
+def _inline_pivot_columns(parsed: Any) -> Any:
+    """Replace references to PIVOT output columns by the aggregate they stand for.
+
+    ``FROM t PIVOT(SUM(amt) FOR typ IN ('a', 'b'))`` outputs ``"'a'"`` and ``"'b'"``.
+    They are no columns of ``t``; each is ``SUM(CASE WHEN typ = 'a' THEN amt END)``.
+    Rewriting the references that way attributes them to their real inputs (the
+    aggregated value and the pivot column). Pivots with several aggregates are left
+    unchanged.
+    """
+    for pivot in list(parsed.find_all(exp.Pivot)):
+        if pivot.args.get("unpivot"):
+            continue
+        aggs = pivot.expressions or []
+        fields = pivot.args.get("fields") or []
+        if len(aggs) != 1 or len(fields) != 1 or not isinstance(fields[0], exp.In):
+            continue
+        agg, field = aggs[0], fields[0]
+        values = list(field.expressions)
+        names = [c.name for c in (pivot.args.get("columns") or [])]
+        if len(names) != len(values):
+            continue
+        alias = pivot.args.get("alias")
+        alias_cols = [c.name for c in alias.columns] if alias is not None and alias.columns else []
+        targets: dict[str, Any] = {}
+        for i, (name, value) in enumerate(zip(names, values)):
+            targets[name.lower()] = value
+            targets[name.strip("'\"").lower()] = value
+            if len(alias_cols) >= len(values):
+                targets[alias_cols[len(alias_cols) - len(values) + i].lower()] = value
+        alias_name = alias.name.lower() if alias is not None and alias.name else ""
+        select = pivot.find_ancestor(exp.Select)
+        if select is None:
+            continue
+        for column in list(select.find_all(exp.Column)):
+            if column.find_ancestor(exp.Select) is not select or column.find_ancestor(exp.Pivot):
+                continue
+            qualifier = (column.table or "").lower()
+            value = targets.get(column.name.lower())
+            if value is None or (qualifier and qualifier != alias_name):
+                continue
+            replacement = agg.copy()
+            replacement.set(
+                "this",
+                exp.Case(
+                    ifs=[
+                        exp.If(
+                            this=exp.EQ(this=field.this.copy(), expression=value.copy()),
+                            true=agg.this.copy(),
+                        )
+                    ]
+                ),
+            )
+            column.replace(replacement)
+    return parsed
+
+
 def _classify_expression(expr: Any) -> tuple[str, Optional[str]]:
     """Classify a SQL expression into a semantic transformation type.
 
@@ -419,7 +585,11 @@ class SQLColumnParser:
         # Snowflake accepts an empty length (`x::VARCHAR()`) meaning "no length";
         # sqlglot rejects it and the whole model would lose its lineage.
         sql = _EMPTY_TYPE_PARAMS_RE.sub(r"\1", sql)
-        parsed = parse_one(sql, dialect=self.dialect)
+        parsed = _inline_pivot_columns(
+            _inline_table_function_columns(
+                _rename_shadowing_ctes(parse_one(sql, dialect=self.dialect))
+            )
+        )
         result, usage_state = self._parse_lineage_tree(parsed, stop_at_ephemeral)
         result.column_usages = self._collect_usages(parsed, usage_state)
         return result
@@ -476,7 +646,7 @@ class SQLColumnParser:
 
         usage_state = (
             ParserContext(
-                aliases={},
+                aliases=AliasMap(),
                 table_context="",
                 cte_sources=cte_sources,
                 cte_to_model=cte_to_model,
@@ -881,11 +1051,19 @@ class SQLColumnParser:
         inner = branch_expr.this if isinstance(branch_expr, exp.Alias) else branch_expr
         from_table = self._branch_from_table(branch_select)
         if isinstance(inner, exp.Column):
-            if from_table is None:
+            # Honour the qualifier: `m.new_id` in a branch joining several relations
+            # reads m, not the branch's first FROM table.
+            aliases = get_scoped_table_aliases(branch_select)
+            table = (
+                aliases.get(str(inner.table), str(inner.table)).lower()
+                if inner.table
+                else from_table
+            )
+            if table is None:
                 return "", []
             return self._branch_column_sources(
                 str(inner.name).lower(),
-                from_table,
+                table,
                 cte_sources,
                 cte_to_model,
                 cte_source_sets,
@@ -1437,6 +1615,39 @@ class SQLColumnParser:
                 return forward_cols
         return None
 
+    @staticmethod
+    def _subquery_context(
+        col: Any, expr: Any, context: ParserContext, cache: Dict[int, ParserContext]
+    ) -> ParserContext:
+        """The scope a column inside a nested SELECT of *expr* resolves in.
+
+        ``(SELECT full_dt FROM gfd)`` inside a projection reads ``gfd``, not the outer
+        FROM table. Columns of such scalar / EXISTS / IN subqueries are resolved
+        against the subquery's own tables, with the outer aliases still visible for
+        correlated references. Columns directly in *expr* keep *context*.
+        """
+        sub = col.find_ancestor(exp.Select)
+        if sub is None or sub is expr:
+            return context
+        node = sub.parent
+        while node is not None and node is not expr:
+            node = node.parent
+        if node is None:
+            return context  # the column's SELECT encloses expr: the current scope
+        key = id(sub)
+        if key not in cache:
+            from dataclasses import replace
+
+            table = get_table_context(sub) or context.table_context
+            cache[key] = replace(
+                context,
+                aliases=AliasMap({**context.aliases, **get_scoped_table_aliases(sub)}),
+                table_context=table,
+                scope_tables=get_scoped_tables_from_select(sub) or [table],
+                column_definitions=None,
+            )
+        return cache[key]
+
     def _extract_source_columns(
         self,
         expr: Any,
@@ -1449,7 +1660,10 @@ class SQLColumnParser:
         columns = set()
         all_columns = list(expr.find_all(exp.Column))
         all_columns.sort(key=lambda c: str(c).lower())
+        outer_context = context
+        sub_contexts: Dict[int, ParserContext] = {}
         for col in all_columns:
+            context = self._subquery_context(col, expr, outer_context, sub_contexts)
             col_name = (
                 str(col.this).lower() if hasattr(col, "this") and col.this else str(col).lower()
             )

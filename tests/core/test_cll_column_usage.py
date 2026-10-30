@@ -401,3 +401,17 @@ def test_cte_named_like_its_base_table_resolves_to_the_base_table():
     usages = _usages(sql)
     rows = {(u.source, u.resolution) for u in usages if u.usage == "qualify"}
     assert rows == {("agent_pit.agent_id", "qualified"), ("agent_pit.loaded_ts", "qualified")}
+
+
+def test_compile_time_column_expression_reports_its_columns():
+    from dbt_osmosis_cll.cll_generator.parser.jinja_usage import extract_compile_time_usages
+
+    raw = (
+        "{%- set ts = get_column_values(ref('job_ref'), column='started_ts::VARCHAR', "
+        "order_by='MAX(created_ts) DESC') -%}\n"
+        "{%- set ids = get_column_values(ref('job_ref'), column=\"COALESCE(id_list, '0')\") -%}\n"
+        "select 1"
+    )
+    usages = extract_compile_time_usages(raw, ["get_column_values"])
+    values = sorted(u.source for u in usages if u.detail == "value_column")
+    assert values == ["job_ref.id_list", "job_ref.started_ts"]

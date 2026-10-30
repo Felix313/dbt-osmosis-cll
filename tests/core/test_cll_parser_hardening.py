@@ -393,3 +393,94 @@ class TestConstantInputs:
         lin = _lineage(SQLColumnParser(dialect="snowflake").parse_column_lineage(sql), "flg")
         assert lin.transformation_type == "union"
         assert lin.union_branches == ["tgt.flg"]
+
+
+# ---------------------------------------------------------------------------
+# Attribution: every column must land on the relation it is really read from.
+# ---------------------------------------------------------------------------
+
+
+def _sources(sql: str) -> dict[str, set[str]]:
+    result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+    return {col: lins[0].source_columns for col, lins in result.column_lineage.items()}
+
+
+class TestAttribution:
+    def test_cte_named_like_a_qualified_relation_does_not_swallow_it(self):
+        sql = (
+            "WITH runs AS (SELECT cfg.run_dt FROM cfg_schema.config AS cfg), "
+            "orders AS (SELECT r.run_dt, o.amount FROM runs AS r "
+            "JOIN sales.orders AS o ON r.run_dt = o.run_dt) "
+            "SELECT o2.run_dt, o2.amount FROM orders AS o2"
+        )
+        assert _sources(sql) == {"run_dt": {"config.run_dt"}, "amount": {"orders.amount"}}
+
+    def test_unaliased_qualified_relation_inside_its_namesake_cte(self):
+        sql = (
+            "WITH orders AS (SELECT orders.amount, orders.id FROM sales.orders) "
+            "SELECT orders.amount, o.id FROM orders JOIN orders AS o ON o.id = orders.id"
+        )
+        assert _sources(sql) == {"amount": {"orders.amount"}, "id": {"orders.id"}}
+
+    def test_flatten_output_columns_resolve_to_the_flattened_input(self):
+        sql = (
+            "WITH f AS (SELECT id, value:attribute::STRING AS att FROM sch.src, "
+            "LATERAL FLATTEN(INPUT => PARSE_JSON(js_list))) SELECT f.id, f.att FROM f"
+        )
+        assert _sources(sql) == {"id": {"src.id"}, "att": {"src.js_list"}}
+
+    def test_aliased_table_flatten_and_split_to_table(self):
+        flat = (
+            "SELECT s.id, f.value::STRING AS v, f.index AS i "
+            "FROM sch.src s, TABLE(FLATTEN(INPUT => s.js)) f"
+        )
+        assert _sources(flat) == {"id": {"src.id"}, "v": {"src.js"}, "i": {"src.js"}}
+        split = (
+            "SELECT TRIM(value) AS part FROM sch.src AS s "
+            'INNER JOIN LATERAL SPLIT_TO_TABLE("CSV_COL", CHR(10)) '
+            "QUALIFY MAX(index) OVER (PARTITION BY seq) > 1"
+        )
+        assert _sources(split) == {"part": {"src.csv_col"}}
+
+    def test_pivot_output_columns_resolve_to_value_and_pivot_column(self):
+        sql = (
+            "WITH pre AS (SELECT u.k, u.typ, u.amt FROM sch.up u), "
+            "p AS (SELECT k, \"'a'\" AS a_amt FROM pre PIVOT(SUM(amt) FOR typ IN ('a', 'b'))) "
+            "SELECT p.k, p.a_amt FROM p"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        lin = result.column_lineage["a_amt"][0]
+        assert lin.source_columns == {"up.amt", "up.typ"}
+        assert lin.transformation_type == "aggregate"
+
+    def test_scalar_subquery_reads_its_own_relation(self):
+        sql = (
+            "WITH gfd AS (SELECT MAX(c.full_dt) AS full_dt FROM sch.cal c) "
+            "SELECT (SELECT full_dt FROM gfd) AS full_dt, d.contract_id FROM sch.dim d"
+        )
+        assert _sources(sql) == {"full_dt": {"cal.full_dt"}, "contract_id": {"dim.contract_id"}}
+
+    def test_union_branch_column_honours_its_qualifier(self):
+        sql = (
+            "WITH cm AS (SELECT mig.new_id AS contract_id FROM sch.igy con "
+            "LEFT JOIN sch.mig AS mig ON con.contract_id = mig.old_id "
+            "UNION ALL SELECT new_id AS contract_id FROM sch.mig) "
+            "SELECT cm.contract_id FROM cm"
+        )
+        assert _sources(sql) == {"contract_id": {"mig.new_id"}}
+
+    def test_quoted_identifiers_are_bare_names(self):
+        sql = 'SELECT md."TYPE" AS datatype, md."Variable" FROM sch.meta md'
+        assert _sources(sql) == {"datatype": {"meta.type"}, "variable": {"meta.variable"}}
+
+    def test_aliases_match_case_insensitively(self):
+        sql = (
+            "WITH fin1 AS (SELECT c.contract_id, c.division_id FROM sch.dim c), "
+            "fin2 AS (SELECT t.*, o.flag FROM fin1 T JOIN sch.other o ON o.cid = T.contract_id) "
+            "SELECT contract_id, division_id, flag FROM fin2"
+        )
+        assert _sources(sql) == {
+            "contract_id": {"dim.contract_id"},
+            "division_id": {"dim.division_id"},
+            "flag": {"other.flag"},
+        }

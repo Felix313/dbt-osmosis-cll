@@ -171,7 +171,10 @@ def extract_compile_time_usages(
         dbt_vars = [target] if target else []
         controls = bool(target and target in branch_names)
 
-        entries: list[tuple[str, str]] = [(column.lower(), "value_column")]
+        # The column argument is a SQL expression in general (`x::VARCHAR`,
+        # `COALESCE(x, '0')`): report the columns it reads.
+        value_cols = _sql_columns(column, "ORDER BY") or [column.lower()]
+        entries: list[tuple[str, str]] = [(c, "value_column") for c in value_cols]
         if isinstance(order_by, str):
             entries += [(c, "order_by") for c in _sql_columns(order_by, "ORDER BY")]
         if isinstance(where, str):
