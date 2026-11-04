@@ -30,7 +30,8 @@ var CllEngine = (function () {
       models: models, rows: rows, usages: usages, deps: deps,
       gaps: blob.gaps.map(function (g) { return [names[g[0]], g[1], g[2]]; }),
       documentedOnly: blob.documentedOnly.map(function (g) { return [names[g[0]], g[1]]; }),
-      coverage: blob.coverage, selectors: blob.selectors, dataProducts: blob.dataProducts
+      coverage: blob.coverage, selectors: blob.selectors, dataProducts: blob.dataProducts,
+      unverified: blob.unverified || {}
     };
   }
 

@@ -194,6 +194,17 @@ def test_quality_signals():
     assert analyse(graph, ["dp_one", "nope"]).missing == ["nope"]
 
 
+def test_models_compiled_without_a_real_column_list_are_named():
+    with_compile = json.loads(json.dumps(CLL))
+    with_compile["compile"] = {
+        "int_c": {"star_without_columns": ["raw_b"], "columns_from_docs": ["raw_a"]},
+        "dp_one": {"is_incremental": False},
+    }
+    graph = build_graph(with_compile, MANIFEST, DPS)
+    assert graph.unverified == {"int_c": ["raw_a", "raw_b"]}
+    assert compact_graph(graph)["unverified"] == {"int_c": ["raw_a", "raw_b"]}
+
+
 def test_old_results_without_in_sql_flag_are_classified_by_signature():
     legacy = json.loads(json.dumps(CLL))
     for row in legacy["results"]:

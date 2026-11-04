@@ -1214,13 +1214,16 @@ def report(
     for dp in result.missing:
         logger.warning(":warning: Data product %s is not in the analysed scope of %s", dp, cll_file)
     unresolved = sum(1 for g in graph.gaps if g[2] == "unresolved")
+    unverified = sum(1 for model, _ in result.dangling if model in graph.unverified)
     if unresolved or result.dangling:
         logger.warning(
             ":warning: Lineage coverage incomplete: %d column(s) without traced SQL, %d "
-            "reference(s) to columns the upstream model does not output — see the "
-            "report's quality tab.",
+            "reference(s) into models compiled without a real column list, %d other "
+            "reference(s) to columns the upstream model does not output — see the report's "
+            "quality tab.",
             unresolved,
-            len(result.dangling),
+            unverified,
+            len(result.dangling) - unverified,
         )
     waves = max(result.waves.values(), default=0)
     logger.info(
@@ -1533,11 +1536,20 @@ def _warn_coverage(coverage: dict) -> None:
     help="Use this profiles.yml instead of the generated offline profile (it is never "
     "connected). Default: profiles-dir in [compile] of .osmosis-cll, else generated.",
 )
+@click.option(
+    "--column-sources",
+    default=None,
+    help="Comma-separated column-list sources in priority order: live, catalog, manifest. "
+    "'live' reads information_schema once (metadata only, needs --profiles-dir) and keeps "
+    "the answer in target/cll-columns.json for parse-cll. Default: cll-column-sources in "
+    ".osmosis-cll.",
+)
 def compile_cll(
     select: tuple[str, ...],
     exclude: tuple[str, ...],
     project_dir: str,
     profiles_dir: str | None = None,
+    column_sources: str | None = None,
 ) -> None:
     """Compile models for column lineage without a warehouse connection.
 
@@ -1562,6 +1574,11 @@ def compile_cll(
             select=[s for value in select for s in value.replace(",", " ").split()],
             exclude=[s for value in exclude for s in value.replace(",", " ").split()],
             profiles_dir=Path(profiles_dir) if profiles_dir else None,
+            column_sources=(
+                [c.strip().lower() for c in column_sources.split(",") if c.strip()]
+                if column_sources
+                else None
+            ),
         )
     except OfflineCompileError as exc:
         logger.error(":x: %s", exc)

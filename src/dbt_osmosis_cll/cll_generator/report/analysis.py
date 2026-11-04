@@ -62,6 +62,10 @@ class Graph:
       (``COUNT(*)``, ``ROW_NUMBER()``, constants carried through CTEs) — complete,
       its row-shaping inputs are column usages.
     """
+    unverified: dict[str, list[str]] = field(default_factory=dict)
+    """model → relations whose real column list was unavailable when it was compiled
+    (``compile-cll``: YAML documentation or nothing). References into such a model that it
+    does not output mean the list was incomplete, not that lineage is misattributed."""
     documented_only: list[list[str]] = field(default_factory=list)
     """``[model, column]`` documented in YAML but not produced by the model's SQL.
     Not a column of the model; excluded from the analysis."""
@@ -78,6 +82,7 @@ class Graph:
             "usages": self.usages,
             "deps": self.deps,
             "gaps": self.gaps,
+            "unverified": self.unverified,
             "documented_only": self.documented_only,
             "coverage": self.coverage,
             "selectors": self.selectors,
@@ -212,6 +217,14 @@ def build_graph(
         deps=deps,
         gaps=gaps,
         documented_only=documented_only,
+        unverified={
+            str(model).lower(): sorted({
+                *info.get("columns_from_docs", []),
+                *info.get("star_without_columns", []),
+            })
+            for model, info in (cll.get("compile") or {}).items()
+            if info.get("columns_from_docs") or info.get("star_without_columns")
+        },
         coverage=dict(cll.get("coverage") or {}),
         selectors=list(cll.get("selectors") or []),
         data_products=[d.lower() for d in (data_products or [])],

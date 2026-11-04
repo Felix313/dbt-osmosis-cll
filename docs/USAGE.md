@@ -214,15 +214,24 @@ Rows are sorted and de-duplicated; two runs over the same artifacts write byte-i
 
 #### Column sources and coverage
 
-Star expansion and unqualified references need every relation's columns. The manifest only knows documented YAML columns; relations without them can be filled from further sources, in order:
+Star expansion and unqualified references need every relation's columns, and generated SQL needs them in their physical order. `cll-column-sources` is one setting for `compile-cll` and `parse-cll`; its order is the priority, and a relation gets its columns wholly from the first source that knows it:
 
 ```ini
 [osmosis]
-cll-column-sources = manifest, catalog, live   # default: manifest
-cll-catalog-path   = target/catalog.json       # from `dbt docs generate`
+cll-column-sources = live            # default: manifest
+cll-catalog-path   = target/catalog.json
+
+[compile]
+profiles-dir = ~/.dbt                # the profile 'live' connects through
 ```
 
-`live` queries the warehouse (needs `--profiles-dir` / `--target`) and only for relations the selection reads that are still without columns. `--column-sources` / `--catalog` override the config per run. Every `cll-result.json` carries a `coverage` block — relations read by the selection without any known column, `SELECT *` over such relations, ambiguous / unresolved usage counts, and which source supplied each relation's columns — and the same findings are logged as warnings.
+| Source | Answer | Needs |
+|---|---|---|
+| `live` | `information_schema.columns`, read once per database by `compile-cll` (metadata only, no table data) and kept in `target/cll-columns.json`; `parse-cll` reuses that file without connecting | a role that can see the relations |
+| `catalog` | `catalog.json` from `dbt docs generate` | a run with warehouse access beforehand; for setups without a connection of their own |
+| `manifest` | YAML columns. Documentation, possibly incomplete and in another order | nothing; the last resort if not listed |
+
+For a relation no configured warehouse source knows, `compile-cll` uses a model's own SQL compiled earlier in the same run (dbt compiles in DAG order, no connection needed), and only then YAML. Answers from YAML are flagged per model (`columns_from_docs`) and logged. `--column-sources` / `--catalog` override the config per run. Every `cll-result.json` carries a `coverage` block — relations read by the selection without any known column, `SELECT *` over such relations, ambiguous / unresolved usage counts, and which source supplied each relation's columns — and the same findings are logged as warnings.
 
 ### Offline compile for lineage (`compile-cll`)
 
@@ -244,7 +253,7 @@ relations-exist = audit_log       # adapter.get_relation(): treat as existing ..
 relations-missing = tmp_backfill  # ... or as missing (default: exists iff the manifest knows it)
 ```
 
-Direct adapter calls in model Jinja are answered offline too: `adapter.get_relation()` returns a relation for everything the manifest knows (override with `relations-exist` / `relations-missing`), `adapter.get_columns_in_relation()` and column-listing statements sent through `run_query` (`SHOW COLUMNS IN TABLE x`, `DESCRIBE TABLE x` — common in generated staging layers) return the manifest's documented columns, for relations without YAML columns those of `cll-catalog-path` (catalog.json) when it exists. Any other `run_query` fails with a message naming the macro to stub. Each answer is recorded per model (`relations_assumed_existing` / `relations_assumed_missing`, `star_without_columns`).
+Direct adapter calls in model Jinja are answered offline too: `adapter.get_relation()` returns a relation for everything the manifest knows (override with `relations-exist` / `relations-missing`), `star`, `adapter.get_columns_in_relation()` and column-listing statements sent through `run_query` (`SHOW COLUMNS IN TABLE x`, `DESCRIBE TABLE x` — common in generated staging layers) share one answer, see [column sources](#column-sources-and-coverage). Any other `run_query` fails with a message naming the macro to stub. Each answer is recorded per model (`relations_assumed_existing` / `relations_assumed_missing`, `star_without_columns`).
 
 ```bash
 dbt-osmosis-cll compile-cll -s "1+my_model"

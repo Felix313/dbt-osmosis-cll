@@ -500,3 +500,25 @@ class TestAttribution:
         )
         out = SQLColumnParser(dialect="snowflake").parse_column_lineage(pivot).column_lineage
         assert "'a'" in out and out["'a'"][0].source_columns == {"up.amt", "up.typ"}
+
+    def test_derived_table_columns_are_tracked(self):
+        sql = (
+            "WITH c AS (SELECT dk, LAG(lnk) OVER (PARTITION BY dk ORDER BY ts) AS prev "
+            "FROM (SELECT SHA1(v.id) AS dk, v.lnk, v.ts FROM sch.hist v "
+            "JOIN sch.other o ON o.id = v.id) AS sub) "
+            "SELECT c.dk, c.prev FROM c"
+        )
+        sources = _sources(sql)
+        assert sources["dk"] == {"hist.id"}
+        assert sources["prev"] == {"hist.lnk"}
+
+    def test_nested_and_final_select_derived_tables(self):
+        sql = (
+            "SELECT x.a, x.b FROM (SELECT y.a, z.b FROM "
+            "(SELECT t.a FROM sch.t1 t) AS y JOIN sch.t2 AS z ON z.a = y.a) AS x"
+        )
+        assert _sources(sql) == {"a": {"t1.a"}, "b": {"t2.b"}}
+
+    def test_union_inside_a_derived_table(self):
+        sql = "SELECT u.v FROM (SELECT a.v FROM sch.ta a UNION ALL SELECT b.v FROM sch.tb b) AS u"
+        assert _sources(sql) == {"v": {"ta.v", "tb.v"}}

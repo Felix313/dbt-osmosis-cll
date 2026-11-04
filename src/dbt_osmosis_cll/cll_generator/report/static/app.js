@@ -16,6 +16,9 @@
       coverageWarn: "Lineage coverage is incomplete — affected models may keep or drop the wrong columns:",
       unresolved: "columns whose SQL could not be traced",
       dangling: "references to columns the upstream model does not output (lineage attribution errors)",
+      danglingUnverified: "references into models compiled without a real column list (the role cannot see the upstream relation)",
+      unverifiedRefs: "References into models compiled without a real column list",
+      unverifiedModels: "Models compiled without a real column list",
       noColumns: "relations without known columns",
       docOnly: "columns documented in YAML but not produced by the SQL (ignored)",
       tiles: { dps: "data products", waves: "build waves", needed: "interim models needed",
@@ -51,6 +54,9 @@
       coverageWarn: "Die Lineage-Abdeckung ist unvollständig – betroffene Modelle können falsche Spalten behalten oder verwerfen:",
       unresolved: "Spalten, deren SQL nicht nachverfolgt werden konnte",
       dangling: "Verweise auf Spalten, die das Upstream-Modell nicht ausgibt (Zuordnungsfehler der Lineage)",
+      danglingUnverified: "Verweise in Modelle, die ohne echte Spaltenliste kompiliert wurden (die Rolle sieht die Upstream-Relation nicht)",
+      unverifiedRefs: "Verweise in Modelle ohne echte Spaltenliste",
+      unverifiedModels: "Ohne echte Spaltenliste kompilierte Modelle",
       noColumns: "Relationen ohne bekannte Spalten",
       docOnly: "im YAML dokumentierte, vom SQL nicht erzeugte Spalten (ignoriert)",
       tiles: { dps: "Datenprodukte", waves: "Aufbauwellen", needed: "benötigte Interims-Modelle",
@@ -149,11 +155,13 @@
   // ----------------------------------------------------------------- banner
   function renderBanner() {
     var unresolved = graph.gaps.filter(function (g) { return g[2] === "unresolved"; }).length;
-    var dangling = state.result.dangling.length;
+    var dangling = state.result.dangling.filter(function (d) { return !graph.unverified[d[0]]; }).length;
+    var danglingUnverified = state.result.dangling.length - dangling;
     var noCols = (graph.coverage.relations_without_columns || []).length;
     var items = [];
     if (unresolved) items.push(fmt(unresolved) + " " + T.unresolved);
     if (dangling) items.push(fmt(dangling) + " " + T.dangling);
+    if (danglingUnverified) items.push(fmt(danglingUnverified) + " " + T.danglingUnverified);
     if (noCols) items.push(fmt(noCols) + " " + T.noColumns);
     var info = graph.documentedOnly.length
       ? '<div class="hint">' + fmt(graph.documentedOnly.length) + " " + esc(T.docOnly) + "</div>" : "";
@@ -330,7 +338,11 @@
 
   function viewQuality() {
     return pairTable(T.gapsUnresolved, graph.gaps.filter(function (g) { return g[2] === "unresolved"; })) +
-      pairTable(T.danglingRefs, state.result.dangling) +
+      pairTable(T.danglingRefs, state.result.dangling.filter(function (d) { return !graph.unverified[d[0]]; })) +
+      pairTable(T.unverifiedRefs, state.result.dangling.filter(function (d) { return graph.unverified[d[0]]; })) +
+      pairTable(T.unverifiedModels, Object.keys(graph.unverified).sort().map(function (m) {
+        return [m, graph.unverified[m].join(", ")];
+      })) +
       pairTable(T.noColumns, (graph.coverage.relations_without_columns || []).map(function (r) { return [r, ""]; })) +
       pairTable(T.gapsNoInput, graph.gaps.filter(function (g) { return g[2] === "no_input"; })) +
       pairTable(T.docOnlyCols, graph.documentedOnly);

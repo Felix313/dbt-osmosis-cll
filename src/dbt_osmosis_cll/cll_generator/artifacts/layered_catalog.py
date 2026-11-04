@@ -5,13 +5,15 @@ expanded and unqualified references in joins cannot be attributed without them. 
 manifest only knows the columns documented in YAML — complete in some projects,
 absent in others (a source declared with just its table name).
 
-:class:`LayeredCatalogReader` starts from the manifest and fills relations that have
-*no* columns from the next configured source:
+:class:`LayeredCatalogReader` gives every relation the columns of the first configured
+source that knows it, in that source's order:
 
-``manifest``  YAML columns (always first)
+``live``      ``target/cll-columns.json`` written by ``compile-cll``; without that file
+              the warehouse, queried only for relations still without a warehouse answer
+              (and, when *live_relations* is given, only for those) — needs a profile
 ``catalog``   ``catalog.json`` from ``dbt docs generate``
-``live``      the warehouse, queried only for relations still empty (and, when
-              *live_relations* is given, only for those) — opt-in, needs a profile
+``manifest``  YAML columns: documentation, possibly incomplete. The last resort unless
+              configured earlier
 
 Which source answered for which relation is kept in :attr:`column_origin`, so a run
 can report the relations that stayed without columns.
@@ -24,6 +26,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from dbt_osmosis_cll.cll_generator.artifacts.column_snapshot import snapshot_path
 from dbt_osmosis_cll.cll_generator.artifacts.manifest_catalog import ManifestCatalogReader
 from dbt_osmosis_cll.cll_generator.models.schema import Column, Model
 
@@ -57,7 +60,7 @@ class LayeredCatalogReader:
                 f"(valid: {', '.join(VALID_SOURCES)})"
             )
         if "manifest" not in self._sources:
-            self._sources.insert(0, "manifest")
+            self._sources.append("manifest")
         self._manifest_reader = ManifestCatalogReader(manifest_path)
         self._manifest_path = manifest_path
         self._catalog_path = catalog_path
@@ -66,6 +69,7 @@ class LayeredCatalogReader:
         self._target = target
         self._live_relations = {r.lower() for r in live_relations} if live_relations else None
         self._catalog_models: dict[str, Model] = {}
+        self._snapshot_models: dict[str, Model] = {}
         self.column_origin: dict[str, str | None] = {}
         """unique_id → ``manifest`` / ``catalog`` / ``live`` / None (no columns)."""
 
@@ -89,31 +93,57 @@ class LayeredCatalogReader:
                 reader = CatalogReader(str(path))
                 reader.load()
                 self._catalog_models = reader.get_models_nodes()
+        if "live" in self._sources:
+            snapshot = snapshot_path(Path(self._project_dir or "."))
+            if snapshot.exists():
+                from dbt_osmosis_cll.cll_generator.artifacts.catalog import CatalogReader
+
+                reader = CatalogReader(str(snapshot))
+                reader.load()
+                self._snapshot_models = reader.get_models_nodes()
+                logger.info("Column source 'live': using %s", snapshot)
 
     def get_models_nodes(self) -> dict[str, Model]:
         models = self._manifest_reader.get_models_nodes()
+        by_source = {"catalog": self._catalog_models, "live": self._snapshot_models}
         for uid, model in models.items():
-            self.column_origin[uid] = "manifest" if model.columns else None
-
-        if self._catalog_models:
-            for uid, model in models.items():
-                if model.columns:
+            documented = bool(model.columns)
+            origin = None
+            for source in self._sources:
+                if source == "manifest":
+                    if documented:
+                        origin = "manifest"
+                        break
                     continue
-                cat = self._catalog_models.get(uid)
-                if cat is not None and cat.columns:
-                    self._fill(model, {c: col.data_type for c, col in cat.columns.items()})
-                    self.column_origin[uid] = "catalog"
+                found = by_source[source].get(uid)
+                if found is not None and found.columns:
+                    self._replace(model, {c: col.data_type for c, col in found.columns.items()})
+                    origin = source
+                    break
+            self.column_origin[uid] = origin
 
-        if "live" in self._sources:
+        if "live" in self._sources and not self._snapshot_models:
             missing = [
                 (uid, m)
                 for uid, m in sorted(models.items())
-                if not m.columns
+                if self.column_origin.get(uid) in (None, "manifest")
                 and (self._live_relations is None or uid.lower() in self._live_relations)
             ]
             if missing:
                 self._fill_live(missing)
         return models
+
+    def _replace(self, model: Model, columns: dict[str, str | None]) -> None:
+        """Make *columns* the model's columns, in their order; YAML metadata stays on match."""
+        owner = _lookup_name(model)
+        existing = model.columns
+        model.columns = {}
+        for name, dtype in columns.items():
+            key = name.lower()
+            column = existing.get(key) or Column(name=key, model_name=owner)
+            if dtype and not column.data_type:
+                column.data_type = dtype
+            model.columns[key] = column
 
     def _fill(self, model: Model, columns: dict[str, str | None]) -> None:
         owner = _lookup_name(model)

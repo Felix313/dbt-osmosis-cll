@@ -314,6 +314,70 @@ def _rename_shadowing_ctes(parsed: Any) -> Any:
     return parsed
 
 
+_DERIVED_PREFIX = "__cll_derived_"
+
+
+def _with_of(query: Any) -> tuple[str, Optional[Any]]:
+    """``(arg name, WITH node)`` of *query*; the arg is named differently across sqlglot."""
+    key = "with_" if "with_" in type(query).arg_types else "with"
+    return key, query.args.get(key)
+
+
+def _hoist_derived_tables(parsed: Any) -> Any:
+    """Turn ``FROM (SELECT ...) AS x`` into a uniquely named CTE read as ``x``.
+
+    The lineage pass tracks columns per CTE; a derived table's output columns were not
+    tracked, so references to them fell back to the first base table inside it.
+    Innermost first, each is inserted right before the top-level CTE that uses it (or
+    at the end for the final SELECT), so declaration order still holds. Lateral
+    subqueries stay: they can read the enclosing FROM.
+    """
+    if not isinstance(parsed, exp.Query):
+        return parsed
+    derived = [
+        sub
+        for sub in parsed.find_all(exp.Subquery)
+        if isinstance(sub.parent, (exp.From, exp.Join)) and isinstance(sub.this, exp.Query)
+    ]
+    if not derived:
+        return parsed
+    key, with_node = _with_of(parsed)
+    if with_node is None:
+        with_node = exp.With(expressions=[])
+        parsed.set(key, with_node)
+
+    items = list(with_node.expressions)
+
+    def depth(node: Any) -> int:
+        count = 0
+        while node.parent is not None:
+            node = node.parent
+            count += 1
+        return count
+
+    for number, sub in enumerate(sorted(derived, key=depth, reverse=True)):
+        name = f"{_DERIVED_PREFIX}{number}"
+        alias = sub.alias or name
+        pivots = sub.args.get("pivots")
+        table = exp.Table(
+            this=exp.to_identifier(name),
+            alias=exp.TableAlias(this=exp.to_identifier(alias)),
+        )
+        if pivots:
+            table.set("pivots", pivots)
+        cte = exp.CTE(this=sub.this.copy(), alias=exp.TableAlias(this=exp.to_identifier(name)))
+        sub.replace(table)
+        owner = table
+        while owner is not None and owner.parent is not with_node:
+            owner = owner.parent
+        position = next((i for i, item in enumerate(items) if item is owner), len(items))
+        items.insert(position, cte)
+        cte.parent = with_node
+        cte.arg_key = "expressions"
+    with_node.set("expressions", items)
+    return parsed
+
+
 _TABLE_FUNCTION_COLUMNS = {
     "flatten": ("seq", "key", "path", "index", "value", "this"),
     "split_to_table": ("seq", "index", "value"),
@@ -594,7 +658,7 @@ class SQLColumnParser:
         sql = _EMPTY_TYPE_PARAMS_RE.sub(r"\1", sql)
         parsed = _inline_pivot_columns(
             _inline_table_function_columns(
-                _rename_shadowing_ctes(parse_one(sql, dialect=self.dialect))
+                _hoist_derived_tables(_rename_shadowing_ctes(parse_one(sql, dialect=self.dialect)))
             )
         )
         result, usage_state = self._parse_lineage_tree(parsed, stop_at_ephemeral)

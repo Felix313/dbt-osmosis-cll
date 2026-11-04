@@ -74,6 +74,7 @@ def compact_graph(graph: Graph, lang: str = "en") -> dict[str, Any]:
         "deps": [[idx[m], [idx[p] for p in ps]] for m, ps in sorted(graph.deps.items())],
         "gaps": [[idx[m], c, k] for m, c, k in graph.gaps],
         "documentedOnly": [[idx[m], c] for m, c in graph.documented_only],
+        "unverified": graph.unverified,
         "coverage": graph.coverage,
         "selectors": graph.selectors,
         "dataProducts": graph.data_products,
@@ -157,7 +158,10 @@ def write_markdown(graph: Graph, result: Analysis, path: Path) -> None:
         "## Coverage",
         "",
         f"- columns without traced SQL: {len(unresolved)}",
-        f"- references to columns the upstream model does not output: {len(result.dangling)}",
+        "- references into models compiled without a real column list: "
+        f"{sum(1 for m, _ in result.dangling if m in graph.unverified)}",
+        "- references to columns the upstream model does not output (lineage errors): "
+        f"{sum(1 for m, _ in result.dangling if m not in graph.unverified)}",
         "- relations without known columns: "
         f"{len(graph.coverage.get('relations_without_columns') or [])}",
         f"- documented in YAML but not produced by the SQL (ignored): {len(graph.documented_only)}",
