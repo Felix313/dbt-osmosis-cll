@@ -31,7 +31,9 @@ var CllEngine = (function () {
       gaps: blob.gaps.map(function (g) { return [names[g[0]], g[1], g[2]]; }),
       documentedOnly: blob.documentedOnly.map(function (g) { return [names[g[0]], g[1]]; }),
       coverage: blob.coverage, selectors: blob.selectors, dataProducts: blob.dataProducts,
-      unverified: blob.unverified || {}
+      unverified: blob.unverified || {},
+      inferred: (blob.inferred || []).map(function (i) { return [names[i[0]], i[1], names[i[2]]]; }),
+      openRelations: blob.openRelations || []
     };
   }
 

@@ -1225,6 +1225,12 @@ def report(
             unverified,
             len(result.dangling) - unverified,
         )
+    if graph.inferred:
+        logger.info(
+            "%d column(s) inferred from the single source of a pass-through model compiled "
+            "without its column list (flagged in the report).",
+            len(graph.inferred),
+        )
     waves = max(result.waves.values(), default=0)
     logger.info(
         ":white_check_mark: %d data product(s) in %d build wave(s), %d column(s) classified -> %s",

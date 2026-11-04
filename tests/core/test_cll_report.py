@@ -205,6 +205,114 @@ def test_models_compiled_without_a_real_column_list_are_named():
     assert compact_graph(graph)["unverified"] == {"int_c": ["raw_a", "raw_b"]}
 
 
+def _pass_through_cll():
+    cll = json.loads(json.dumps(CLL))
+    cll["results"] += [
+        _row("raw_copy", "id", progenitors=[("raw", "id")]),
+        _row("raw_copy", "documented_only", in_sql=False),
+        _row("broken_copy", "listed_col", in_sql=False),
+        _row("two_sources", "id", progenitors=[("raw", "id")]),
+        _row("int_c", "from_copy", progenitors=[("raw_copy", "read_col")]),
+        _row("dp_two", "from_copy", progenitors=[("int_c", "from_copy")]),
+        _row("dp_two", "listed", progenitors=[("broken_copy", "listed_col")]),
+        _row("dp_two", "doc", progenitors=[("raw_copy", "documented_only")]),
+        _row("dp_two", "two", progenitors=[("two_sources", "not_output")]),
+    ]
+    cll["usages"].append(_usage("int_c", "filter", "raw_copy", "filter_col"))
+    cll["models"] = ["raw_copy", "broken_copy", "two_sources", "unparsable"]
+    cll["coverage"]["star_over_unknown"] = [["broken_copy", "raw"]]
+    cll["results"] += [
+        _row("unparsable", "computed", in_sql=False),
+        _row("dp_two", "from_unparsable", progenitors=[("unparsable", "computed_later")]),
+    ]
+    cll["compile"] = {
+        "unparsable": {"star_without_columns": ["raw"]},
+        "raw_copy": {"columns_from_docs": ["raw"]},
+        "broken_copy": {"star_without_columns": ["raw"]},
+        "two_sources": {"columns_from_docs": ["raw", "other_raw"]},
+    }
+    return cll
+
+
+def test_reads_from_pass_through_models_are_inferred_from_their_source():
+    graph = build_graph(_pass_through_cll(), MANIFEST, DPS)
+    assert sorted(graph.inferred) == [
+        ["broken_copy", "listed_col", "raw"],
+        ["raw_copy", "documented_only", "raw"],
+        ["raw_copy", "filter_col", "raw"],
+        ["raw_copy", "read_col", "raw"],
+    ]
+    # Only unparsable SQL stays unresolved, and the documented column is really read, not stale.
+    assert [g for g in graph.gaps if g[2] == "unresolved"] == [
+        ["unparsable", "computed", "unresolved"]
+    ]
+    assert ["raw_copy", "documented_only"] not in graph.documented_only
+
+    result = analyse(graph, DPS)
+    st = _status(graph, result)
+    assert result.origins["dp_two"]["from_copy"] == [["raw", "read_col", "source"]]
+    assert st[("raw_copy", "read_col")]["inferred"] is True
+    assert st[("raw", "read_col")]["status"] == "required"
+    assert st[("raw", "read_col")]["inferred"] is True
+    assert st[("raw", "filter_col")]["category"] == "logic"
+    assert st[("raw", "id")]["inferred"] is False
+    # Two possible sources: no guess, it stays a visible problem.
+    assert ["two_sources", "not_output"] in result.dangling
+    # SQL that could not be parsed proves no pass-through: it may compute the column.
+    assert ["unparsable", "computed", "unresolved"] in graph.gaps
+    assert ["unparsable", "computed_later"] in result.dangling
+
+
+def test_open_relations_exclude_sources_and_named_models():
+    cll = _pass_through_cll()
+    cll["coverage"]["relations_without_columns"] = ["raw", "raw_copy", "stg_a", "hard_coded"]
+    graph = build_graph(cll, MANIFEST, DPS)
+    assert graph.open_relations() == ["stg_a", "hard_coded"]
+
+
+def test_model_named_like_its_source_ends_at_the_source():
+    manifest = json.loads(json.dumps(MANIFEST))
+    manifest["sources"]["source.p.mig.dim_x"] = {
+        "name": "dim_x",
+        "identifier": "dim_x",
+        "source_name": "MIG",
+        "original_file_path": "models/sources.yml",
+        "columns": {},
+    }
+    manifest["nodes"]["model.p.dim_x"] = _node("dim_x", [], "models/MARTS/dim_x.sql")
+    manifest["nodes"]["model.p.dim_x"]["depends_on"]["nodes"] = ["source.p.mig.dim_x"]
+    cll = json.loads(json.dumps(CLL))
+    cll["results"] += [
+        _row("dim_x", "a", progenitors=[("dim_x", "a")]),
+        _row("dim_x", "unused", progenitors=[("dim_x", "unused")]),
+        _row("dp_two", "from_dim", progenitors=[("dim_x", "a")]),
+    ]
+    cll["usages"].append(_usage("dim_x", "filter", "dim_x", "flag", self_ref=True))
+    cll["coverage"]["relations_without_columns"] = ["dim_x"]
+
+    graph = build_graph(cll, manifest, DPS)
+    result = analyse(graph, DPS)
+    st = _status(graph, result)
+    assert result.origins["dp_two"]["from_dim"] == [["mig.dim_x", "a", "source"]]
+    assert st[("dim_x", "a")]["role"] == "interim"
+    assert st[("mig.dim_x", "a")]["role"] == "source"
+    assert st[("mig.dim_x", "a")]["status"] == "required"
+    assert st[("mig.dim_x", "flag")]["category"] == "logic"
+    assert st[("dim_x", "unused")]["status"] == "droppable"
+    assert graph.deps["dim_x"] == ["mig.dim_x"]
+    assert graph.open_relations() == []
+    js = _js_analysis(graph, DPS)
+    assert js["origins"] == result.origins
+
+
+def test_browser_engine_matches_python_on_inferred_columns():
+    graph = build_graph(_pass_through_cll(), MANIFEST, DPS)
+    py = analyse(graph, DPS)
+    js = _js_analysis(graph, DPS)
+    assert js["dangling"] == py.dangling
+    assert js["origins"] == py.origins
+
+
 def test_old_results_without_in_sql_flag_are_classified_by_signature():
     legacy = json.loads(json.dumps(CLL))
     for row in legacy["results"]:

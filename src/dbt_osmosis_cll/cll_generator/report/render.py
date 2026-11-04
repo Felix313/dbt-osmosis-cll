@@ -25,6 +25,7 @@ def compact_graph(graph: Graph, lang: str = "en") -> dict[str, Any]:
     for model, col, _t, progs in graph.rows:
         names.add(model)
         names.update(p[0] for p in progs)
+    names.update(i[2] for i in graph.inferred)
     for u in graph.usages:
         names.update((u[0], u[2]))
     for model, parents in graph.deps.items():
@@ -75,6 +76,8 @@ def compact_graph(graph: Graph, lang: str = "en") -> dict[str, Any]:
         "gaps": [[idx[m], c, k] for m, c, k in graph.gaps],
         "documentedOnly": [[idx[m], c] for m, c in graph.documented_only],
         "unverified": graph.unverified,
+        "inferred": [[idx[m], c, idx[r]] for m, c, r in graph.inferred],
+        "openRelations": graph.open_relations(),
         "coverage": graph.coverage,
         "selectors": graph.selectors,
         "dataProducts": graph.data_products,
@@ -110,6 +113,7 @@ def write_columns_csv(graph: Graph, result: Analysis, path: Path) -> int:
             "category",
             "usages",
             "needed_by",
+            "inferred",
         ])
         for r in rows:
             writer.writerow([
@@ -121,6 +125,7 @@ def write_columns_csv(graph: Graph, result: Analysis, path: Path) -> int:
                 r["category"],
                 " ".join(r["usages"]),
                 " ".join(d.upper() for d in r["needed_by"]),
+                "yes" if r["inferred"] else "",
             ])
     return len(rows)
 
@@ -162,8 +167,8 @@ def write_markdown(graph: Graph, result: Analysis, path: Path) -> None:
         f"{sum(1 for m, _ in result.dangling if m in graph.unverified)}",
         "- references to columns the upstream model does not output (lineage errors): "
         f"{sum(1 for m, _ in result.dangling if m not in graph.unverified)}",
-        "- relations without known columns: "
-        f"{len(graph.coverage.get('relations_without_columns') or [])}",
+        f"- relations without known columns (other than sources): {len(graph.open_relations())}",
+        f"- columns inferred from a pass-through model's source: {len(graph.inferred)}",
         f"- documented in YAML but not produced by the SQL (ignored): {len(graph.documented_only)}",
         "",
         "## Build order",

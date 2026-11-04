@@ -66,6 +66,12 @@ class Graph:
     """model → relations whose real column list was unavailable when it was compiled
     (``compile-cll``: YAML documentation or nothing). References into such a model that it
     does not output mean the list was incomplete, not that lineage is misattributed."""
+    inferred: list[list[str]] = field(default_factory=list)
+    """``[model, column, source]``: the column is read downstream (or documented on a model
+    whose SQL could not be traced) and the model passes through exactly one source whose
+    column list was unavailable, so the column must come from that source."""
+    source_names: list[str] = field(default_factory=list)
+    """Names and identifiers of all sources, also those a same-named model shadows."""
     documented_only: list[list[str]] = field(default_factory=list)
     """``[model, column]`` documented in YAML but not produced by the model's SQL.
     Not a column of the model; excluded from the analysis."""
@@ -83,11 +89,27 @@ class Graph:
             "deps": self.deps,
             "gaps": self.gaps,
             "unverified": self.unverified,
+            "inferred": self.inferred,
             "documented_only": self.documented_only,
             "coverage": self.coverage,
             "selectors": self.selectors,
             "data_products": self.data_products,
         }
+
+    def open_relations(self) -> list[str]:
+        """Relations without known columns that lineage cannot simply end at.
+
+        A source is an origin: the columns read from it are known from the reading SQL,
+        its complete list is not needed. Models covered by :attr:`unverified` are named
+        there. What stays is a real gap.
+        """
+        out = []
+        sources = set(self.source_names)
+        for name in self.coverage.get("relations_without_columns") or []:
+            relation = str(name).lower()
+            if relation not in sources and relation not in self.unverified:
+                out.append(relation)
+        return out
 
 
 def _in_sql(row: dict[str, Any]) -> bool:
@@ -105,6 +127,47 @@ def _in_sql(row: dict[str, Any]) -> bool:
         or row.get("union_branches")
         or (row.get("transformation_type") or "direct") != "direct"
     )
+
+
+def _infer_pass_through(
+    rows: list[list[Any]],
+    gaps: list[list[str]],
+    documented_only: list[list[str]],
+    out_cols: dict[str, list[str]],
+    usages: list[list[Any]],
+    unverified: dict[str, list[str]],
+    unparsed: set[str],
+) -> list[list[str]]:
+    """Add the columns of pass-through models compiled without their source's column list.
+
+    Such a model (``SELECT <introspected columns> FROM source``) compiled with too few
+    columns. A column read downstream does exist, and with exactly one source in the
+    model it can only come from there. Columns nobody reads stay unknown, which does not
+    matter: what a data product needs is what is read.
+    """
+    single = {
+        m: v[0]
+        for m, v in unverified.items()
+        if len(v) == 1 and v[0] not in out_cols and m not in unparsed
+    }
+    inferred: list[list[str]] = []
+    untraced = {(g[0], g[1]) for g in gaps if g[2] == "unresolved"}
+    for row in rows:
+        key = (row[0], row[1])
+        if key in untraced and row[0] in single:
+            row[3] = [[single[row[0]], row[1]]]
+            inferred.append([row[0], row[1], single[row[0]]])
+    known = {(row[0], row[1]) for row in rows}
+    reads = {(p[0], p[1]) for row in rows for p in row[3]} | {(u[2], u[3]) for u in usages}
+    for model, col in sorted(reads):
+        if model in single and (model, col) not in known:
+            rows.append([model, col, "direct", [[single[model], col]]])
+            out_cols[model].append(col)
+            inferred.append([model, col, single[model]])
+    done = {(i[0], i[1]) for i in inferred}
+    gaps[:] = [g for g in gaps if (g[0], g[1]) not in done]
+    documented_only[:] = [d for d in documented_only if (d[0], d[1]) not in done]
+    return inferred
 
 
 def _layer(path: str) -> str:
@@ -132,21 +195,35 @@ def build_graph(
             "analysed": False,
             "columns": [str(c).lower() for c in (node.get("columns") or {})],
         }
+    source_names: set[str] = set()
+    source_meta: dict[str, dict[str, Any]] = {}
     for uid, src in (manifest.get("sources") or {}).items():
         name = str(src.get("identifier") or src.get("name") or "").lower()
         uid_name[uid] = name
-        models.setdefault(
-            name,
-            {
-                "kind": "source",
-                "layer": "source",
-                "path": str(src.get("original_file_path") or "").replace("\\", "/"),
-                "source_name": src.get("source_name"),
-                "materialized": None,
-                "analysed": False,
-                "columns": [str(c).lower() for c in (src.get("columns") or {})],
-            },
-        )
+        source_names.update({name, str(src.get("name") or "").lower()})
+        source_meta[uid] = {
+            "kind": "source",
+            "layer": "source",
+            "path": str(src.get("original_file_path") or "").replace("\\", "/"),
+            "source_name": src.get("source_name"),
+            "materialized": None,
+            "analysed": False,
+            "columns": [str(c).lower() for c in (src.get("columns") or {})],
+        }
+        models.setdefault(name, source_meta[uid])
+
+    # A model named like the source it reads (a view over a table of the same name):
+    # bare relation names cannot tell them apart and its lineage reads itself. The
+    # manifest can: such a source gets its own qualified name.
+    same_named: dict[str, str] = {}
+    for uid, node in (manifest.get("nodes") or {}).items():
+        name = uid_name.get(uid)
+        for parent in (node.get("depends_on") or {}).get("nodes") or []:
+            if parent in source_meta and uid_name.get(parent) == name:
+                qualified = f"{str(source_meta[parent]['source_name']).lower()}.{name}"
+                same_named[name] = qualified
+                models[qualified] = source_meta[parent]
+                source_names.add(name)
 
     results = cll.get("results") or []
     traced = {str(r["model"]).lower() for r in results if _in_sql(r)}
@@ -159,7 +236,15 @@ def build_graph(
     out_cols: dict[str, list[str]] = defaultdict(list)
     for r in results:
         model, col = str(r["model"]).lower(), str(r["column"]).lower()
-        progs = [[str(m).lower(), str(c).lower()] for m, c in (r.get("progenitors") or [])]
+        progs = [
+            [
+                same_named[model]
+                if str(m).lower() == model and model in same_named
+                else str(m).lower(),
+                str(c).lower(),
+            ]
+            for m, c in (r.get("progenitors") or [])
+        ]
         ttype = r.get("transformation_type") or "direct"
         if not _in_sql(r):
             if model in traced and model not in star_models:
@@ -170,6 +255,37 @@ def build_graph(
             gaps.append([model, col, "no_input"])
         rows.append([model, col, ttype, progs])
         out_cols[model].append(col)
+    usages: list[list[Any]] = []
+    for u in cll.get("usages") or []:
+        reader, read = str(u["model"]).lower(), str(u.get("source_model") or "").lower()
+        reads_same_named = reader == read and reader in same_named
+        if not read or (u.get("is_self_reference") and not reads_same_named):
+            continue
+        usages.append([
+            reader,
+            u["usage"],
+            same_named[reader] if reads_same_named else read,
+            str(u["source_column"]).lower(),
+            u.get("scope") or "",
+            u.get("predicate_sql") or "",
+        ])
+
+    unverified = {
+        str(model).lower(): sorted({
+            same_named[str(rel).lower()]
+            if str(rel).lower() == str(model).lower() and str(rel).lower() in same_named
+            else str(rel).lower()
+            for rel in (*info.get("columns_from_docs", []), *info.get("star_without_columns", []))
+        })
+        for model, info in (cll.get("compile") or {}).items()
+        if info.get("columns_from_docs") or info.get("star_without_columns")
+    }
+    # A model whose SQL could not be parsed at all proves nothing about passing through.
+    unparsed = {str(m).lower() for m in cll.get("models") or []} - traced - star_models
+    inferred = _infer_pass_through(
+        rows, gaps, documented_only, out_cols, usages, unverified, unparsed
+    )
+
     for model, cols in out_cols.items():
         meta = models.setdefault(
             model,
@@ -178,26 +294,17 @@ def build_graph(
         meta["analysed"] = True
         meta["columns"] = cols
 
-    usages: list[list[Any]] = []
-    for u in cll.get("usages") or []:
-        if u.get("is_self_reference") or not u.get("source_model"):
-            continue
-        usages.append([
-            str(u["model"]).lower(),
-            u["usage"],
-            str(u["source_model"]).lower(),
-            str(u["source_column"]).lower(),
-            u.get("scope") or "",
-            u.get("predicate_sql") or "",
-        ])
-
     keep = set(out_cols) | {u[2] for u in usages} | {p[0] for r in rows for p in r[3]}
     deps: dict[str, list[str]] = {}
     for uid, node in (manifest.get("nodes") or {}).items():
         name = uid_name.get(uid)
         if name in out_cols:
             parents = (node.get("depends_on") or {}).get("nodes") or []
-            deps[name] = sorted({uid_name[p] for p in parents if p in uid_name})
+            deps[name] = sorted({
+                same_named[name] if p in source_meta and uid_name[p] == name else uid_name[p]
+                for p in parents
+                if p in uid_name
+            })
             keep.update(deps[name])
 
     for name in keep - set(models):
@@ -217,14 +324,9 @@ def build_graph(
         deps=deps,
         gaps=gaps,
         documented_only=documented_only,
-        unverified={
-            str(model).lower(): sorted({
-                *info.get("columns_from_docs", []),
-                *info.get("star_without_columns", []),
-            })
-            for model, info in (cll.get("compile") or {}).items()
-            if info.get("columns_from_docs") or info.get("star_without_columns")
-        },
+        unverified=unverified,
+        inferred=inferred,
+        source_names=sorted(source_names),
         coverage=dict(cll.get("coverage") or {}),
         selectors=list(cll.get("selectors") or []),
         data_products=[d.lower() for d in (data_products or [])],
@@ -397,6 +499,7 @@ def analyse(graph: Graph, data_products: list[str]) -> Analysis:
 def column_status(graph: Graph, result: Analysis) -> list[dict[str, Any]]:
     """One row per column of every model in scope: role and whether it is needed."""
     dps = set(result.data_products)
+    inferred = {(i[0], i[1]) for i in graph.inferred} | {(i[2], i[1]) for i in graph.inferred}
     out: list[dict[str, Any]] = []
     for model, meta in graph.models.items():
         if model in dps:
@@ -428,5 +531,6 @@ def column_status(graph: Graph, result: Analysis) -> list[dict[str, Any]]:
                 ),
                 "usages": sorted(req["usages"]) if req else [],
                 "needed_by": sorted(req["needed_by"]) if req else [],
+                "inferred": (model, col) in inferred,
             })
     return out

@@ -19,6 +19,9 @@
       danglingUnverified: "references into models compiled without a real column list (the role cannot see the upstream relation)",
       unverifiedRefs: "References into models compiled without a real column list",
       unverifiedModels: "Models compiled without a real column list",
+      inferredInfo: "columns inferred: read from a pass-through model whose source's column list was unavailable, so they come from that source",
+      inferredCols: "Columns inferred from a pass-through model's source",
+      inferredChip: "inferred",
       noColumns: "relations without known columns",
       docOnly: "columns documented in YAML but not produced by the SQL (ignored)",
       tiles: { dps: "data products", waves: "build waves", needed: "interim models needed",
@@ -57,6 +60,9 @@
       danglingUnverified: "Verweise in Modelle, die ohne echte Spaltenliste kompiliert wurden (die Rolle sieht die Upstream-Relation nicht)",
       unverifiedRefs: "Verweise in Modelle ohne echte Spaltenliste",
       unverifiedModels: "Ohne echte Spaltenliste kompilierte Modelle",
+      inferredInfo: "Spalten abgeleitet: gelesen aus einem Durchreiche-Modell, dessen Quelle keine sichtbare Spaltenliste hat, also stammen sie aus dieser Quelle",
+      inferredCols: "Aus der Quelle eines Durchreiche-Modells abgeleitete Spalten",
+      inferredChip: "abgeleitet",
       noColumns: "Relationen ohne bekannte Spalten",
       docOnly: "im YAML dokumentierte, vom SQL nicht erzeugte Spalten (ignoriert)",
       tiles: { dps: "Datenprodukte", waves: "Aufbauwellen", needed: "benötigte Interims-Modelle",
@@ -92,6 +98,11 @@
   var T = I18N[lang], U = USAGE[lang];
   var graph = CllEngine.expand(blob);
   var ix = CllEngine.index(graph);
+  var inferredSet = {};
+  graph.inferred.forEach(function (i) {
+    inferredSet[i[0] + "\u0000" + i[1]] = true;
+    inferredSet[i[2] + "\u0000" + i[1]] = true;
+  });
   var state = { dps: graph.dataProducts.slice(), tab: "overview", result: null, status: null,
     modelFilter: { q: "", role: "", layer: "", onlyDrop: false, limit: 200 }, originDp: null,
     open: {} };
@@ -157,14 +168,16 @@
     var unresolved = graph.gaps.filter(function (g) { return g[2] === "unresolved"; }).length;
     var dangling = state.result.dangling.filter(function (d) { return !graph.unverified[d[0]]; }).length;
     var danglingUnverified = state.result.dangling.length - dangling;
-    var noCols = (graph.coverage.relations_without_columns || []).length;
+    var noCols = graph.openRelations.length;
     var items = [];
     if (unresolved) items.push(fmt(unresolved) + " " + T.unresolved);
     if (dangling) items.push(fmt(dangling) + " " + T.dangling);
     if (danglingUnverified) items.push(fmt(danglingUnverified) + " " + T.danglingUnverified);
     if (noCols) items.push(fmt(noCols) + " " + T.noColumns);
-    var info = graph.documentedOnly.length
-      ? '<div class="hint">' + fmt(graph.documentedOnly.length) + " " + esc(T.docOnly) + "</div>" : "";
+    var info = (graph.inferred.length
+      ? '<div class="hint">' + fmt(graph.inferred.length) + " " + esc(T.inferredInfo) + "</div>" : "") +
+      (graph.documentedOnly.length
+        ? '<div class="hint">' + fmt(graph.documentedOnly.length) + " " + esc(T.docOnly) + "</div>" : "");
     $("banner").innerHTML = items.length
       ? '<div class="banner"><strong>' + esc(T.coverageWarn) + "</strong><ul>" +
         items.map(function (i) { return "<li>" + esc(i) + "</li>"; }).join("") + "</ul>" + info + "</div>"
@@ -238,7 +251,9 @@
       rows.map(function (r) {
         var st = r.status === "required" ? chip(T.required, "data")
           : chip(r.status === "droppable" ? T.droppable : T.unused, "drop");
-        return "<tr><td class=mono>" + up(r.column) + "</td><td>" + st + "</td><td>" +
+        return "<tr><td class=mono>" + up(r.column) +
+          (inferredSet[r.model + "\u0000" + r.column] ? " " + chip(T.inferredChip, "warn") : "") +
+          "</td><td>" + st + "</td><td>" +
           (r.category ? chip(T.cats[r.category], r.category) : "") + "</td><td>" +
           r.usages.map(function (u) { return chip(U[u] || u); }).join("") + "</td>" +
           (withNeeded ? "<td>" + r.neededBy.map(function (d) { return chip(d.toUpperCase(), "dp"); }).join("") + "</td>" : "") +
@@ -343,7 +358,8 @@
       pairTable(T.unverifiedModels, Object.keys(graph.unverified).sort().map(function (m) {
         return [m, graph.unverified[m].join(", ")];
       })) +
-      pairTable(T.noColumns, (graph.coverage.relations_without_columns || []).map(function (r) { return [r, ""]; })) +
+      pairTable(T.noColumns, graph.openRelations.map(function (r) { return [r, ""]; })) +
+      pairTable(T.inferredCols, graph.inferred.map(function (i) { return [i[0] + "." + i[1], i[2]]; })) +
       pairTable(T.gapsNoInput, graph.gaps.filter(function (g) { return g[2] === "no_input"; })) +
       pairTable(T.docOnlyCols, graph.documentedOnly);
   }
@@ -368,10 +384,11 @@
     return /[",;\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   }
   function exportCsv() {
-    var head = ["model", "column", "role", "layer", "status", "category", "usages", "needed_by"];
+    var head = ["model", "column", "role", "layer", "status", "category", "usages", "needed_by", "inferred"];
     var lines = [head.join(",")].concat(state.status.map(function (r) {
       return [r.model.toUpperCase(), r.column.toUpperCase(), r.role, r.layer, r.status, r.category,
-        r.usages, r.neededBy.map(function (d) { return d.toUpperCase(); })].map(csvCell).join(",");
+        r.usages, r.neededBy.map(function (d) { return d.toUpperCase(); }),
+        inferredSet[r.model + "\u0000" + r.column] ? "yes" : ""].map(csvCell).join(",");
     }));
     var a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob(["﻿" + lines.join("\n")], { type: "text/csv" }));

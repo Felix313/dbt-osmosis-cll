@@ -290,7 +290,9 @@ Data products are **lineage anchors**: tracing a column upstream stops at anothe
 
 Output (next to `target/cll-report.html` unless `-o` says otherwise): a self-contained HTML report — data products can be added and removed in it and everything recomputes in the browser; the current selection exports as an `.osmosis-cll` snippet or CSV — plus `cll-report_columns.csv` (one row per column: role, status, kind, usages, needed by), `cll-report_data_products.csv` (waves and dependencies) and a Markdown summary.
 
-The **quality** tab and the coverage banner list what limits the result: columns whose SQL could not be traced, references to columns the upstream model does not output (lineage attribution errors), relations without known columns, and columns documented in YAML that the SQL does not produce (ignored; `parse-cll` marks them `in_sql: false`).
+The **quality** tab and the coverage banner list what limits the result: columns whose SQL could not be traced, references to columns the upstream model does not output (lineage attribution errors), relations other than sources without known columns, models compiled without a real column list, and columns documented in YAML that the SQL does not produce (ignored; `parse-cll` marks them `in_sql: false`).
+
+Sources are origins: lineage may end there, and their complete column list is not needed, only the columns read from them. When a pass-through model over exactly one source was compiled without that source's column list (your role cannot see the source), a column read downstream can only come from that source. The report adds such columns and marks them **inferred** (`inferred` in the columns CSV). With more than one possible source nothing is guessed; the reference stays listed.
 
 ### Serving the explorer from a precomputed CLL artifact
 
