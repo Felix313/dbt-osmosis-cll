@@ -294,6 +294,25 @@ The **quality** tab and the coverage banner list what limits the result: columns
 
 Sources are origins: lineage may end there, and their complete column list is not needed, only the columns read from them. When a pass-through model over exactly one source was compiled without that source's column list (your role cannot see the source), a column read downstream can only come from that source. The report adds such columns and marks them **inferred** (`inferred` in the columns CSV). With more than one possible source nothing is guessed; the reference stays listed.
 
+### Validating the requirements (`lineage validate`)
+
+```bash
+dbt-osmosis-cll lineage validate --lang de     # profile: profiles-dir in [compile]
+```
+
+Every needed model is bound by the warehouse through `SELECT * FROM (<sql>) WHERE 1 = 0`: once as it is, and once reduced, so that it outputs only what is required of it, every CTE only what is still read, and each upstream relation offers only its required columns (data products keep all). Projections stay where they shape rows (`DISTINCT`, `UNION`, `GROUP BY ALL`). No data row comes back and nothing is created; the warehouse may evaluate scalar subqueries while binding. A query that binds this way needs no column classified as droppable.
+
+Only column names matter for this, so a relation your role cannot see is replaced by a stub (`SELECT NULL AS col, ...`) and the model is still checked. A warning names each such relation and why read access would help: it confirms that the columns really exist there with a compatible type.
+
+| Result | Meaning |
+|---|---|
+| confirmed | binds reduced and still outputs what is required; also states whether stubs were involved |
+| failed | needs a column classified as droppable: the requirements are wrong (exit code 1) |
+| no access | the role cannot use an object the SQL needs beyond its dbt parents (e.g. a function) |
+| not checkable | the SQL does not bind or parse even as compiled |
+
+The result lands in `target/cll-validation.json` with a Markdown summary next to it.
+
 ### Serving the explorer from a precomputed CLL artifact
 
 By default `lineage explore` parses every model's compiled SQL before it starts serving — on a large repo that is the whole cold-start cost. When the work has already been done, point the explorer at the result instead:

@@ -522,3 +522,15 @@ class TestAttribution:
     def test_union_inside_a_derived_table(self):
         sql = "SELECT u.v FROM (SELECT a.v FROM sch.ta a UNION ALL SELECT b.v FROM sch.tb b) AS u"
         assert _sources(sql) == {"v": {"ta.v", "tb.v"}}
+
+    def test_unknown_columns_marker_keeps_sql_parsable_and_never_surfaces(self):
+        sql = (
+            "SELECT 'a' AS origin, s.ts AS loaded_ts, "
+            "IFF(CLL_UNKNOWN_COLUMNS = '', NULL, SHA1(CONCAT(CLL_UNKNOWN_COLUMNS))) AS hashdiff, "
+            "s.CLL_UNKNOWN_COLUMNS FROM sch.src AS s WHERE s.CLL_UNKNOWN_COLUMNS IS NOT NULL"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert set(result.column_lineage) == {"origin", "loaded_ts", "hashdiff"}
+        assert result.column_lineage["loaded_ts"][0].source_columns == {"src.ts"}
+        assert result.column_lineage["hashdiff"][0].source_columns == set()
+        assert not [u for u in result.column_usages if "cll_unknown" in (u.source or "")]

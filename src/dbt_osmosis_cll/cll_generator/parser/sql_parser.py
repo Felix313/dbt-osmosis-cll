@@ -5,6 +5,7 @@ from sqlglot import parse_one, exp
 from typing import Dict, List, Set, Optional, Any, Callable, Literal, cast
 from dbt_osmosis_cll.cll_generator.models.schema import ColumnLineage, ColumnUsage, SQLParseResult
 from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import (
+    UNKNOWN_COLUMNS_MARKER,
     AliasMap,
     get_scoped_table_aliases,
     get_scoped_tables_from_select,
@@ -253,6 +254,29 @@ class StarExpressionHandler:
                     )
             return True
         return False
+
+
+def _without_unknown_columns_marker(result: SQLParseResult) -> SQLParseResult:
+    """Remove the compile-time stand-in for an unknown column list from a parse result."""
+
+    def real(source: str) -> bool:
+        return split_qualified_name(source)[1].lower() != UNKNOWN_COLUMNS_MARKER
+
+    result.column_lineage = {
+        name: [
+            lineage.model_copy(
+                update={
+                    "source_columns": {c for c in lineage.source_columns if real(c)},
+                    "union_branches": [b for b in lineage.union_branches if real(b)],
+                }
+            )
+            for lineage in lineages
+        ]
+        for name, lineages in result.column_lineage.items()
+        if name.lower() != UNKNOWN_COLUMNS_MARKER
+    }
+    result.column_usages = [u for u in result.column_usages if real(u.source or "")]
+    return result
 
 
 _SHADOW_SUFFIX = "__cll_cte"
@@ -663,7 +687,11 @@ class SQLColumnParser:
         )
         result, usage_state = self._parse_lineage_tree(parsed, stop_at_ephemeral)
         result.column_usages = self._collect_usages(parsed, usage_state)
-        return result
+        return (
+            _without_unknown_columns_marker(result)
+            if UNKNOWN_COLUMNS_MARKER in sql.lower()
+            else result
+        )
 
     def _collect_usages(self, parsed: Any, usage_state: Optional[tuple]) -> List[ColumnUsage]:
         """Run the usage pass on the CTE state the lineage pass built.

@@ -513,3 +513,55 @@ def test_documented_but_not_produced_column_does_not_outrank_a_select_alias(tmp_
     assert {(u["source_model"], u["source_column"]) for u in filters} == {
         ("load_config", "created_ts")
     }
+
+
+def test_macro_over_an_unknown_column_list_still_yields_lineage(tmp_path):
+    project = _project(tmp_path)
+    (project / "macros" / "hash_list.sql").write_text(
+        textwrap.dedent(
+            """
+            {% macro hash_list(cols) %}
+                {%- set parts = [] -%}
+                {%- for c in cols %}{% do parts.append(c.name) %}{% endfor -%}
+                IFF({{ parts | join(" || ") }} = '', NULL, SHA1(CONCAT({{ parts | join(", ") }})))
+            {%- endmacro %}
+            """
+        ),
+        encoding="utf-8",
+    )
+    (project / "models" / "sources.yml").write_text(
+        textwrap.dedent(
+            """
+            version: 2
+            sources:
+              - name: ext
+                schema: main
+                tables:
+                  - name: bare_src
+            """
+        ),
+        encoding="utf-8",
+    )
+    (project / "models" / "over_bare.sql").write_text(
+        "{% set cols = adapter.get_columns_in_relation(source('ext', 'bare_src')) %}\n"
+        "select new.a_ts as loaded_ts, {{ hash_list(cols) }} as hashdiff,\n"
+        "{{ dbt_utils_like_star() }}\nfrom {{ source('ext', 'bare_src') }} as new\n",
+        encoding="utf-8",
+    )
+    (project / "macros" / "star_like.sql").write_text(
+        "{% macro dbt_utils_like_star() %}new.a_ts{% endmacro %}\n", encoding="utf-8"
+    )
+    compiled = CliRunner().invoke(
+        cli, ["compile-cll", "-s", "over_bare", "--project-dir", str(project)]
+    )
+    assert compiled.exit_code == 0, compiled.output
+    clear_lineage_caches()
+    out = project / "result.json"
+    parsed = CliRunner().invoke(
+        cli, ["parse-cll", "-s", "over_bare", "--project-dir", str(project), "-o", str(out)]
+    )
+    assert parsed.exit_code == 0, parsed.output
+    rows = {r["column"]: r for r in json.loads(out.read_text(encoding="utf-8"))["results"]}
+    assert rows["loaded_ts"]["progenitors"] == [["bare_src", "a_ts"]]
+    assert "cll_unknown_columns" not in rows
+    assert rows["hashdiff"]["progenitors"] == []

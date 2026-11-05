@@ -25,6 +25,12 @@ def strip_sql_comments(text: str) -> str:
     return text.strip()
 
 
+UNKNOWN_COLUMNS_MARKER = "cll_unknown_columns"
+"""Stands in for a column list ``compile-cll`` could not determine. Macros building SQL from
+such a list (``CONCAT()``, ``IFF(= '', ...)``) would render invalid SQL and cost the whole
+model its lineage; the parser drops the marker from every result."""
+
+
 class AliasMap(dict):
     """Table aliases, matched case-insensitively like unquoted SQL identifiers.
 

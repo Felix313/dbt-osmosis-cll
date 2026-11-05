@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import UNKNOWN_COLUMNS_MARKER
 from dbt_osmosis_cll.config import find_config_file, get_config
 
 logger = logging.getLogger(__name__)
@@ -326,7 +327,8 @@ def _stub_star(name: str) -> str:
         "{%- set excluded = except | map('lower') | list -%}"
         "{%- set cols = [] -%}"
         "{%- for column in adapter.get_columns_in_relation(from) "
-        "if (column.name | lower) not in excluded and column.name not in cols -%}"
+        "if (column.name | lower) not in excluded and column.name not in cols "
+        "and (column.name | lower) != '" + UNKNOWN_COLUMNS_MARKER + "' -%}"
         "{%- do cols.append(column.name) -%}{%- endfor -%}"
         "{%- set q = (relation_alias ~ '.') if relation_alias else '' -%}"
         + _log_call(
@@ -459,7 +461,8 @@ class OfflineCompileReport:
             for rel in info.get("columns_from_docs", []):
                 out.append(
                     f"{model}: columns of {rel} come from YAML documentation and may be "
-                    "incomplete, in another order than the table"
+                    "incomplete, in another order than the table. A role with read access to "
+                    f"{rel} would confirm its real columns (see cll-column-sources)"
                 )
             for flag in info.get("empty_shell", []):
                 out.append(f"{model}: compiled SQL looks like an empty shell ({flag})")
@@ -720,7 +723,8 @@ def _offline_adapter(
             "known_columns": bool(cols),
             "origin": origin,
         })
-        return cols
+        # Macros build SQL from the list; an empty one renders invalid SQL.
+        return cols or [(UNKNOWN_COLUMNS_MARKER.upper(), None)]
 
     def _get_columns(self, relation):
         ident = str(getattr(relation, "identifier", "") or "") or str(relation).split(".")[-1]
