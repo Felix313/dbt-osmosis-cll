@@ -279,6 +279,15 @@ def _without_unknown_columns_marker(result: SQLParseResult) -> SQLParseResult:
     return result
 
 
+def _drop_column_schema(parsed: Any) -> Any:
+    """``schema.table.column`` is ``table.column``: relations are keyed by bare name."""
+    for column in parsed.find_all(exp.Column):
+        if column.args.get("db") or column.args.get("catalog"):
+            column.set("db", None)
+            column.set("catalog", None)
+    return parsed
+
+
 _SHADOW_SUFFIX = "__cll_cte"
 
 
@@ -383,9 +392,13 @@ def _hoist_derived_tables(parsed: Any) -> Any:
         name = f"{_DERIVED_PREFIX}{number}"
         alias = sub.alias or name
         pivots = sub.args.get("pivots")
+        renamed = sub.args.get("alias")
         table = exp.Table(
             this=exp.to_identifier(name),
-            alias=exp.TableAlias(this=exp.to_identifier(alias)),
+            alias=exp.TableAlias(
+                this=exp.to_identifier(alias),
+                columns=[c.copy() for c in renamed.columns] if renamed is not None else [],
+            ),
         )
         if pivots:
             table.set("pivots", pivots)
@@ -584,13 +597,14 @@ class ExpressionAnalyzer:
     def _default_handler(self, expr: Any, context: ParserContext) -> List[ColumnLineage]:
         semantic_type, literal_value = _classify_expression(expr)
         if semantic_type == "window":
-            # Extract source columns from the window function body only — exclude
-            # PARTITION BY / ORDER BY columns so the progenitor reflects the value
+            # Exclude PARTITION BY / ORDER BY columns so the progenitor reflects the value
             # being windowed, not the grouping dimensions.
-            inner = expr.this if isinstance(expr, exp.Alias) else expr
-            window_node = inner.find(exp.Window)
-            func_expr = window_node.this if (window_node and window_node.this) else inner
-            source_cols = self.parser._extract_source_columns(func_expr, context)
+            # A CASE may hold several window functions next to plain columns.
+            inner = (expr.this if isinstance(expr, exp.Alias) else expr).copy()
+            for window_node in inner.find_all(exp.Window):
+                for spec in ("partition_by", "order"):
+                    window_node.set(spec, None)
+            source_cols = self.parser._extract_source_columns(inner, context)
         else:
             source_cols = self.parser._extract_source_columns(expr, context)
         normalized_source_cols = self.parser._normalize_source_columns(source_cols)
@@ -682,7 +696,11 @@ class SQLColumnParser:
         sql = _EMPTY_TYPE_PARAMS_RE.sub(r"\1", sql)
         parsed = _inline_pivot_columns(
             _inline_table_function_columns(
-                _hoist_derived_tables(_rename_shadowing_ctes(parse_one(sql, dialect=self.dialect)))
+                _hoist_derived_tables(
+                    _rename_shadowing_ctes(
+                        _drop_column_schema(parse_one(sql, dialect=self.dialect))
+                    )
+                )
             )
         )
         result, usage_state = self._parse_lineage_tree(parsed, stop_at_ephemeral)
@@ -816,20 +834,10 @@ class SQLColumnParser:
                     )
                     for bs in branch_selects
                 ]
-                for col_idx, (col_name, _, _) in enumerate(expanded_branches[0]):
-                    if not col_name or col_name == "*":
-                        continue
-                    branches = [
-                        branch[col_idx][1]
-                        for branch in expanded_branches
-                        if col_idx < len(branch) and branch[col_idx][1]
-                    ]
-                    all_sources = {
-                        src
-                        for branch in expanded_branches
-                        if col_idx < len(branch)
-                        for src in branch[col_idx][2]
-                    }
+                by_name = self._by_name(parsed)
+                for col_name, col_idx, entries in self._aligned_columns(expanded_branches, by_name):
+                    branches = [qualifier for qualifier, _sources in entries if qualifier]
+                    all_sources = {src for _qualifier, sources in entries for src in sources}
                     constant = (
                         None
                         if all_sources or branches
@@ -1129,6 +1137,49 @@ class SQLColumnParser:
             )
         return [node]
 
+    def _by_name(self, node: Any) -> bool:
+        """Whether a set operation matches its branches by column name (``UNION BY NAME``)."""
+        if isinstance(node, (exp.Union, exp.Intersect, exp.Except)):
+            return bool(node.args.get("by_name")) or self._by_name(node.this)
+        return False
+
+    @staticmethod
+    def _aligned_columns(
+        expanded: list[list[tuple[str, str, list[str]]]], by_name: bool
+    ) -> list[tuple[str, int, list[tuple[str, list[str]]]]]:
+        """``(column, position in the first branch, per-branch (qualifier, sources))``.
+
+        Set operations match by position and name the outputs after the first branch,
+        ``BY NAME`` matches by column name over the columns of all branches. The position
+        is -1 for a column the first branch does not have.
+        """
+        if not expanded:
+            return []
+        if by_name:
+            order: list[str] = []
+            for branch in expanded:
+                for name, _qualifier, _sources in branch:
+                    if name and name != "*" and name not in order:
+                        order.append(name)
+            first = [c[0] for c in expanded[0]]
+            return [
+                (
+                    name,
+                    first.index(name) if name in first else -1,
+                    [(c[1], c[2]) for branch in expanded for c in branch if c[0] == name],
+                )
+                for name in order
+            ]
+        return [
+            (
+                name,
+                position,
+                [(b[position][1], b[position][2]) for b in expanded if position < len(b)],
+            )
+            for position, (name, _qualifier, _sources) in enumerate(expanded[0])
+            if name and name != "*"
+        ]
+
     def _resolve_branch_source(
         self,
         branch_expr: Any,
@@ -1289,6 +1340,8 @@ class SQLColumnParser:
         """
         kinds: list[str] = []
         values: list[str] = []
+        if col_idx < 0:  # BY NAME: not all branches have it, no positional inspection
+            return None
         for branch in branch_selects:
             exprs = branch.expressions
             if col_idx >= len(exprs) or any(
@@ -1363,19 +1416,10 @@ class SQLColumnParser:
             else:
                 cte_base_tables.setdefault(cte_name, set()).add(tbl_name)
 
-        first_branch_cols = expanded_branches[0]
-        for col_idx, (col_name, _, _) in enumerate(first_branch_cols):
-            if not col_name or col_name == "*":
-                continue
-            branches: List[str] = []
-            all_sources: set[str] = set()
-            for branch in expanded_branches:
-                if col_idx >= len(branch):
-                    continue
-                _, qualifier, sources = branch[col_idx]
-                if qualifier:
-                    branches.append(qualifier)
-                all_sources.update(sources)
+        by_name = self._by_name(union_body)
+        for col_name, col_idx, entries in self._aligned_columns(expanded_branches, by_name):
+            branches: List[str] = [qualifier for qualifier, _sources in entries if qualifier]
+            all_sources: set[str] = {src for _qualifier, sources in entries for src in sources}
             if all_sources:
                 cte_source_sets.setdefault(cte_name, {})[col_name] = sorted(all_sources)
             cte_sources[cte_name][col_name] = ""  # multi-source sentinel
@@ -1562,6 +1606,46 @@ class SQLColumnParser:
             return f"{table}.{col_name_lower}"
         return column
 
+    def _reads_a_column(self, col: Any, col_name: str, context: ParserContext) -> bool:
+        """Whether an unqualified name is a relation's column rather than a SELECT alias.
+
+        A lateral alias can only be read to the right of its definition; before that, or
+        when a relation in scope is known to have the column, the name means the column.
+        """
+        if self._in_scope_relation(col_name, context):
+            return True
+        definition = (context.column_definitions or {}).get(col_name)
+        select = getattr(definition, "parent", None)
+        if not isinstance(select, exp.Select):
+            return False
+        projections = select.expressions
+        node = col
+        while node is not None and node.parent is not select:
+            node = node.parent
+        if node is None or node.arg_key != "expressions":
+            return False  # a filter or join reads the alias
+        position = {id(p): i for i, p in enumerate(projections)}
+        return position.get(id(node), -1) < position.get(id(definition), -1)
+
+    def _in_scope_relation(self, col_name: str, context: ParserContext) -> bool:
+        """Whether a relation in scope is known to have the column.
+
+        Such a column outranks a same-named SELECT alias:
+        ``MIN(created_ts) AS first_ts, CURRENT_TIMESTAMP AS created_ts`` reads the table's
+        ``created_ts``, not the alias.
+        """
+        name = col_name.lower()
+        for table in context.scope_tables or [context.table_context]:
+            if not table:
+                continue
+            if table in context.cte_sources:
+                columns: Optional[Set[str]] = {c.lower() for c in context.cte_sources[table]}
+            else:
+                columns = self._known_table_columns(table)
+            if columns and name in columns:
+                return True
+        return False
+
     def _handle_forward_reference(
         self,
         expr: exp.Column,
@@ -1573,6 +1657,7 @@ class SQLColumnParser:
             not is_qualified
             and context.column_definitions
             and col_name in context.column_definitions
+            and not self._reads_a_column(expr, col_name, context)
         ):
             forward_expr = context.column_definitions[col_name]
             if forward_expr != expr:
@@ -1701,6 +1786,7 @@ class SQLColumnParser:
             and context.column_definitions
             and col_name in context.column_definitions
             and col_name not in visited_forward_refs
+            and not self._reads_a_column(col, col_name, context)
         ):
             forward_expr = context.column_definitions[col_name]
             if forward_expr != col:

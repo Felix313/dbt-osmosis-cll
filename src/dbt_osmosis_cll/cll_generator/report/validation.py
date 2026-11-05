@@ -35,7 +35,12 @@ from dbt_osmosis_cll.cll_generator.parser.sql_parser import (
     _hoist_derived_tables,
     _with_of,
 )
-from dbt_osmosis_cll.cll_generator.report.analysis import Analysis, Graph
+from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import UNKNOWN_COLUMNS_MARKER
+from dbt_osmosis_cll.cll_generator.report.analysis import (
+    Analysis,
+    Graph,
+    qualified_relations,
+)
 from dbt_osmosis_cll.config import get_config
 
 PASSED = "passed"
@@ -49,6 +54,8 @@ _NO_ACCESS = re.compile(
     r"|unknown user-defined function",
     re.IGNORECASE,
 )
+_PLAIN_NAME = re.compile(r"[A-Za-z_][\w$]*")
+_POSITIONAL_ALIAS = re.compile(r"number of columns produced by .* number of aliases", re.I)
 _MISSING_OBJECT = re.compile(
     r"(?:Object|Database|Schema|Table|View)\s+'?\"?([\w$.\"]+)'?\"?\s+does not exist"
     r"|user-defined functions?\s+([\w$.\"]+)",
@@ -127,8 +134,57 @@ def _shapes_rows(body: Any) -> bool:
 
 
 def _select_shapes_rows(select: exp.Select) -> bool:
+    """DISTINCT compares whole rows: every projection stays."""
+    return bool(select.args.get("distinct"))
+
+
+def _expand_positions(select: exp.Select) -> bool:
+    """Replace ``GROUP BY 1, 2`` / ``ORDER BY 1`` by the expressions; False if impossible."""
+    projections = select.expressions
+    clauses = [select.args.get("group"), select.args.get("order")]
+    for clause in clauses:
+        for key in list(clause.expressions) if clause is not None else []:
+            target = key.this if isinstance(key, exp.Ordered) else key
+            if not (isinstance(target, exp.Literal) and not target.is_string):
+                continue
+            index = int(target.this) - 1
+            if any(_is_star(p) for p in projections) or not 0 <= index < len(projections):
+                return False
+            source = projections[index]
+            target.replace((source.this if isinstance(source, exp.Alias) else source).copy())
+    return True
+
+
+def _grouping_projections(select: exp.Select) -> set[str]:
+    """GROUP BY ALL groups by every projection without an aggregate: those stay."""
     group = select.args.get("group")
-    return bool(select.args.get("distinct")) or bool(group and group.args.get("all"))
+    if group is None or not group.args.get("all"):
+        return set()
+    return {
+        _projection_name(p)
+        for p in select.expressions
+        if not _is_star(p) and not p.find(exp.AggFunc)
+    }
+
+
+def _is_alias(projection: Any) -> bool:
+    """A real alias; ``t.x`` or ``t.x AS x`` read a column of that name, not an alias."""
+    if not isinstance(projection, exp.Alias):
+        return False
+    inner = projection.this
+    return not (isinstance(inner, exp.Column) and inner.name.lower() == projection.alias.lower())
+
+
+def _lateral_references(select: exp.Select, projections: list[Any]) -> set[str]:
+    """Unqualified names *select* reads in *projections* and its filters."""
+    names = {c.name.lower() for p in projections for c in p.find_all(exp.Column) if not c.table}
+    for arg in ("where", "qualify", "having", "group", "order"):
+        part = select.args.get(arg)
+        if part is not None:
+            names |= {c.name.lower() for c in part.find_all(exp.Column) if not c.table}
+    for join in select.args.get("joins") or []:
+        names |= {c.name.lower() for c in join.find_all(exp.Column) if not c.table}
+    return names
 
 
 def _is_star(projection: Any) -> bool:
@@ -144,15 +200,13 @@ def _prune_select(select: exp.Select, keep: set[str]) -> None:
     projections = list(select.expressions)
     while True:
         kept = [p for p in projections if _is_star(p) or _projection_name(p) in keep]
-        referenced = {c.name.lower() for p in kept for c in p.find_all(exp.Column) if not c.table}
-        for arg in ("where", "qualify", "having", "group", "order"):
-            part = select.args.get(arg)
-            if part is not None:
-                referenced |= {c.name.lower() for c in part.find_all(exp.Column) if not c.table}
+        referenced = _lateral_references(select, kept)
         added = {
             _projection_name(p)
             for p in projections
-            if _projection_name(p) in referenced and _projection_name(p) not in keep
+            if _is_alias(p)
+            and _projection_name(p) in referenced
+            and _projection_name(p) not in keep
         }
         if not added:
             break
@@ -170,17 +224,41 @@ def _prune_body(body: Any, keep: set[str] | None) -> None:
     if not branches:
         return
     if len(branches) == 1:
-        if not _select_shapes_rows(branches[0]):
-            _prune_select(branches[0], keep)
+        select = branches[0]
+        if not _select_shapes_rows(select) and _expand_positions(select):
+            _prune_select(select, keep | _grouping_projections(select))
+        return
+    if body.args.get("by_name"):
+        for select in branches:
+            if not _select_shapes_rows(select) and _expand_positions(select):
+                _prune_select(select, keep | _grouping_projections(select))
         return
     # UNION ALL matches by position: only whole positions can go, and only if all are listed.
-    if any(_select_shapes_rows(b) or any(_is_star(p) for p in b.expressions) for b in branches):
+    if any(
+        _select_shapes_rows(b)
+        or _grouping_projections(b)
+        or not _expand_positions(b)
+        or any(_is_star(p) for p in b.expressions)
+        for b in branches
+    ):
         return
     width = min(len(b.expressions) for b in branches)
     names = [_projection_name(p) for p in branches[0].expressions]
-    positions = [i for i in range(width) if i < len(names) and names[i] in keep]
+    positions = {i for i in range(width) if names[i] in keep}
+    while True:  # a kept position may read a lateral alias of its branch
+        before = len(positions)
+        for branch in branches:
+            projections = branch.expressions
+            referenced = _lateral_references(branch, [projections[i] for i in positions])
+            positions |= {
+                i
+                for i in range(width)
+                if _is_alias(projections[i]) and _projection_name(projections[i]) in referenced
+            }
+        if len(positions) == before:
+            break
     for branch in branches:
-        kept = [branch.expressions[i] for i in positions]
+        kept = [branch.expressions[i] for i in sorted(positions)]
         branch.set("expressions", kept or [exp.alias_(exp.Literal.number(1), NO_COLUMNS)])
 
 
@@ -229,12 +307,16 @@ def _demand(
             continue
         scope = _scope_tables(select)
         relations = set(scope.values())
+        for relation in relations:  # read, even if by no named column (COUNT(*), EXISTS)
+            add(relation, set())
         for joined in select.args.get("joins") or []:
             for using in joined.args.get("using") or []:
                 for relation in relations:
                     add(relation, {using.name.lower()})
         for table in select.find_all(exp.Table):
-            if table.args.get("pivots") and table.find_ancestor(exp.Select) is select:
+            alias = table.args.get("alias")
+            renames = alias is not None and alias.columns
+            if (table.args.get("pivots") or renames) and table.find_ancestor(exp.Select) is select:
                 add(table.name.lower(), None)
         for projection in select.expressions:
             if not _is_star(projection):
@@ -277,6 +359,9 @@ def reduce_projections(tree: Any, required: set[str] | None) -> None:
     _demand(tree, required, final, names, need)
     for cte in reversed(entries):
         name = cte.alias.lower()
+        if name not in need:  # never read: nothing depends on what it selects
+            cte.pop()
+            continue
         keep = need.get(name, set())
         _prune_body(cte.this, keep)
         top = [b for b in _branches(cte.this) if isinstance(b, exp.Select)]
@@ -288,7 +373,9 @@ def reduce_projections(tree: Any, required: set[str] | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _parents(node: dict[str, Any], manifest: dict[str, Any]) -> list[dict[str, Any]]:
+def _parents(
+    node: dict[str, Any], manifest: dict[str, Any], renamed: dict[tuple[str, str], str]
+) -> list[dict[str, Any]]:
     """Physical relations a model reads, with their name in the lineage graph."""
     own = str(node.get("name") or "").lower()
     out = []
@@ -298,22 +385,66 @@ def _parents(node: dict[str, Any], manifest: dict[str, Any]) -> list[dict[str, A
             continue
         is_source = uid.startswith("source.")
         if (parent.get("config") or {}).get("materialized") == "ephemeral":
+            out.extend(_parents(parent, manifest, renamed))  # compiled into this model's SQL
             continue
         identifier = str(parent.get("identifier") or parent.get("alias") or parent.get("name"))
         name = identifier.lower() if is_source else str(parent.get("name") or "").lower()
-        if is_source and name == own:  # same-named source: see analysis.build_graph
-            name = f"{str(parent.get('source_name')).lower()}.{name}"
         out.append({
-            "name": name,
+            "name": renamed.get((own, name), name) if is_source else name,
             "identifier": identifier.lower(),
             "schema": str(parent.get("schema") or "").lower(),
+            "types": {
+                str(c).lower(): col.get("data_type")
+                for c, col in (parent.get("columns") or {}).items()
+                if col.get("data_type")
+            },
         })
     return out
 
 
-def _stub_select(columns: list[str]) -> exp.Select:
+STUB_KINDS = (
+    (None, False),
+    (None, True),
+    ("VARCHAR", False),
+    ("VARCHAR", True),
+    ("VARIANT", False),
+    ("VARIANT", True),
+)
+"""``(type, typed by name)`` of a stub column without a documented type: functions reject an
+untyped NULL, and none of these fits all (``TRY_CAST`` wants text, ``EXTRACT`` a date)."""
+
+_DATE_LIKE = re.compile(r"(_dt|_date|date|_day)(_|$)|(^|_)(dt|date)$", re.IGNORECASE)
+_TIMESTAMP_LIKE = re.compile(r"(_ts|timestamp|_time)(_|$)", re.IGNORECASE)
+"""Only for binding a stub: a column named like a date is offered as one."""
+
+
+def _named_type(column: str) -> str | None:
+    if _TIMESTAMP_LIKE.search(column):
+        return "TIMESTAMP_NTZ"
+    return "DATE" if _DATE_LIKE.search(column) else None
+
+
+def _stub_value(dtype: str | None, kind: str | None, dialect: str | None) -> exp.Expression:
+    for candidate in (dtype, kind):
+        if candidate:
+            try:
+                return exp.Cast(this=exp.Null(), to=exp.DataType.build(candidate, dialect=dialect))
+            except Exception:  # noqa: BLE001 — free-text YAML type: use the next candidate
+                continue
+    return exp.Null()
+
+
+def _stub_select(
+    columns: list[str], types: dict[str, Any], kind: tuple[Any, bool], dialect: str | None
+) -> exp.Select:
     names = sorted(set(columns)) or [NO_COLUMNS]
-    return exp.select(*[exp.alias_(exp.Null(), exp.to_identifier(c, quoted=False)) for c in names])
+    return exp.select(*[
+        exp.alias_(
+            _stub_value(types.get(c) or (_named_type(c) if kind[1] else None), kind[0], dialect),
+            exp.to_identifier(c, quoted=not _PLAIN_NAME.fullmatch(c)),
+        )
+        for c in names
+    ])
 
 
 def _real_select(table: exp.Table, columns: list[str], case: dict[str, str]) -> exp.Select:
@@ -333,6 +464,8 @@ def _replace_parents(
     columns_of: Callable[[str], list[str] | None],
     visible: set[str] | None,
     physical: dict[str, dict[str, str]],
+    stub_kind: tuple[Any, bool],
+    dialect: str | None,
 ) -> tuple[list[str], int]:
     """Read upstream relations as *columns_of* says (None: as they are).
 
@@ -341,6 +474,9 @@ def _replace_parents(
     Returns the stubbed relations and the number of columns offered.
     """
     by_physical = {(p["schema"], p["identifier"]): p for p in parents}
+    for column in list(tree.find_all(exp.Column)):  # schema.table.column has no meaning below
+        if (str(column.args.get("db") or "").lower(), column.table.lower()) in by_physical:
+            column.set("db", None)
     stubbed: list[str] = []
     offered = 0
     for table in list(tree.find_all(exp.Table)):
@@ -348,16 +484,19 @@ def _replace_parents(
         if parent is None:
             continue
         name = parent["name"]
+        key = f"{parent['schema']}.{parent['identifier']}"
+        alias = table.args.get("alias")
+        renames = [c.name.lower() for c in alias.columns] if alias is not None else []
         columns = columns_of(name)
-        hidden = visible is not None and name not in visible
-        if columns is None and not hidden:
-            continue
-        columns = columns or []
+        hidden = visible is not None and key not in visible
+        if (columns is None or renames) and not hidden:
+            continue  # as it is: a column-renaming alias depends on all columns by position
+        columns = renames or columns or []
         offered += len(columns)
         select = (
-            _stub_select(columns)
+            _stub_select(columns, parent["types"], stub_kind, dialect)
             if hidden
-            else _real_select(table, columns, physical.get(name) or {})
+            else _real_select(table, columns, physical.get(key) or {})
         )
         if hidden and name not in stubbed:
             stubbed.append(name)
@@ -378,8 +517,8 @@ def _replace_parents(
 
 
 def load_compiled_sql(project_dir: Path, node: dict[str, Any], dialect: str | None) -> str | None:
-    """A model's compiled SQL, query only. Placeholder filters become FALSE, so scalar
-    subqueries over them stay single-row."""
+    """A model's compiled SQL, query only. A placeholder standing for a filter becomes FALSE,
+    so scalar subqueries over it stay single-row; any other stands for a value: NULL."""
     sql = node.get("compiled_code")
     if not sql:
         path = (
@@ -396,26 +535,21 @@ def load_compiled_sql(project_dir: Path, node: dict[str, Any], dialect: str | No
     if re.search(r"\b(?:MERGE|INSERT)\b", sql, re.IGNORECASE):
         sql = _extract_source_select(sql, dialect=dialect)
     for pattern in get_config(project_dir).compiled_sql_placeholder_patterns or []:
-        sql = re.sub(pattern, "FALSE", sql)
+        sql = re.sub(rf"(\b(?:WHERE|AND|OR)\s+)(?:{pattern})", r"\1FALSE", sql, flags=re.IGNORECASE)
+        sql = re.sub(pattern, "NULL", sql)
     return _EMPTY_TYPE_PARAMS_RE.sub(r"\1", sql)
 
 
-def physical_columns(
-    snapshot: dict[str, Any], manifest: dict[str, Any]
-) -> dict[str, dict[str, str]]:
-    """Graph name → {lowercase column: real column} from ``target/cll-columns.json``."""
+def physical_columns(snapshot: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """``schema.identifier`` → {lowercase column: real column} from ``cll-columns.json``."""
     out: dict[str, dict[str, str]] = {}
-    for uid, entry in (snapshot.get("nodes") or {}).items():
-        node = (manifest.get("nodes") or {}).get(uid) or {}
-        out[str(node.get("name") or uid.split(".")[-1]).lower()] = {
-            str(c).lower(): str(c) for c in entry.get("columns") or {}
-        }
-    for uid, entry in (snapshot.get("sources") or {}).items():
-        columns = {str(c).lower(): str(c) for c in entry.get("columns") or {}}
-        source = (manifest.get("sources") or {}).get(uid) or {}
-        name = str((entry.get("metadata") or {}).get("name") or "").lower()
-        out.setdefault(name, columns)
-        out[f"{str(source.get('source_name')).lower()}.{name}"] = columns
+    for entry in [
+        *(snapshot.get("nodes") or {}).values(),
+        *(snapshot.get("sources") or {}).values(),
+    ]:
+        meta = entry.get("metadata") or {}
+        key = f"{str(meta.get('schema')).lower()}.{str(meta.get('name')).lower()}"
+        out[key] = {str(c).lower(): str(c) for c in entry.get("columns") or {}}
     return out
 
 
@@ -432,7 +566,7 @@ def _missing_relation(message: str) -> str:
     found = _MISSING_OBJECT.search(message)
     if not found:
         return ""
-    return (found.group(1) or found.group(2) or "").replace('"', "").upper()
+    return (found.group(1) or found.group(2) or "").replace('"', "").rstrip(".").upper()
 
 
 def validate(
@@ -448,8 +582,10 @@ def validate(
 ) -> ValidationResult:
     """Bind every needed model as it is and reduced. *run* returns the output column names.
 
-    Upstream relations outside *visible* (None: all are visible) are replaced by stubs.
+    Upstream relations outside *visible* (``schema.identifier``; None: all are visible) are
+    replaced by stubs.
     """
+    renamed = qualified_relations(manifest)
     physical = physical or {}
     required: dict[str, list[str]] = defaultdict(list)
     for model, column in result.required:
@@ -485,6 +621,7 @@ def validate(
                 visible,
                 known_columns,
                 out,
+                renamed,
             )  # fmt: skip
         )
     return out
@@ -503,6 +640,7 @@ def _check_model(
     visible: set[str] | None,
     known_columns: Callable[[str], list[str]],
     out: ValidationResult,
+    renamed: dict[tuple[str, str], str],
 ) -> ModelCheck:
     sql = compiled_sql(node)
     if not sql:
@@ -513,21 +651,40 @@ def _check_model(
         return ModelCheck(model, NOT_TESTABLE, f"SQL not parseable: {str(exc)[:160]}")
     if not isinstance(parsed, exp.Query):
         return ModelCheck(model, NOT_TESTABLE, "not a query")
-    parents = _parents(node, manifest)
+    parents = _parents(node, manifest, renamed)
+    # A stub in the unreduced query offers anything this SQL could read from it.
+    named_in_sql = sorted({
+        c.name if c.this.args.get("quoted") else c.name.lower()
+        for c in parsed.find_all(exp.Column)
+        if not isinstance(c.this, exp.Star)
+    })
+    marker = [UNKNOWN_COLUMNS_MARKER] if UNKNOWN_COLUMNS_MARKER in named_in_sql else []
 
-    original = parsed.copy()
-    hidden = visible is not None
-    stubbed, _ = _replace_parents(
-        original,
-        parents,
-        lambda name: known_columns(name) if hidden and name not in (visible or set()) else None,
-        visible,
-        physical,
-    )
-    try:
-        original_columns = run(_bind(original.sql(dialect=dialect)))
-    except Exception as exc:  # noqa: BLE001 — every warehouse error is classified below
-        message = str(exc)
+    stubbed: list[str] = []
+    original_columns: list[str] = []
+    stub_kind = STUB_KINDS[0]
+    message = ""
+    for stub_kind in STUB_KINDS:
+        # A visible relation stays as it is in the unreduced query.
+        original = parsed.copy()
+        stubbed, _ = _replace_parents(
+            original,
+            [p for p in parents if _is_hidden(p, visible)],
+            lambda name: sorted({*known_columns(name), *named_in_sql}),
+            visible,
+            physical,
+            stub_kind,
+            dialect,
+        )
+        try:
+            original_columns = run(_bind(original.sql(dialect=dialect)))
+            message = ""
+            break
+        except Exception as exc:  # noqa: BLE001 — every warehouse error is classified below
+            message = str(exc)
+            if not stubbed or _NO_ACCESS.search(message):
+                break
+    if message:
         if _NO_ACCESS.search(message):
             return ModelCheck(model, NO_ACCESS, message[:240], _missing_relation(message), stubbed)
         # Not the requirements' fault: this SQL does not bind even as compiled.
@@ -541,15 +698,22 @@ def _check_model(
     _, offered = _replace_parents(
         reduced,
         parents,
-        lambda name: None if name in data_products else required.get(name, []),
+        lambda name: None if name in data_products else [*required.get(name, []), *marker],
         visible,
         physical,
+        stub_kind,
+        dialect,
     )
     try:
         reduced_columns = run(_bind(reduced.sql(dialect=dialect)))
     except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        if _POSITIONAL_ALIAS.search(message):  # `(SELECT * ...) AS d (x, y)` counts columns
+            return ModelCheck(
+                model, NOT_TESTABLE, f"alias by position: {message[:200]}", stubbed=stubbed
+            )
         return ModelCheck(
-            model, FAILED, f"reduced query does not bind: {str(exc)[:300]}", stubbed=stubbed
+            model, FAILED, f"reduced query does not bind: {message[:300]}", stubbed=stubbed
         )
     # What is required of the model (everything, for a data product) must still come out.
     available = {c.lower() for c in original_columns}
@@ -561,6 +725,10 @@ def _check_model(
         )
     out.columns_checked += offered
     return ModelCheck(model, PASSED, stubbed=stubbed)
+
+
+def _is_hidden(parent: dict[str, Any], visible: set[str] | None) -> bool:
+    return visible is not None and f"{parent['schema']}.{parent['identifier']}" not in visible
 
 
 # ---------------------------------------------------------------------------

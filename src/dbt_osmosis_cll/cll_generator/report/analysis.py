@@ -31,7 +31,7 @@ Self-references (an incremental model reading its own table) are ignored.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -110,6 +110,30 @@ class Graph:
             if relation not in sources and relation not in self.unverified:
                 out.append(relation)
         return out
+
+
+def qualified_relations(manifest: dict[str, Any]) -> dict[tuple[str, str], str]:
+    """(reading model, bare relation name) → qualified name of the source it really reads.
+
+    Only for sources whose bare name is ambiguous: another source has the same identifier
+    (the same table name in two schemas), or the model reading it has that name itself.
+    """
+    sources = manifest.get("sources") or {}
+    identifier = {
+        uid: str(s.get("identifier") or s.get("name") or "").lower() for uid, s in sources.items()
+    }
+    uses = Counter(identifier.values())
+    out: dict[tuple[str, str], str] = {}
+    for node in (manifest.get("nodes") or {}).values():
+        if node.get("resource_type") not in ("model", "seed", "snapshot"):
+            continue
+        reader = str(node.get("name") or "").lower()
+        for parent in (node.get("depends_on") or {}).get("nodes") or []:
+            ident = identifier.get(parent)
+            if ident and (uses[ident] > 1 or ident == reader):
+                source_name = str(sources[parent].get("source_name")).lower()
+                out[(reader, ident)] = f"{source_name}.{ident}"
+    return out
 
 
 def _in_sql(row: dict[str, Any]) -> bool:
@@ -212,18 +236,21 @@ def build_graph(
         }
         models.setdefault(name, source_meta[uid])
 
-    # A model named like the source it reads (a view over a table of the same name):
-    # bare relation names cannot tell them apart and its lineage reads itself. The
-    # manifest can: such a source gets its own qualified name.
-    same_named: dict[str, str] = {}
-    for uid, node in (manifest.get("nodes") or {}).items():
-        name = uid_name.get(uid)
-        for parent in (node.get("depends_on") or {}).get("nodes") or []:
-            if parent in source_meta and uid_name.get(parent) == name:
-                qualified = f"{str(source_meta[parent]['source_name']).lower()}.{name}"
-                same_named[name] = qualified
-                models[qualified] = source_meta[parent]
-                source_names.add(name)
+    # Usages name a source by its dbt name, lineage by its table name.
+    table_name = {
+        str(src.get("name") or "").lower(): str(src.get("identifier") or src.get("name")).lower()
+        for src in (manifest.get("sources") or {}).values()
+        if str(src.get("identifier") or src.get("name")).lower() != str(src.get("name")).lower()
+    }
+    # Bare relation names cannot tell apart sources sharing an identifier, or a model and
+    # the same-named source it reads; the manifest knows which one each model means.
+    renamed = qualified_relations(manifest)
+    for uid, src in (manifest.get("sources") or {}).items():
+        ident = uid_name[uid]
+        qualified = f"{str(source_meta[uid]['source_name']).lower()}.{ident}"
+        if qualified in renamed.values():
+            models[qualified] = source_meta[uid]
+            source_names.add(ident)
 
     results = cll.get("results") or []
     traced = {str(r["model"]).lower() for r in results if _in_sql(r)}
@@ -238,9 +265,10 @@ def build_graph(
         model, col = str(r["model"]).lower(), str(r["column"]).lower()
         progs = [
             [
-                same_named[model]
-                if str(m).lower() == model and model in same_named
-                else str(m).lower(),
+                renamed.get(
+                    (model, table_name.get(str(m).lower(), str(m).lower())),
+                    table_name.get(str(m).lower(), str(m).lower()),
+                ),
                 str(c).lower(),
             ]
             for m, c in (r.get("progenitors") or [])
@@ -258,13 +286,14 @@ def build_graph(
     usages: list[list[Any]] = []
     for u in cll.get("usages") or []:
         reader, read = str(u["model"]).lower(), str(u.get("source_model") or "").lower()
-        reads_same_named = reader == read and reader in same_named
-        if not read or (u.get("is_self_reference") and not reads_same_named):
+        read = table_name.get(read, read)
+        reads_source = (reader, read) in renamed
+        if not read or (u.get("is_self_reference") and not reads_source):
             continue
         usages.append([
             reader,
             u["usage"],
-            same_named[reader] if reads_same_named else read,
+            renamed.get((reader, read), read),
             str(u["source_column"]).lower(),
             u.get("scope") or "",
             u.get("predicate_sql") or "",
@@ -272,9 +301,7 @@ def build_graph(
 
     unverified = {
         str(model).lower(): sorted({
-            same_named[str(rel).lower()]
-            if str(rel).lower() == str(model).lower() and str(rel).lower() in same_named
-            else str(rel).lower()
+            renamed.get((str(model).lower(), str(rel).lower()), str(rel).lower())
             for rel in (*info.get("columns_from_docs", []), *info.get("star_without_columns", []))
         })
         for model, info in (cll.get("compile") or {}).items()
@@ -301,7 +328,7 @@ def build_graph(
         if name in out_cols:
             parents = (node.get("depends_on") or {}).get("nodes") or []
             deps[name] = sorted({
-                same_named[name] if p in source_meta and uid_name[p] == name else uid_name[p]
+                renamed.get((name, uid_name[p]), uid_name[p]) if p in source_meta else uid_name[p]
                 for p in parents
                 if p in uid_name
             })

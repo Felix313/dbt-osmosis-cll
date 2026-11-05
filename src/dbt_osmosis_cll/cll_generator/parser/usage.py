@@ -31,6 +31,22 @@ from dbt_osmosis_cll.cll_generator.parser.sql_parser_utils import (
     strip_sql_comments,
 )
 
+
+def _compares_whole_rows(select: exp.Select) -> bool:
+    """Every projection decides the rows: SELECT DISTINCT, or a branch of UNION / INTERSECT /
+    EXCEPT without ALL. Dropping such a column changes the result even if nobody reads it."""
+    if select.args.get("distinct"):
+        return True
+    parent = select.parent
+    while isinstance(parent, (exp.Subquery, exp.Union, exp.Intersect, exp.Except)):
+        if isinstance(parent, (exp.Intersect, exp.Except)) or (
+            isinstance(parent, exp.Union) and parent.args.get("distinct")
+        ):
+            return True
+        parent = parent.parent
+    return False
+
+
 if TYPE_CHECKING:  # pragma: no cover
     from dbt_osmosis_cll.cll_generator.parser.sql_parser import ParserContext, SQLColumnParser
 
@@ -230,6 +246,21 @@ class UsageCollector:
             for conj in _flatten_and(having.this):
                 for col in _own_columns(conj, select):
                     self._emit("having", col, select, ctx, derived, scope, "predicate", conj)
+
+        self._emit_pivot_groups(select, ctx, derived, scope)
+
+        if _compares_whole_rows(select):
+            for projection in select.expressions:
+                for col in _own_columns(projection, select):
+                    self._emit(
+                        "distinct", col, select, ctx, derived, scope, "projection", projection
+                    )
+
+        order = select.args.get("order")
+        if order is not None:
+            for ordered in order.expressions:
+                for col in _own_columns(ordered, select):
+                    self._emit("order_by", col, select, ctx, derived, scope, "order", ordered)
 
         qualify = select.args.get("qualify")
         if qualify is not None:
@@ -488,7 +519,12 @@ class UsageCollector:
             expr = alias_expr
             srcs = self._parser._extract_source_columns(expr, ctx, visited_forward_refs={name})
             srcs = {s for s in srcs if s}
-            return (sorted(srcs), "select_alias") if srcs else ([], "no_upstream")
+            if srcs:
+                return sorted(srcs), "select_alias"
+            # An alias of a constant: filtering on it makes no sense, so with a relation of
+            # unknown columns in scope the name means that relation's column.
+            if len(unknown) != 1:
+                return [], "no_upstream"
         if len(scope_tables) == 1 and not candidates:
             srcs, res = self._sources_for_table(scope_tables[0], name, ctx, derived)
             return srcs, "single_table" if res == "qualified" else res
@@ -505,6 +541,22 @@ class UsageCollector:
         return out, "ambiguous"
 
     # ------------------------------------------------------------------- emit
+
+    def _emit_pivot_groups(
+        self, select: exp.Select, ctx: ParserContext, derived: dict[str, exp.Select], scope: str
+    ) -> None:
+        """A PIVOT groups by every input column but the aggregated and the pivot column."""
+        for table in select.find_all(exp.Table):
+            if table.find_ancestor(exp.Select) is not select:
+                continue
+            for pivot in table.args.get("pivots") or []:
+                if pivot.args.get("unpivot"):
+                    continue
+                known = self._known_columns(table.name.lower(), ctx, derived)
+                consumed = {c.name.lower() for c in pivot.find_all(exp.Column)}
+                for name in sorted((known or set()) - consumed):
+                    col = exp.column(name, table=table.alias or table.name)
+                    self._emit("group_by", col, select, ctx, derived, scope, "pivot", pivot)
 
     def _emit(
         self,

@@ -415,3 +415,49 @@ def test_compile_time_column_expression_reports_its_columns():
     usages = extract_compile_time_usages(raw, ["get_column_values"])
     values = sorted(u.source for u in usages if u.detail == "value_column")
     assert values == ["job_ref.id_list", "job_ref.started_ts"]
+
+
+def test_order_by_of_a_select_is_a_usage():
+    from dbt_osmosis_cll.cll_generator.parser import SQLColumnParser
+
+    sql = (
+        "WITH runs AS (SELECT TOP 1 c.run_dt FROM sch.cfg AS c ORDER BY c.created_ts DESC) "
+        "SELECT r.run_dt FROM runs AS r"
+    )
+    usages = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql).column_usages
+    assert [(u.usage, u.source) for u in usages if u.usage == "order_by"] == [
+        ("order_by", "cfg.created_ts")
+    ]
+
+
+def test_distinct_and_union_projections_decide_the_rows():
+    from dbt_osmosis_cll.cll_generator.parser import SQLColumnParser
+
+    def distinct(sql):
+        usages = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql).column_usages
+        return sorted(u.source for u in usages if u.usage == "distinct")
+
+    assert distinct("SELECT DISTINCT t.a, t.b AS c FROM sch.t") == ["t.a", "t.b"]
+    assert distinct("SELECT t.a FROM sch.t UNION SELECT u.a FROM sch.u") == ["t.a", "u.a"]
+    assert distinct("SELECT t.a FROM sch.t UNION ALL SELECT u.a FROM sch.u") == []
+    assert distinct("SELECT t.a FROM sch.t") == []
+
+
+def test_pivot_groups_by_every_other_input_column():
+    from dbt_osmosis_cll.cll_generator.parser import SQLColumnParser
+
+    sql = (
+        "WITH pre AS (SELECT u.k, u.ts, u.typ, u.amt FROM sch.up u) "
+        "SELECT k, \"'a'\" AS a_amt FROM pre PIVOT(SUM(amt) FOR typ IN ('a'))"
+    )
+    usages = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql).column_usages
+    groups = sorted(u.source for u in usages if u.usage == "group_by" and u.detail == "pivot")
+    assert groups == ["up.k", "up.ts"]
+
+
+def test_filter_on_an_alias_of_a_constant_means_the_column_of_an_unknown_relation():
+    from dbt_osmosis_cll.cll_generator.parser import SQLColumnParser
+
+    sql = "SELECT 'x' AS file_name, s.id FROM sch.src AS s WHERE file_name IS NOT NULL"
+    usages = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql).column_usages
+    assert [u.source for u in usages if u.usage == "filter"] == ["src.file_name"]

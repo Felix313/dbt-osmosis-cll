@@ -88,9 +88,9 @@
   };
   var USAGE = {
     en: { join_key: "join key", join_filter: "join filter", filter: "filter", qualify: "QUALIFY",
-      window: "window", group_by: "GROUP BY", having: "HAVING", compile_time: "compile-time query" },
+      window: "window", group_by: "GROUP BY", having: "HAVING", order_by: "ORDER BY", distinct: "DISTINCT / UNION", compile_time: "compile-time query" },
     de: { join_key: "Join-Schlüssel", join_filter: "Join-Filter", filter: "Filter", qualify: "QUALIFY",
-      window: "Fenster", group_by: "GROUP BY", having: "HAVING", compile_time: "Compile-Zeit-Abfrage" }
+      window: "Fenster", group_by: "GROUP BY", having: "HAVING", order_by: "ORDER BY", distinct: "DISTINCT / UNION", compile_time: "Compile-Zeit-Abfrage" }
   };
 
   var blob = CLL_REPORT_DATA;

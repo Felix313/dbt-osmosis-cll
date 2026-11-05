@@ -1370,7 +1370,7 @@ def validate(
     dialect = (manifest_data.get("metadata") or {}).get("adapter_type")
     snapshot = snapshot_path(root)
     physical = (
-        physical_columns(json_handler.loads(snapshot.read_text(encoding="utf-8")), manifest_data)
+        physical_columns(json_handler.loads(snapshot.read_text(encoding="utf-8")))
         if snapshot.exists()
         else {}
     )

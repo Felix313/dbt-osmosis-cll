@@ -534,3 +534,56 @@ class TestAttribution:
         assert result.column_lineage["loaded_ts"][0].source_columns == {"src.ts"}
         assert result.column_lineage["hashdiff"][0].source_columns == set()
         assert not [u for u in result.column_usages if "cll_unknown" in (u.source or "")]
+
+    def test_known_column_outranks_a_same_named_select_alias(self):
+        sql = (
+            "WITH src AS (SELECT t.created_ts, t.id FROM sch.tbl t) "
+            "SELECT MIN(created_ts) AS first_ts, CURRENT_TIMESTAMP() AS created_ts, id "
+            "FROM src GROUP BY id"
+        )
+        sources = _sources(sql)
+        assert sources["first_ts"] == {"tbl.created_ts"}
+        assert sources["created_ts"] == set()
+
+    def test_unknown_relation_still_resolves_a_lateral_alias(self):
+        assert _sources("SELECT s.a AS x, x + 1 AS y FROM sch.src s")["y"] == {"src.a"}
+
+    def test_all_window_functions_of_an_expression_count(self):
+        sql = (
+            "SELECT CASE WHEN ROW_NUMBER() OVER (PARTITION BY a.p ORDER BY a.o) = 1 THEN 'Y' "
+            "WHEN MAX(UPPER(b.status)) OVER (PARTITION BY a.p) = 'X' THEN a.value END AS flag "
+            "FROM sch.ta a JOIN sch.tb b ON b.id = a.id"
+        )
+        assert _sources(sql)["flag"] == {"tb.status", "ta.value"}
+
+    def test_schema_qualified_column_reference(self):
+        sql = "SELECT sch.tbl.a, sch.tbl.b AS c FROM sch.tbl"
+        assert _sources(sql) == {"a": {"tbl.a"}, "c": {"tbl.b"}}
+
+    def test_derived_table_with_a_column_renaming_alias(self):
+        sql = "SELECT d.x FROM (SELECT t.a, t.b FROM sch.t1 t) AS d (x, y)"
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert "x" in result.column_lineage
+
+    def test_alias_defined_later_does_not_shadow_the_column(self):
+        sql = (
+            "SELECT CAST(contract_id AS NUMBER) AS hub_key, NULL AS contract_id, "
+            "contract_id AS after_alias FROM sch.unknown_columns"
+        )
+        sources = _sources(sql)
+        assert sources["hub_key"] == {"unknown_columns.contract_id"}
+        assert sources["after_alias"] == set()
+
+    def test_union_by_name_matches_columns_by_name(self):
+        sql = (
+            "WITH u AS (SELECT a.x, a.y FROM sch.ta a "
+            "UNION ALL BY NAME SELECT b.y, b.x, b.z FROM sch.tb b) "
+            "SELECT u.x, u.y, u.z FROM u"
+        )
+        assert _sources(sql) == {
+            "x": {"ta.x", "tb.x"},
+            "y": {"ta.y", "tb.y"},
+            "z": {"tb.z"},
+        }
+        top = "SELECT a.x, a.y FROM sch.ta a UNION ALL BY NAME SELECT b.y, b.x FROM sch.tb b"
+        assert _sources(top) == {"x": {"ta.x", "tb.x"}, "y": {"ta.y", "tb.y"}}

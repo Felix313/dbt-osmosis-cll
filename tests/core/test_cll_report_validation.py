@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlglot import parse_one
 
 from dbt_osmosis_cll.cll_generator.report.analysis import analyse, build_graph
 from dbt_osmosis_cll.cll_generator.report.validation import (
@@ -10,6 +11,7 @@ from dbt_osmosis_cll.cll_generator.report.validation import (
     NO_ACCESS,
     NOT_TESTABLE,
     PASSED,
+    reduce_projections,
     render_markdown,
     validate,
 )
@@ -174,6 +176,166 @@ def test_union_all_is_reduced_by_position(warehouse):
     cll = dict(CLL, results=[*CLL["results"], _row("mid", "extra", [("base", "unused")])])
     checks, _ = _validate(cll, _run(warehouse), sql)
     assert checks["mid"].status == PASSED, checks["mid"].detail
+
+
+def test_union_branch_keeps_a_lateral_alias_it_reads(warehouse):
+    sql = dict(
+        SQL,
+        mid=(
+            "SELECT b.a AS spec, spec + 1 AS a FROM sch.base AS b WHERE b.b = 1 "
+            "UNION ALL SELECT b.a AS spec, spec + 2 AS a FROM sch.base AS b"
+        ),
+    )
+    checks, _ = _validate(CLL, _run(warehouse), sql)
+    assert checks["mid"].status == PASSED, checks["mid"].detail
+
+
+def test_lateral_alias_read_in_a_join_condition_stays():
+    tree = parse_one(
+        "SELECT b.a, b.a + 0 AS helper, b.x AS unused FROM sch.base AS b "
+        "JOIN sch.other AS c ON c.a = helper",
+        dialect="snowflake",
+    )
+    reduce_projections(tree, {"a"})
+    assert [p.alias_or_name for p in tree.selects] == ["a", "helper"]
+
+
+def test_aggregates_go_but_grouping_columns_stay():
+    tree = parse_one(
+        "SELECT t.k, t.j, MAX(t.v) AS m, MIN(t.w) AS n FROM sch.t GROUP BY 1, 2",
+        dialect="snowflake",
+    )
+    reduce_projections(tree, {"k", "m"})
+    assert tree.sql(dialect="snowflake") == (
+        "SELECT t.k, MAX(t.v) AS m FROM sch.t GROUP BY t.k, t.j"
+    )
+    group_all = parse_one(
+        "SELECT t.k, t.j, MAX(t.v) AS m, MIN(t.w) AS n FROM sch.t GROUP BY ALL", dialect="snowflake"
+    )
+    reduce_projections(group_all, {"k", "m"})
+    assert [p.alias_or_name for p in group_all.selects] == ["k", "j", "m"]
+
+
+def test_a_cte_nobody_reads_is_dropped():
+    tree = parse_one(
+        "WITH dead AS (SELECT DISTINCT d.x FROM sch.d AS d), live AS (SELECT l.a FROM sch.l AS l) "
+        "SELECT live.a FROM live",
+        dialect="snowflake",
+    )
+    reduce_projections(tree, {"a"})
+    sql = tree.sql(dialect="snowflake")
+    assert "dead" not in sql and "live" in sql
+
+
+def test_a_cte_read_without_a_named_column_stays():
+    tree = parse_one(
+        "WITH used AS (SELECT d.x FROM sch.d AS d) "
+        "SELECT t.a FROM sch.t AS t WHERE EXISTS (SELECT 1 FROM used)",
+        dialect="snowflake",
+    )
+    reduce_projections(tree, {"a"})
+    assert "WITH used AS" in tree.sql(dialect="snowflake")
+
+
+def test_a_same_named_column_is_no_lateral_alias():
+    tree = parse_one(
+        "SELECT t.a, t.b AS b, t.c AS x FROM sch.t WHERE b = 1 AND x = 2", dialect="snowflake"
+    )
+    reduce_projections(tree, {"a"})
+    assert [p.alias_or_name for p in tree.selects] == ["a", "x"]
+
+
+def test_positional_group_by_is_not_shifted_by_the_reduction(warehouse):
+    sql = dict(SQL, mid="SELECT 1 AS k, b.a FROM sch.base AS b WHERE b.b = 1 GROUP BY 1, 2")
+    cll = dict(CLL, results=[*CLL["results"], _row("mid", "k", ttype="literal")])
+    checks, _ = _validate(cll, _run(warehouse), sql)
+    assert checks["mid"].status == PASSED, checks["mid"].detail
+
+
+def test_schema_qualified_column_and_column_renaming_alias(warehouse):
+    sql = dict(
+        SQL,
+        mid="SELECT sch.base.a FROM sch.base WHERE sch.base.b = 1",
+        star_mid="SELECT d.x AS a FROM sch.base AS d (x, y, z)",
+    )
+    cll = dict(
+        CLL,
+        results=[
+            r for r in CLL["results"] if not (r["model"] == "star_mid" and r["column"] != "a")
+        ],
+    )
+    checks, _ = _validate(cll, _run(warehouse), sql)
+    assert checks["mid"].status == PASSED, checks["mid"].detail
+    assert checks["star_mid"].status == PASSED, checks["star_mid"].detail
+
+
+def test_stub_column_types_are_retried_when_a_function_rejects_null():
+    calls = []
+
+    def run(sql):
+        calls.append(sql)
+        if "CAST(NULL AS" not in sql:
+            raise RuntimeError("Function EXTRACT does not support NULL argument type")
+        return ["a"]
+
+    graph = build_graph(CLL, MANIFEST, ["dp"])
+    out = validate(
+        graph,
+        analyse(graph, ["dp"]),
+        MANIFEST,
+        lambda n: SQL.get(n["name"]),
+        run,
+        "duckdb",
+        visible=set(),
+    )
+    checks = {c.model: c for c in out.checks}
+    assert checks["mid"].status == PASSED, checks["mid"].detail
+    assert any("VARCHAR" in c or "TEXT" in c for c in calls)
+
+
+def test_stub_offers_no_star_and_quotes_special_names():
+    con = duckdb.connect()
+    sql = dict(SQL, star_mid="""SELECT s.*, s."/BIC/X" AS odd FROM sch.base AS s""")
+    graph = build_graph(CLL, MANIFEST, ["dp"])
+    out = validate(
+        graph,
+        analyse(graph, ["dp"]),
+        MANIFEST,
+        lambda n: sql.get(n["name"]),
+        _run(con),
+        "duckdb",
+        visible=set(),
+    )
+    check = {c.model: c for c in out.checks}["star_mid"]
+    assert check.status in (PASSED, FAILED), check.detail
+    assert "does not bind: " not in check.detail or "original" not in check.detail
+    con.close()
+
+
+def test_relations_read_through_an_ephemeral_model_are_upstream():
+    from dbt_osmosis_cll.cll_generator.report.validation import _parents
+
+    manifest = {
+        "nodes": {
+            "model.p.eph": {
+                **_node("eph", []),
+                "config": {"materialized": "ephemeral"},
+                "depends_on": {"nodes": ["source.p.mig.raw_t"]},
+            },
+            "model.p.reader": _node("reader", ["eph"]),
+        },
+        "sources": {
+            "source.p.mig.raw_t": {
+                "name": "raw_t",
+                "identifier": "raw_t",
+                "schema": "mig",
+                "source_name": "MIG",
+                "columns": {},
+            }
+        },
+    }
+    parents = _parents(manifest["nodes"]["model.p.reader"], manifest, {})
+    assert [(p["schema"], p["identifier"]) for p in parents] == [("mig", "raw_t")]
 
 
 def test_relations_the_role_cannot_see_are_checked_against_a_stub():

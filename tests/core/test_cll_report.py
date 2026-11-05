@@ -305,6 +305,57 @@ def test_model_named_like_its_source_ends_at_the_source():
     assert js["origins"] == result.origins
 
 
+def test_sources_sharing_a_table_name_are_kept_apart():
+    manifest = json.loads(json.dumps(MANIFEST))
+    for source_name in ("first", "second"):
+        manifest["sources"][f"source.p.{source_name}.shared"] = {
+            "name": "shared",
+            "identifier": "shared",
+            "source_name": source_name.upper(),
+            "columns": {},
+        }
+    manifest["nodes"]["model.p.read_a"] = _node("read_a", [])
+    manifest["nodes"]["model.p.read_a"]["depends_on"]["nodes"] = ["source.p.first.shared"]
+    manifest["nodes"]["model.p.read_b"] = _node("read_b", [])
+    manifest["nodes"]["model.p.read_b"]["depends_on"]["nodes"] = ["source.p.second.shared"]
+    cll = json.loads(json.dumps(CLL))
+    cll["results"] += [
+        _row("read_a", "x", progenitors=[("shared", "only_in_first")]),
+        _row("read_b", "y", progenitors=[("shared", "only_in_second")]),
+        _row("dp_two", "x", progenitors=[("read_a", "x")]),
+        _row("dp_two", "y", progenitors=[("read_b", "y")]),
+    ]
+    graph = build_graph(cll, manifest, DPS)
+    result = analyse(graph, DPS)
+    assert result.origins["dp_two"]["x"] == [["first.shared", "only_in_first", "source"]]
+    assert result.origins["dp_two"]["y"] == [["second.shared", "only_in_second", "source"]]
+    assert ("shared", "only_in_first") not in result.required
+    assert graph.deps["read_a"] == ["first.shared"]
+
+
+def test_a_source_named_differently_from_its_table_is_one_relation():
+    manifest = json.loads(json.dumps(MANIFEST))
+    manifest["sources"]["source.p.s.v_dbt_name"] = {
+        "name": "v_dbt_name",
+        "identifier": "table_name",
+        "source_name": "s",
+        "columns": {},
+    }
+    manifest["nodes"]["model.p.reader"] = _node("reader", [])
+    manifest["nodes"]["model.p.reader"]["depends_on"]["nodes"] = ["source.p.s.v_dbt_name"]
+    cll = json.loads(json.dumps(CLL))
+    cll["results"] += [
+        _row("reader", "a", progenitors=[("table_name", "a")]),
+        _row("dp_two", "a2", progenitors=[("reader", "a")]),
+    ]
+    cll["usages"].append(_usage("reader", "filter", "v_dbt_name", "flag"))
+    graph = build_graph(cll, manifest, DPS)
+    required = analyse(graph, DPS).required
+    assert ("table_name", "a") in required
+    assert ("table_name", "flag") in required
+    assert ("v_dbt_name", "flag") not in required
+
+
 def test_browser_engine_matches_python_on_inferred_columns():
     graph = build_graph(_pass_through_cll(), MANIFEST, DPS)
     py = analyse(graph, DPS)
