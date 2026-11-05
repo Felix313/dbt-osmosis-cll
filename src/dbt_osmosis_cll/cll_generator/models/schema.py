@@ -38,6 +38,8 @@ UsageKind = Literal[
     "window",
     "group_by",
     "having",
+    "order_by",
+    "distinct",
     "compile_time",
 ]
 """How a column is used *besides* being projected:
@@ -50,6 +52,9 @@ UsageKind = Literal[
 - ``window``       PARTITION BY / ORDER BY of a window function in a projection
 - ``group_by``     GROUP BY key (``GROUP BY ALL`` expands to the non-aggregate projections)
 - ``having``       HAVING predicate
+- ``order_by``     ORDER BY key of a SELECT (with ``TOP`` / ``LIMIT`` it decides the rows)
+- ``distinct``     projection of SELECT DISTINCT or of a set operation without ALL: it decides
+                   the rows even if nobody reads the column
 - ``compile_time`` read by a Jinja query at compile time (e.g. ``get_column_values``), so it
                    decides which SQL is generated without appearing in the compiled SQL
 """

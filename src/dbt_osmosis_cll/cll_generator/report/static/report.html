@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="__LANG__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #fff; --ink: #1d232b; --muted: #5d6875; --line: #dde1e6;
+  --accent: #2459a8; --accent-soft: #e6eefa; --data: #2459a8; --logic: #b26a00;
+  --drop: #6c7a89; --warn-bg: #fff4e0; --warn-line: #e6b25a; --ok-bg: #eaf6ec; --ok-line: #7cbf87;
+  --dp: #6a3fa0; --dp-soft: #f1ebf8;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--ink); }
+header { background: var(--panel); border-bottom: 1px solid var(--line); padding: 14px 24px; }
+header h1 { margin: 0; font-size: 19px; }
+header .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+main { display: grid; grid-template-columns: 300px 1fr; gap: 18px; padding: 18px 24px; }
+aside, section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+aside { padding: 14px; align-self: start; position: sticky; top: 12px; }
+aside h2 { font-size: 14px; margin: 0 0 8px; }
+.hint { color: var(--muted); font-size: 12px; }
+.dp-list { list-style: none; padding: 0; margin: 8px 0; }
+.dp-list li { display: flex; justify-content: space-between; align-items: center; gap: 6px;
+  padding: 4px 8px; margin-bottom: 4px; background: var(--dp-soft); border-radius: 5px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+.dp-list li.missing { background: var(--warn-bg); }
+button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 5px; padding: 4px 10px; }
+button:hover { border-color: var(--accent); }
+button.icon { border: none; background: none; padding: 0 4px; color: var(--muted); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+input[type=text], select { font: inherit; padding: 5px 8px; border: 1px solid var(--line);
+  border-radius: 5px; background: #fff; }
+aside input[type=text] { width: 100%; }
+.row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+textarea.snippet { width: 100%; height: 120px; font: 12px ui-monospace, Consolas, monospace;
+  margin-top: 8px; display: none; }
+.banner { border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 14px; }
+.banner.ok { border-color: var(--ok-line); background: var(--ok-bg); }
+.banner ul { margin: 4px 0 0 18px; padding: 0; }
+nav.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+nav.tabs button { border: none; border-bottom: 3px solid transparent; border-radius: 0;
+  background: none; padding: 8px 12px; color: var(--muted); }
+nav.tabs button.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.tile .v { font-size: 26px; font-weight: 600; }
+.tile .l { color: var(--muted); font-size: 12px; }
+section.panel { padding: 14px; margin-bottom: 14px; }
+section.panel h3 { margin: 0 0 10px; font-size: 15px; }
+.waves { display: flex; gap: 14px; overflow-x: auto; align-items: flex-start; }
+.wave { min-width: 260px; flex: 0 0 auto; }
+.wave h4 { margin: 0 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .04em; }
+.card { border: 1px solid var(--line); border-left: 4px solid var(--dp); border-radius: 6px;
+  padding: 8px 10px; margin-bottom: 10px; background: #fff; }
+.card .name { font-family: ui-monospace, Consolas, monospace; font-weight: 600; font-size: 12px;
+  word-break: break-all; }
+.card ul { margin: 6px 0 0 16px; padding: 0; font-size: 12px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.mono, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover { background: var(--accent-soft); }
+tr.detail > td { background: #fafbfc; padding: 8px 14px 14px; }
+.chip { display: inline-block; padding: 0 6px; margin: 1px 2px 1px 0; border-radius: 9px;
+  font-size: 11px; background: #eef0f3; white-space: nowrap; }
+.chip.dp { background: var(--dp-soft); color: var(--dp); }
+.chip.data { background: var(--accent-soft); color: var(--data); }
+.chip.logic { background: #fdf0dc; color: var(--logic); }
+.chip.drop { background: #eef0f3; color: var(--drop); }
+.chip.warn { background: var(--warn-bg); color: #8a5a00; }
+.bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #eef0f3; min-width: 90px; }
+.bar span.req { background: var(--data); }
+.bar span.drop { background: #c4cbd3; }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.pager { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.legend { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <div class="meta" id="meta"></div>
+</header>
+<main>
+  <aside>
+    <h2 id="dp-heading"></h2>
+    <div class="hint" id="dp-hint"></div>
+    <ul class="dp-list" id="dp-list"></ul>
+    <input type="text" id="dp-add" list="dp-candidates" autocomplete="off">
+    <datalist id="dp-candidates"></datalist>
+    <div class="row">
+      <button id="dp-reset"></button>
+      <button id="dp-export"></button>
+      <button id="csv-export"></button>
+    </div>
+    <textarea class="snippet" id="snippet" readonly></textarea>
+  </aside>
+  <div>
+    <div id="banner"></div>
+    <nav class="tabs" id="tabs"></nav>
+    <div id="view"></div>
+  </div>
+</main>
+<script>
+var CLL_REPORT_DATA = /*__DATA__*/null;
+</script>
+<script>
+/*__ENGINE__*/
+</script>
+<script>
+/*__APP__*/
+</script>
+</body>
+</html>

@@ -612,8 +612,9 @@ class ModelRegistry:
         if model is None:
             return None
         uid = model.unique_id or self._lookup_name(model)
+        from_sql = self._columns_defined_by_sql(model)
         if (
-            not model.columns
+            (not model.columns or from_sql)
             and self._lazy_lineage
             and model.language == "sql"
             and uid not in self._lineage_done
@@ -625,7 +626,23 @@ class ModelRegistry:
                     self._ensure_lineage_locked(model, in_progress=set())
             finally:
                 self._column_lookup_active.discard(uid)
+        if from_sql:
+            traced = {name for name, column in model.columns.items() if column.lineage}
+            if traced:
+                return traced
         return set(model.columns) or None
+
+    def _columns_defined_by_sql(self, model: Model) -> bool:
+        """True for a SQL model whose only column list is YAML documentation.
+
+        Only with a reader that states column origins (``parse-cll``). A column that is
+        documented but not produced by the SQL must not outrank a same-named SELECT
+        alias or another relation; the model's parsed output decides.
+        """
+        origins = getattr(self._catalog_reader, "column_origin", None)
+        if not origins or model.language not in (None, "sql") or model.resource_type != "model":
+            return False
+        return origins.get(model.unique_id or "") == "manifest"
 
     def ensure_lineage(self, model: Model) -> None:
         """Guarantee *model*'s column lineage is parsed (lazy mode only).
@@ -745,7 +762,7 @@ class ModelRegistry:
             table_columns: Dict[str, set] = {}
             for m in models.values():
                 lookup = self._lookup_name(m)
-                if lookup and m.columns:
+                if lookup and m.columns and not self._columns_defined_by_sql(m):
                     table_columns.setdefault(lookup, set()).update(m.columns.keys())
             self._sql_parser = SQLColumnParser(
                 dialect=self._dialect,

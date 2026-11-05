@@ -204,6 +204,8 @@ Projected lineage alone misses every column a model *needs* without outputting i
 | `window` | `PARTITION BY` / `ORDER BY` of a window function in a projection |
 | `group_by` | `GROUP BY` keys; `GROUP BY ALL` expands to the non-aggregate projections, ordinals map to projections |
 | `having` | `HAVING` |
+| `order_by` | `ORDER BY` of a `SELECT` (with `TOP` / `LIMIT` it decides the rows) |
+| `distinct` | projection of `SELECT DISTINCT` or of a set operation without `ALL`: it decides the rows even if nobody reads the column |
 | `compile_time` | read by a compile-time Jinja query such as `get_column_values(ref('cfg'), column='flag', order_by='MAX(ts) DESC')` — the column decides which SQL is generated without appearing in the compiled SQL; `dbt_vars` names the result variable, `controls_branch` says whether it drives an `{% if %}` |
 
 Each row names the model whose SQL reads the column, the `source_model` / `source_column` it resolves to **through every CTE of that model** (a `QUALIFY` on a column a CTE never projects still lands on the base relation), the `scope` (CTE name, `<final>`, `…/subquery`, `<jinja>`), the normalized `predicate_sql`, and `resolution` — `qualified`, `single_table`, `unqualified_resolved` (unqualified reference matched through the parent models' column lists; parents without YAML columns are parsed on demand), `select_alias`, or `ambiguous` (one row per candidate instead of silently picking the first `FROM` table). `origins` / `via_models` follow the used column upstream through the projected lineage to sources, seeds, or models without compiled SQL (`--no-usage-origins` skips that walk). `is_self_reference` marks incremental `{{ this }}` joins. Predicates whose literals match a string `var` from `dbt_project.yml` list the var in `dbt_vars`.
@@ -214,15 +216,24 @@ Rows are sorted and de-duplicated; two runs over the same artifacts write byte-i
 
 #### Column sources and coverage
 
-Star expansion and unqualified references need every relation's columns. The manifest only knows documented YAML columns; relations without them can be filled from further sources, in order:
+Star expansion and unqualified references need every relation's columns, and generated SQL needs them in their physical order. `cll-column-sources` is one setting for `compile-cll` and `parse-cll`; its order is the priority, and a relation gets its columns wholly from the first source that knows it:
 
 ```ini
 [osmosis]
-cll-column-sources = manifest, catalog, live   # default: manifest
-cll-catalog-path   = target/catalog.json       # from `dbt docs generate`
+cll-column-sources = live            # default: manifest
+cll-catalog-path   = target/catalog.json
+
+[compile]
+profiles-dir = ~/.dbt                # the profile 'live' connects through
 ```
 
-`live` queries the warehouse (needs `--profiles-dir` / `--target`) and only for relations the selection reads that are still without columns. `--column-sources` / `--catalog` override the config per run. Every `cll-result.json` carries a `coverage` block — relations read by the selection without any known column, `SELECT *` over such relations, ambiguous / unresolved usage counts, and which source supplied each relation's columns — and the same findings are logged as warnings.
+| Source | Answer | Needs |
+|---|---|---|
+| `live` | `information_schema.columns`, read once per database by `compile-cll` (metadata only, no table data) and kept in `target/cll-columns.json`; `parse-cll` reuses that file without connecting | a role that can see the relations |
+| `catalog` | `catalog.json` from `dbt docs generate` | a run with warehouse access beforehand; for setups without a connection of their own |
+| `manifest` | YAML columns. Documentation, possibly incomplete and in another order | nothing; the last resort if not listed |
+
+For a relation no configured warehouse source knows, `compile-cll` uses a model's own SQL compiled earlier in the same run (dbt compiles in DAG order, no connection needed), and only then YAML. Answers from YAML are flagged per model (`columns_from_docs`) and logged. `--column-sources` / `--catalog` override the config per run. Every `cll-result.json` carries a `coverage` block — relations read by the selection without any known column, `SELECT *` over such relations, ambiguous / unresolved usage counts, and which source supplied each relation's columns — and the same findings are logged as warnings.
 
 ### Offline compile for lineage (`compile-cll`)
 
@@ -244,7 +255,7 @@ relations-exist = audit_log       # adapter.get_relation(): treat as existing ..
 relations-missing = tmp_backfill  # ... or as missing (default: exists iff the manifest knows it)
 ```
 
-Direct adapter calls in model Jinja are answered offline too: `adapter.get_relation()` returns a relation for everything the manifest knows (override with `relations-exist` / `relations-missing`), `adapter.get_columns_in_relation()` returns the manifest's documented columns. Each answer is recorded per model (`relations_assumed_existing` / `relations_assumed_missing`).
+Direct adapter calls in model Jinja are answered offline too: `adapter.get_relation()` returns a relation for everything the manifest knows (override with `relations-exist` / `relations-missing`), `star`, `adapter.get_columns_in_relation()` and column-listing statements sent through `run_query` (`SHOW COLUMNS IN TABLE x`, `DESCRIBE TABLE x` — common in generated staging layers) share one answer, see [column sources](#column-sources-and-coverage). Any other `run_query` fails with a message naming the macro to stub. Each answer is recorded per model (`relations_assumed_existing` / `relations_assumed_missing`, `star_without_columns`).
 
 ```bash
 dbt-osmosis-cll compile-cll -s "1+my_model"
@@ -254,6 +265,55 @@ dbt-osmosis-cll parse-cll   -s "1+my_model"
 How it works: dbt parses the project in-process; in the parsed manifest — never on disk — every macro named `is_incremental`, every `get_column_values`-style macro (any package, signature-checked) and every `star` is replaced by a stub, plus the `macro-stubs` you list. The compile then runs with a generated profile whose credentials cannot reach a warehouse, without cache population or introspection; any remaining connection attempt fails with a message naming the setting to add. Nothing in the dbt project is modified.
 
 Every assumption is logged and written to `target/cll-compile.json`, and `parse-cll` copies it per model into `cll-result.json` (`compile`): the `is_incremental()` value each model was compiled with (the full-build branch is assumed to hold the complete logic — models whose incremental branch is the only real one need `is-incremental-models`), pinned and *unpinned* compile-time values (an unpinned call returns the macro default), `star` calls over relations without known columns, and models whose compiled SQL looks like an empty shell (`LIMIT 0`, `WHERE 1 = 0` / `FALSE`, reading only their own relation).
+
+### Data-product column requirements (`lineage report`)
+
+Declare which models are **data products** — every one of their columns must be rebuildable — and the report works out what the rest of the pipeline has to keep:
+
+```ini
+# .osmosis-cll
+[data-products]
+models =
+    orders_mart
+    customer_360
+```
+
+```bash
+dbt-osmosis-cll compile-cll -s "+orders_mart +customer_360"   # if models need it
+dbt-osmosis-cll parse-cll   -s "+orders_mart +customer_360"
+dbt-osmosis-cll lineage report            # or: -d "orders_mart customer_360" --lang de
+```
+
+Data products are **lineage anchors**: tracing a column upstream stops at another data product, which becomes the column's origin. From that the report derives
+
+- **build order** — data product A depends on B when any A column (value or predicate input) traces to B; dependencies are layered into waves (wave 1 reads only interim models and sources). dbt dependencies without any column use are listed separately;
+- **column requirements** — a data product needs all its columns; an interim model only the columns some data product reaches, either as value (`data`) or as input of a join, filter, QUALIFY, window, GROUP BY, ORDER BY, DISTINCT or compile-time query (`logic`). Everything else in an interim model is `droppable`. Once a model is needed at all, all of its column usages count — conservative by design;
+- **anchored origins** of every data-product column.
+
+Output (next to `target/cll-report.html` unless `-o` says otherwise): a self-contained HTML report — data products can be added and removed in it and everything recomputes in the browser; the current selection exports as an `.osmosis-cll` snippet or CSV — plus `cll-report_columns.csv` (one row per column: role, status, kind, usages, needed by), `cll-report_data_products.csv` (waves and dependencies) and a Markdown summary.
+
+The **quality** tab and the coverage banner list what limits the result: columns whose SQL could not be traced, references to columns the upstream model does not output (lineage attribution errors), relations other than sources without known columns, models compiled without a real column list, and columns documented in YAML that the SQL does not produce (ignored; `parse-cll` marks them `in_sql: false`).
+
+Sources are origins: lineage may end there, and their complete column list is not needed, only the columns read from them. When a pass-through model over exactly one source was compiled without that source's column list (your role cannot see the source), a column read downstream can only come from that source. The report adds such columns and marks them **inferred** (`inferred` in the columns CSV). With more than one possible source nothing is guessed; the reference stays listed.
+
+### Validating the requirements (`lineage validate`)
+
+```bash
+dbt-osmosis-cll lineage validate --lang de     # profile: profiles-dir in [compile]
+```
+
+Every needed model is bound by the warehouse through `SELECT * FROM (<sql>) WHERE 1 = 0`: once as it is, and once reduced, so that it outputs only what is required of it, every CTE only what is still read, and each upstream relation offers only its required columns (data products keep all). Projections stay where they shape rows (`DISTINCT`, `UNION`, `GROUP BY ALL`). No data row comes back and nothing is created; the warehouse may evaluate scalar subqueries while binding. A query that binds this way needs no column classified as droppable.
+
+Only column names matter for this, so a relation your role cannot see is replaced by a stub (`SELECT NULL AS col, ...`) and the model is still checked. A warning names each such relation and why read access would help: it confirms that the columns really exist there with a compatible type.
+
+| Result | Meaning |
+|---|---|
+| confirmed | binds reduced and still outputs what is required; also states whether stubs were involved |
+| failed | needs a column classified as droppable: the requirements are wrong (exit code 1) |
+| no access | the role cannot use an object the SQL needs beyond its dbt parents (e.g. a function) |
+| not checkable | the SQL does not bind or parse even as compiled |
+
+The result lands in `target/cll-validation.json` with a Markdown summary next to it.
 
 ### Serving the explorer from a precomputed CLL artifact
 

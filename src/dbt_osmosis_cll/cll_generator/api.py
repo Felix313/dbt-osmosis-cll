@@ -160,6 +160,13 @@ class ColumnLineageResult:
     A.X, B.Y") instead of a bare "no single progenitor". Additive — older cached
     results deserialize with an empty list."""
 
+    in_sql: bool = True
+    """False when the column is known only from the relation's column list (YAML /
+    catalog) and the parsed SQL produced no lineage for it: either the SQL does not
+    output the column (stale documentation) or the model's SQL could not be traced
+    (no compiled SQL, ``SELECT *`` over a relation without known columns). Additive —
+    older cached results deserialize with ``True``."""
+
 
 def get_column_lineage(
     manifest_path: str,
@@ -307,6 +314,7 @@ def get_column_lineage(
                         transformation_type="direct",
                         sql_expression=None,
                         unique_id=model_obj.unique_id,
+                        in_sql=False,
                     )
                 )
                 continue

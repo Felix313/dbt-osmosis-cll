@@ -324,3 +324,266 @@ class TestUnionBranchInputs:
         )
         lin = _lineage(SQLColumnParser().parse_column_lineage(sql), "d")
         assert {"tbl_a.x", "tbl_b.y"} <= lin.source_columns
+
+
+# ---------------------------------------------------------------------------
+# Constant inputs: literal / generated values must neither hide real inputs
+# nor surface as an empty, gap-looking lineage.
+# ---------------------------------------------------------------------------
+
+
+class TestConstantInputs:
+    def test_constant_cte_column_keeps_real_inputs_through_cte_hop(self):
+        """A CASE mixing a literal-CTE column with a real column keeps the real one."""
+        sql = (
+            "WITH params AS (SELECT '2000-01-31'::DATE AS run_dt), "
+            "clean AS (SELECT CASE WHEN EXTRACT(YEAR FROM params.run_dt) = "
+            "CAST(SUBSTR(f.period, 1, 4) AS NUMBER(4, 0)) THEN 'A' ELSE 'X' END AS year_type "
+            "FROM facts AS f CROSS JOIN params) "
+            "SELECT year_type FROM clean"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert _lineage(result, "year_type").source_columns == {"facts.period"}
+
+    def test_constant_cte_column_adds_no_empty_source(self):
+        sql = (
+            "WITH params AS (SELECT '2000-01-31'::DATE AS run_dt) "
+            "SELECT CASE WHEN params.run_dt = f.period THEN 'A' END AS year_type "
+            "FROM facts AS f CROSS JOIN params"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert _lineage(result, "year_type").source_columns == {"facts.period"}
+
+    def test_lateral_alias_of_generated_value_is_generated(self):
+        sql = "SELECT CURRENT_TIMESTAMP() AS created_ts, created_ts AS loaded_ts, s.id FROM src s"
+        lin = _lineage(SQLColumnParser(dialect="snowflake").parse_column_lineage(sql), "loaded_ts")
+        assert lin.transformation_type == "generated"
+        assert lin.source_columns == set()
+
+    def test_lateral_alias_of_column_still_traces_the_column(self):
+        sql = "SELECT s.a AS x, x AS y FROM src s"
+        lin = _lineage(SQLColumnParser(dialect="snowflake").parse_column_lineage(sql), "y")
+        assert lin.source_columns == {"src.a"}
+
+    def test_top_level_union_of_literals_is_literal(self):
+        sql = (
+            "SELECT s.id, 'Y' AS flg, CURRENT_TIMESTAMP AS ts FROM src s "
+            "UNION ALL SELECT t.id, 'N' AS flg, CURRENT_TIMESTAMP AS ts FROM tgt t"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        flg = _lineage(result, "flg")
+        assert flg.transformation_type == "literal"
+        assert flg.sql_expression == "'Y' | 'N'"
+        assert _lineage(result, "ts").transformation_type == "generated"
+        assert _lineage(result, "id").transformation_type == "union"
+
+    def test_union_cte_of_constants_is_classified_across_hop(self):
+        sql = (
+            "WITH u AS (SELECT s.id, 'A' AS origin FROM src s "
+            "UNION ALL SELECT t.id, 'B'::VARCHAR AS origin FROM tgt t) "
+            "SELECT id, origin FROM u"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        lin = _lineage(result, "origin")
+        assert lin.transformation_type == "generated"
+        assert lin.source_columns == set()
+
+    def test_union_with_one_column_branch_stays_union(self):
+        sql = "SELECT 'Y' AS flg FROM src s UNION ALL SELECT t.flg FROM tgt t"
+        lin = _lineage(SQLColumnParser(dialect="snowflake").parse_column_lineage(sql), "flg")
+        assert lin.transformation_type == "union"
+        assert lin.union_branches == ["tgt.flg"]
+
+
+# ---------------------------------------------------------------------------
+# Attribution: every column must land on the relation it is really read from.
+# ---------------------------------------------------------------------------
+
+
+def _sources(sql: str) -> dict[str, set[str]]:
+    result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+    return {col: lins[0].source_columns for col, lins in result.column_lineage.items()}
+
+
+class TestAttribution:
+    def test_cte_named_like_a_qualified_relation_does_not_swallow_it(self):
+        sql = (
+            "WITH runs AS (SELECT cfg.run_dt FROM cfg_schema.config AS cfg), "
+            "orders AS (SELECT r.run_dt, o.amount FROM runs AS r "
+            "JOIN sales.orders AS o ON r.run_dt = o.run_dt) "
+            "SELECT o2.run_dt, o2.amount FROM orders AS o2"
+        )
+        assert _sources(sql) == {"run_dt": {"config.run_dt"}, "amount": {"orders.amount"}}
+
+    def test_unaliased_qualified_relation_inside_its_namesake_cte(self):
+        sql = (
+            "WITH orders AS (SELECT orders.amount, orders.id FROM sales.orders) "
+            "SELECT orders.amount, o.id FROM orders JOIN orders AS o ON o.id = orders.id"
+        )
+        assert _sources(sql) == {"amount": {"orders.amount"}, "id": {"orders.id"}}
+
+    def test_flatten_output_columns_resolve_to_the_flattened_input(self):
+        sql = (
+            "WITH f AS (SELECT id, value:attribute::STRING AS att FROM sch.src, "
+            "LATERAL FLATTEN(INPUT => PARSE_JSON(js_list))) SELECT f.id, f.att FROM f"
+        )
+        assert _sources(sql) == {"id": {"src.id"}, "att": {"src.js_list"}}
+
+    def test_aliased_table_flatten_and_split_to_table(self):
+        flat = (
+            "SELECT s.id, f.value::STRING AS v, f.index AS i "
+            "FROM sch.src s, TABLE(FLATTEN(INPUT => s.js)) f"
+        )
+        assert _sources(flat) == {"id": {"src.id"}, "v": {"src.js"}, "i": {"src.js"}}
+        split = (
+            "SELECT TRIM(value) AS part FROM sch.src AS s "
+            'INNER JOIN LATERAL SPLIT_TO_TABLE("CSV_COL", CHR(10)) '
+            "QUALIFY MAX(index) OVER (PARTITION BY seq) > 1"
+        )
+        assert _sources(split) == {"part": {"src.csv_col"}}
+
+    def test_pivot_output_columns_resolve_to_value_and_pivot_column(self):
+        sql = (
+            "WITH pre AS (SELECT u.k, u.typ, u.amt FROM sch.up u), "
+            "p AS (SELECT k, \"'a'\" AS a_amt FROM pre PIVOT(SUM(amt) FOR typ IN ('a', 'b'))) "
+            "SELECT p.k, p.a_amt FROM p"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        lin = result.column_lineage["a_amt"][0]
+        assert lin.source_columns == {"up.amt", "up.typ"}
+        assert lin.transformation_type == "aggregate"
+
+    def test_scalar_subquery_reads_its_own_relation(self):
+        sql = (
+            "WITH gfd AS (SELECT MAX(c.full_dt) AS full_dt FROM sch.cal c) "
+            "SELECT (SELECT full_dt FROM gfd) AS full_dt, d.contract_id FROM sch.dim d"
+        )
+        assert _sources(sql) == {"full_dt": {"cal.full_dt"}, "contract_id": {"dim.contract_id"}}
+
+    def test_union_branch_column_honours_its_qualifier(self):
+        sql = (
+            "WITH cm AS (SELECT mig.new_id AS contract_id FROM sch.igy con "
+            "LEFT JOIN sch.mig AS mig ON con.contract_id = mig.old_id "
+            "UNION ALL SELECT new_id AS contract_id FROM sch.mig) "
+            "SELECT cm.contract_id FROM cm"
+        )
+        assert _sources(sql) == {"contract_id": {"mig.new_id"}}
+
+    def test_quoted_identifiers_are_bare_names(self):
+        sql = 'SELECT md."TYPE" AS datatype, md."Variable" FROM sch.meta md'
+        assert _sources(sql) == {"datatype": {"meta.type"}, "variable": {"meta.variable"}}
+
+    def test_aliases_match_case_insensitively(self):
+        sql = (
+            "WITH fin1 AS (SELECT c.contract_id, c.division_id FROM sch.dim c), "
+            "fin2 AS (SELECT t.*, o.flag FROM fin1 T JOIN sch.other o ON o.cid = T.contract_id) "
+            "SELECT contract_id, division_id, flag FROM fin2"
+        )
+        assert _sources(sql) == {
+            "contract_id": {"dim.contract_id"},
+            "division_id": {"dim.division_id"},
+            "flag": {"other.flag"},
+        }
+
+    def test_bare_table_function_and_pivot_projections_keep_their_names(self):
+        flat = (
+            "WITH x AS (SELECT s.id, index FROM sch.src s, LATERAL FLATTEN(INPUT => s.js)) "
+            "SELECT a.id FROM x a JOIN x b ON a.index = b.index + 1"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(flat)
+        joins = {u.source for u in result.column_usages if u.usage == "join_key"}
+        assert joins == {"src.js"}
+        pivot = (
+            "WITH pre AS (SELECT u.k, u.typ, u.amt FROM sch.up u), "
+            "p AS (SELECT k, \"'a'\" FROM pre PIVOT(SUM(amt) FOR typ IN ('a'))) "
+            "SELECT * FROM p"
+        )
+        out = SQLColumnParser(dialect="snowflake").parse_column_lineage(pivot).column_lineage
+        assert "'a'" in out and out["'a'"][0].source_columns == {"up.amt", "up.typ"}
+
+    def test_derived_table_columns_are_tracked(self):
+        sql = (
+            "WITH c AS (SELECT dk, LAG(lnk) OVER (PARTITION BY dk ORDER BY ts) AS prev "
+            "FROM (SELECT SHA1(v.id) AS dk, v.lnk, v.ts FROM sch.hist v "
+            "JOIN sch.other o ON o.id = v.id) AS sub) "
+            "SELECT c.dk, c.prev FROM c"
+        )
+        sources = _sources(sql)
+        assert sources["dk"] == {"hist.id"}
+        assert sources["prev"] == {"hist.lnk"}
+
+    def test_nested_and_final_select_derived_tables(self):
+        sql = (
+            "SELECT x.a, x.b FROM (SELECT y.a, z.b FROM "
+            "(SELECT t.a FROM sch.t1 t) AS y JOIN sch.t2 AS z ON z.a = y.a) AS x"
+        )
+        assert _sources(sql) == {"a": {"t1.a"}, "b": {"t2.b"}}
+
+    def test_union_inside_a_derived_table(self):
+        sql = "SELECT u.v FROM (SELECT a.v FROM sch.ta a UNION ALL SELECT b.v FROM sch.tb b) AS u"
+        assert _sources(sql) == {"v": {"ta.v", "tb.v"}}
+
+    def test_unknown_columns_marker_keeps_sql_parsable_and_never_surfaces(self):
+        sql = (
+            "SELECT 'a' AS origin, s.ts AS loaded_ts, "
+            "IFF(CLL_UNKNOWN_COLUMNS = '', NULL, SHA1(CONCAT(CLL_UNKNOWN_COLUMNS))) AS hashdiff, "
+            "s.CLL_UNKNOWN_COLUMNS FROM sch.src AS s WHERE s.CLL_UNKNOWN_COLUMNS IS NOT NULL"
+        )
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert set(result.column_lineage) == {"origin", "loaded_ts", "hashdiff"}
+        assert result.column_lineage["loaded_ts"][0].source_columns == {"src.ts"}
+        assert result.column_lineage["hashdiff"][0].source_columns == set()
+        assert not [u for u in result.column_usages if "cll_unknown" in (u.source or "")]
+
+    def test_known_column_outranks_a_same_named_select_alias(self):
+        sql = (
+            "WITH src AS (SELECT t.created_ts, t.id FROM sch.tbl t) "
+            "SELECT MIN(created_ts) AS first_ts, CURRENT_TIMESTAMP() AS created_ts, id "
+            "FROM src GROUP BY id"
+        )
+        sources = _sources(sql)
+        assert sources["first_ts"] == {"tbl.created_ts"}
+        assert sources["created_ts"] == set()
+
+    def test_unknown_relation_still_resolves_a_lateral_alias(self):
+        assert _sources("SELECT s.a AS x, x + 1 AS y FROM sch.src s")["y"] == {"src.a"}
+
+    def test_all_window_functions_of_an_expression_count(self):
+        sql = (
+            "SELECT CASE WHEN ROW_NUMBER() OVER (PARTITION BY a.p ORDER BY a.o) = 1 THEN 'Y' "
+            "WHEN MAX(UPPER(b.status)) OVER (PARTITION BY a.p) = 'X' THEN a.value END AS flag "
+            "FROM sch.ta a JOIN sch.tb b ON b.id = a.id"
+        )
+        assert _sources(sql)["flag"] == {"tb.status", "ta.value"}
+
+    def test_schema_qualified_column_reference(self):
+        sql = "SELECT sch.tbl.a, sch.tbl.b AS c FROM sch.tbl"
+        assert _sources(sql) == {"a": {"tbl.a"}, "c": {"tbl.b"}}
+
+    def test_derived_table_with_a_column_renaming_alias(self):
+        sql = "SELECT d.x FROM (SELECT t.a, t.b FROM sch.t1 t) AS d (x, y)"
+        result = SQLColumnParser(dialect="snowflake").parse_column_lineage(sql)
+        assert "x" in result.column_lineage
+
+    def test_alias_defined_later_does_not_shadow_the_column(self):
+        sql = (
+            "SELECT CAST(contract_id AS NUMBER) AS hub_key, NULL AS contract_id, "
+            "contract_id AS after_alias FROM sch.unknown_columns"
+        )
+        sources = _sources(sql)
+        assert sources["hub_key"] == {"unknown_columns.contract_id"}
+        assert sources["after_alias"] == set()
+
+    def test_union_by_name_matches_columns_by_name(self):
+        sql = (
+            "WITH u AS (SELECT a.x, a.y FROM sch.ta a "
+            "UNION ALL BY NAME SELECT b.y, b.x, b.z FROM sch.tb b) "
+            "SELECT u.x, u.y, u.z FROM u"
+        )
+        assert _sources(sql) == {
+            "x": {"ta.x", "tb.x"},
+            "y": {"ta.y", "tb.y"},
+            "z": {"tb.z"},
+        }
+        top = "SELECT a.x, a.y FROM sch.ta a UNION ALL BY NAME SELECT b.y, b.x FROM sch.tb b"
+        assert _sources(top) == {"x": {"ta.x", "tb.x"}, "y": {"ta.y", "tb.y"}}

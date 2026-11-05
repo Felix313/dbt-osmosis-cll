@@ -1101,6 +1101,339 @@ def explore(
     explorer.start()
 
 
+@lineage.command(context_settings=_CONTEXT)
+@logging_opts
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, dir_okay=True, file_okay=False),
+    default=discover_project_dir,
+    help="dbt project root. Default is the current working directory and its parents.",
+)
+@click.option(
+    "--cll",
+    "cll_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="parse-cll result to report on. Defaults to <project-dir>/target/cll-result.json.",
+)
+@click.option(
+    "--manifest",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to manifest.json. Defaults to <project-dir>/target/manifest.json.",
+)
+@click.option(
+    "-d",
+    "--data-product",
+    "data_products",
+    multiple=True,
+    help="Model to treat as data product (repeatable; space/comma-separated values allowed). "
+    "Replaces the [data-products] list of .osmosis-cll.",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="HTML report path. Defaults to <project-dir>/target/cll-report.html; CSV and "
+    "Markdown files are written next to it.",
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "de"]),
+    default="en",
+    show_default=True,
+    help="Language of the HTML report.",
+)
+def report(
+    project_dir: str,
+    cll_path: str | None = None,
+    manifest: str | None = None,
+    data_products: tuple[str, ...] = (),
+    output: str | None = None,
+    lang: str = "en",
+) -> None:
+    """Report which columns each data product needs, and the order to build them in.
+
+    Data products (the [data-products] section of .osmosis-cll, or --data-product)
+    are lineage anchors: tracing stops at them. Every data-product column must be
+    rebuildable; interim models only need the columns some data product reaches,
+    as value or as join / filter / QUALIFY / window / GROUP BY input.
+
+    \f
+    Writes a self-contained HTML report (data products can be toggled in it), the
+    column status as CSV, the data-product dependencies with build waves as CSV and
+    a Markdown summary. Input is a ``parse-cll`` result covering the data products'
+    upstream (e.g. ``parse-cll -s +dp_a +dp_b``) plus the manifest for metadata.
+    """
+    import json as json_handler
+
+    from dbt_osmosis_cll.cll_generator.report.analysis import analyse, build_graph
+    from dbt_osmosis_cll.cll_generator.report.data_products import (
+        load_data_products,
+        parse_model_list,
+    )
+    from dbt_osmosis_cll.cll_generator.report.render import (
+        render_html,
+        write_columns_csv,
+        write_data_products_csv,
+        write_markdown,
+    )
+
+    root = Path(project_dir)
+    cll_file = Path(cll_path) if cll_path else root / "target" / "cll-result.json"
+    manifest_file = Path(manifest) if manifest else root / "target" / "manifest.json"
+    for path, hint in ((cll_file, "Run parse-cll first."), (manifest_file, "Run dbt parse.")):
+        if not path.exists():
+            logger.error(":x: %s not found. %s", path, hint)
+            sys.exit(1)
+    selected = (
+        parse_model_list("\n".join(data_products)) if data_products else load_data_products(root)
+    )
+    if not selected:
+        logger.error(
+            ":x: No data products: pass --data-product or add a [data-products] section "
+            "with 'models =' to .osmosis-cll."
+        )
+        sys.exit(1)
+
+    graph = build_graph(
+        json_handler.loads(cll_file.read_text(encoding="utf-8")),
+        json_handler.loads(manifest_file.read_text(encoding="utf-8")),
+        selected,
+    )
+    result = analyse(graph, selected)
+    out = Path(output) if output else root / "target" / "cll-report.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_html(graph, lang), encoding="utf-8")
+    stem = out.with_suffix("")
+    n_cols = write_columns_csv(graph, result, Path(f"{stem}_columns.csv"))
+    write_data_products_csv(result, Path(f"{stem}_data_products.csv"))
+    write_markdown(graph, result, out.with_suffix(".md"))
+
+    for dp in result.missing:
+        logger.warning(":warning: Data product %s is not in the analysed scope of %s", dp, cll_file)
+    unresolved = sum(1 for g in graph.gaps if g[2] == "unresolved")
+    unverified = sum(1 for model, _ in result.dangling if model in graph.unverified)
+    if unresolved or result.dangling:
+        logger.warning(
+            ":warning: Lineage coverage incomplete: %d column(s) without traced SQL, %d "
+            "reference(s) into models compiled without a real column list, %d other "
+            "reference(s) to columns the upstream model does not output — see the report's "
+            "quality tab.",
+            unresolved,
+            unverified,
+            len(result.dangling) - unverified,
+        )
+    if graph.inferred:
+        logger.info(
+            "%d column(s) inferred from the single source of a pass-through model compiled "
+            "without its column list (flagged in the report).",
+            len(graph.inferred),
+        )
+    waves = max(result.waves.values(), default=0)
+    logger.info(
+        ":white_check_mark: %d data product(s) in %d build wave(s), %d column(s) classified -> %s",
+        len(result.data_products),
+        waves,
+        n_cols,
+        out,
+    )
+
+
+@lineage.command(context_settings=_CONTEXT)
+@logging_opts
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, dir_okay=True, file_okay=False),
+    default=discover_project_dir,
+    help="dbt project root. Default is the current working directory and its parents.",
+)
+@click.option(
+    "--cll",
+    "cll_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="parse-cll result to validate. Defaults to <project-dir>/target/cll-result.json.",
+)
+@click.option(
+    "--manifest",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to manifest.json. Defaults to <project-dir>/target/manifest.json.",
+)
+@click.option(
+    "-d",
+    "--data-product",
+    "data_products",
+    multiple=True,
+    help="Model to treat as data product. Replaces the [data-products] list of .osmosis-cll.",
+)
+@click.option(
+    "--profiles-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="profiles.yml directory to connect with. Default: profiles-dir in [compile] of "
+    ".osmosis-cll.",
+)
+@click.option("--target", default=None, help="dbt target. Default: target in [compile].")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="JSON result path. Defaults to <project-dir>/target/cll-validation.json; a Markdown "
+    "summary is written next to it.",
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "de"]),
+    default="en",
+    show_default=True,
+    help="Language of the Markdown summary.",
+)
+def validate(
+    project_dir: str,
+    cll_path: str | None = None,
+    manifest: str | None = None,
+    data_products: tuple[str, ...] = (),
+    profiles_dir: str | None = None,
+    target: str | None = None,
+    output: str | None = None,
+    lang: str = "en",
+) -> None:
+    """Check the report's column requirements against the warehouse; no data row comes back.
+
+    Every needed model is bound as it is and reduced: it outputs only what is required of
+    it and its upstream relations offer only their required columns. Exits 1 when a model
+    needs a column classified as droppable. Relations the role cannot see are checked
+    against a stub of their column names and reported as warnings with the reason.
+
+    \f
+    Uses ``SELECT * FROM (<sql>) WHERE 1 = 0``: no data row comes back and nothing is created.
+    """
+    import json as json_handler
+
+    from dbt.adapters.factory import reset_adapters
+
+    from dbt_osmosis_cll.cll_generator.artifacts.column_snapshot import snapshot_path
+    from dbt_osmosis_cll.cll_generator.artifacts.live_db import _bootstrap_dbt_adapter
+    from dbt_osmosis_cll.cll_generator.offline_compile import load_compile_config
+    from dbt_osmosis_cll.cll_generator.report.analysis import analyse, build_graph
+    from dbt_osmosis_cll.cll_generator.report.data_products import (
+        load_data_products,
+        parse_model_list,
+    )
+    from dbt_osmosis_cll.cll_generator.report.validation import (
+        NO_ACCESS,
+        NOT_TESTABLE,
+        PASSED,
+        blocked_reason,
+        load_compiled_sql,
+        physical_columns,
+        render_markdown,
+        stub_reason,
+        write_json,
+    )
+    from dbt_osmosis_cll.cll_generator.report.validation import validate as run_validation
+
+    root = Path(project_dir)
+    cll_file = Path(cll_path) if cll_path else root / "target" / "cll-result.json"
+    manifest_file = Path(manifest) if manifest else root / "target" / "manifest.json"
+    for path, hint in ((cll_file, "Run parse-cll first."), (manifest_file, "Run dbt parse.")):
+        if not path.exists():
+            logger.error(":x: %s not found. %s", path, hint)
+            sys.exit(1)
+    selected = (
+        parse_model_list("\n".join(data_products)) if data_products else load_data_products(root)
+    )
+    if not selected:
+        logger.error(
+            ":x: No data products: pass --data-product or add a [data-products] section "
+            "with 'models =' to .osmosis-cll."
+        )
+        sys.exit(1)
+    compile_cfg = load_compile_config(root)
+    profiles = profiles_dir or compile_cfg.profiles_dir
+    if not profiles:
+        logger.error(
+            ":x: lineage validate needs a real profile: pass --profiles-dir or set profiles-dir "
+            "in the [compile] section of .osmosis-cll."
+        )
+        sys.exit(1)
+
+    manifest_data = json_handler.loads(manifest_file.read_text(encoding="utf-8"))
+    graph = build_graph(
+        json_handler.loads(cll_file.read_text(encoding="utf-8")), manifest_data, selected
+    )
+    result = analyse(graph, selected)
+    dialect = (manifest_data.get("metadata") or {}).get("adapter_type")
+    snapshot = snapshot_path(root)
+    physical = (
+        physical_columns(json_handler.loads(snapshot.read_text(encoding="utf-8")))
+        if snapshot.exists()
+        else {}
+    )
+    adapter = _bootstrap_dbt_adapter(str(root), str(profiles), target or compile_cfg.target)
+
+    def run(sql: str) -> list[str]:
+        _, table = adapter.execute(sql, fetch=True)
+        return [str(c) for c in table.column_names]
+
+    def progress(position: int, total: int) -> None:
+        if position == 1 or position % 50 == 0 or position == total:
+            logger.info("Binding model %d of %d…", position, total)
+
+    try:
+        with adapter.connection_named("cll-validate"):
+            checked = run_validation(
+                graph,
+                result,
+                manifest_data,
+                lambda node: load_compiled_sql(root, node, dialect),
+                run,
+                dialect,
+                physical,
+                progress,
+                # Relations the role cannot see are checked against a stub of their names.
+                set(physical) if physical else None,
+            )
+    finally:
+        adapter.cleanup_connections()
+        reset_adapters()
+
+    out = Path(output) if output else root / "target" / "cll-validation.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(write_json(checked), encoding="utf-8")
+    out.with_suffix(".md").write_text(render_markdown(checked, lang), encoding="utf-8")
+
+    for relation, models in checked.blocked_relations().items():
+        logger.warning(":warning: %s", blocked_reason(relation, len(models), "en"))
+    stubbed = checked.stubbed_relations()
+    if stubbed:
+        logger.warning(
+            ":warning: %d relation(s) the role cannot see were checked against stubs, details in "
+            "%s. E.g. %s",
+            len(stubbed),
+            out.with_suffix(".md"),
+            stub_reason(*next((r, len(m)) for r, m in stubbed.items()), "en"),
+        )
+    failed = [c for c in checked.checks if c.status == "failed"]
+    for check in failed:
+        logger.error(":x: %s: %s", check.model, check.detail)
+    logger.info(
+        "%s %d model(s) confirmed, %d failed, %d without access, %d not checkable -> %s",
+        ":x:" if failed else ":white_check_mark:",
+        len(checked.by_status(PASSED)),
+        len(failed),
+        len(checked.by_status(NO_ACCESS)),
+        len(checked.by_status(NOT_TESTABLE)),
+        out,
+    )
+    if failed:
+        sys.exit(1)
+
+
 @cli.command("parse-cll", context_settings=_CONTEXT)
 @logging_opts
 @click.option(
@@ -1402,11 +1735,20 @@ def _warn_coverage(coverage: dict) -> None:
     help="Use this profiles.yml instead of the generated offline profile (it is never "
     "connected). Default: profiles-dir in [compile] of .osmosis-cll, else generated.",
 )
+@click.option(
+    "--column-sources",
+    default=None,
+    help="Comma-separated column-list sources in priority order: live, catalog, manifest. "
+    "'live' reads information_schema once (metadata only, needs --profiles-dir) and keeps "
+    "the answer in target/cll-columns.json for parse-cll. Default: cll-column-sources in "
+    ".osmosis-cll.",
+)
 def compile_cll(
     select: tuple[str, ...],
     exclude: tuple[str, ...],
     project_dir: str,
     profiles_dir: str | None = None,
+    column_sources: str | None = None,
 ) -> None:
     """Compile models for column lineage without a warehouse connection.
 
@@ -1431,6 +1773,11 @@ def compile_cll(
             select=[s for value in select for s in value.replace(",", " ").split()],
             exclude=[s for value in exclude for s in value.replace(",", " ").split()],
             profiles_dir=Path(profiles_dir) if profiles_dir else None,
+            column_sources=(
+                [c.strip().lower() for c in column_sources.split(",") if c.strip()]
+                if column_sources
+                else None
+            ),
         )
     except OfflineCompileError as exc:
         logger.error(":x: %s", exc)

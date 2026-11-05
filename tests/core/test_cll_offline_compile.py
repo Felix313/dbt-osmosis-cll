@@ -245,3 +245,323 @@ def test_direct_adapter_introspection_is_answered_from_the_manifest(tmp_path):
     assert probe["relations_assumed_existing"] == ["facts"]
     assert probe["relations_assumed_missing"] == ["not_there"]
     assert any("not_there" in w for w in sidecar["warnings"])
+
+
+COLUMN_QUERY_FILES = {
+    "macros/list_columns.sql": """
+        {% macro list_columns(rel, verb='show') %}
+            {% if verb == 'show' %}
+                {% set res = run_query('SHOW COLUMNS IN TABLE ' ~ rel) %}
+                {% set names = res.columns[2].values() if execute else [] %}
+            {% else %}
+                {% set res = run_query('DESCRIBE TABLE ' ~ rel) %}
+                {% set names = res.columns[0].values() if execute else [] %}
+            {% endif %}
+            {{ return(names) }}
+        {% endmacro %}
+    """,
+    "models/models.yml": """
+        version: 2
+        models:
+          - name: facts
+            columns:
+              - name: id
+              - name: status_cd
+    """,
+    "models/raw_bare.sql": "select 1 as bare_id, 'x' as bare_txt\n",
+    "models/copy_show.sql": """
+        -- depends_on: {{ ref('facts') }}
+        select {{ list_columns(ref('facts')) | join(', ') | lower }} from {{ ref('facts') }}
+    """,
+    "models/copy_describe.sql": """
+        -- depends_on: {{ ref('raw_bare') }}
+        select {{ list_columns(ref('raw_bare'), 'describe') | join(', ') | lower }}
+        from {{ ref('raw_bare') }}
+    """,
+    "models/other_query.sql": """
+        {% set res = run_query('select max(id) from loaded') %}
+        select 1 as id
+    """,
+}
+
+
+def _column_query_project(tmp_path: Path) -> Path:
+    project = _project(tmp_path)
+    for rel, body in COLUMN_QUERY_FILES.items():
+        (project / rel).write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
+    return project
+
+
+def test_column_listing_queries_are_answered_offline(tmp_path):
+    project = _column_query_project(tmp_path)
+    (project / "target").mkdir(exist_ok=True)
+    catalog = {
+        "nodes": {
+            "model.cll_offline_fixture.raw_bare": {
+                "metadata": {"name": "raw_bare"},
+                "columns": {
+                    "BARE_TXT": {"name": "BARE_TXT", "type": "TEXT", "index": 2},
+                    "BARE_ID": {"name": "BARE_ID", "type": "INTEGER", "index": 1},
+                },
+            }
+        },
+        "sources": {},
+    }
+    (project / "target" / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "compile-cll",
+            "-s",
+            "copy_show copy_describe",
+            "--project-dir",
+            str(project),
+            "--column-sources",
+            "catalog",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # YAML columns answer SHOW COLUMNS; catalog.json fills the undocumented relation.
+    assert "select id, status_cd from" in " ".join(_compiled(project, "copy_show").split())
+    assert "select bare_id, bare_txt" in " ".join(_compiled(project, "copy_describe").split())
+
+
+def test_other_warehouse_queries_fail_with_a_hint(tmp_path):
+    project = _column_query_project(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["compile-cll", "-s", "other_query", "--project-dir", str(project)]
+    )
+    assert result.exit_code == 1
+    sidecar = json.loads((project / "target" / "cll-compile.json").read_text(encoding="utf-8"))
+    assert any("macro-stubs" in e and "select max(id)" in e for e in sidecar["errors"])
+
+
+STAR_OVER_MODEL = {
+    "models/inner_model.sql": "select 1 as z_id, 'x' as a_txt\n",
+    "models/star_user.sql": "select {{ dbt_utils_star(ref('inner_model')) }} from {{ ref('inner_model') }}\n",
+    "macros/dbt_utils_star.sql": """
+        {% macro dbt_utils_star(rel) %}
+            {% set cols = adapter.get_columns_in_relation(rel) %}
+            {{ return(cols | map(attribute='name') | join(', ') | lower) }}
+        {% endmacro %}
+    """,
+}
+
+
+def test_model_columns_come_from_its_sql_compiled_earlier_in_the_run(tmp_path):
+    project = _project(tmp_path)
+    for rel, body in STAR_OVER_MODEL.items():
+        (project / rel).write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
+    result = CliRunner().invoke(
+        cli, ["compile-cll", "-s", "+star_user", "--project-dir", str(project)]
+    )
+    assert result.exit_code == 0, result.output
+    # No YAML, no warehouse: order and content come from the upstream SQL, not a sorted guess.
+    assert "select z_id, a_txt from" in " ".join(_compiled(project, "star_user").split())
+
+
+def test_live_needs_a_real_profile(tmp_path):
+    project = _project(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["compile-cll", "-s", "facts", "--project-dir", str(project), "--column-sources", "live"],
+    )
+    assert result.exit_code == 1
+    assert "needs a real profile" in result.output or "needs a real profile" in str(result)
+
+
+def test_live_reads_physical_columns_once_and_parse_cll_reuses_them(tmp_path):
+    duckdb = pytest.importorskip("duckdb")
+    project = _column_query_project(tmp_path)
+    db_file = project / "warehouse.duckdb"
+    con = duckdb.connect(str(db_file))
+    # Physical order and content differ from the YAML of `facts` (id, status_cd).
+    con.execute("create table main.facts (status_cd varchar, extra_col int, id int)")
+    con.close()
+    profiles = project / "profiles"
+    profiles.mkdir()
+    (profiles / "profiles.yml").write_text(
+        textwrap.dedent(
+            f"""
+            cll_offline_fixture:
+              target: cll_offline
+              outputs:
+                cll_offline:
+                  type: duckdb
+                  path: {db_file.as_posix()}
+                  schema: main
+            """
+        ),
+        encoding="utf-8",
+    )
+    args = ["--project-dir", str(project), "--profiles-dir", str(profiles)]
+    result = CliRunner().invoke(
+        cli, ["compile-cll", "-s", "copy_show", *args, "--column-sources", "live"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "select status_cd, extra_col, id from" in " ".join(
+        _compiled(project, "copy_show").split()
+    )
+
+    snapshot = json.loads((project / "target" / "cll-columns.json").read_text(encoding="utf-8"))
+    facts = snapshot["nodes"]["model.cll_offline_fixture.facts"]
+    assert list(facts["columns"]) == ["status_cd", "extra_col", "id"]
+
+    # parse-cll answers from the file: no profile, no connection.
+    clear_lineage_caches()
+    out = project / "result.json"
+    parsed = CliRunner().invoke(
+        cli,
+        [
+            "parse-cll",
+            "-s",
+            "copy_show",
+            "--project-dir",
+            str(project),
+            "--column-sources",
+            "live",
+            "-o",
+            str(out),
+        ],
+    )
+    assert parsed.exit_code == 0, parsed.output
+    coverage = json.loads(out.read_text(encoding="utf-8"))["coverage"]
+    assert coverage["column_sources"].get("live", 0) >= 1
+
+
+def test_column_sources_order_is_the_priority(tmp_path):
+    from dbt_osmosis_cll.cll_generator.artifacts.layered_catalog import LayeredCatalogReader
+
+    manifest = {
+        "metadata": {"adapter_type": "duckdb"},
+        "nodes": {},
+        "sources": {
+            "source.pkg.raw.partly": {
+                "name": "partly",
+                "identifier": "partly",
+                "schema": "raw",
+                "database": "db",
+                "columns": {"id": {"name": "id", "description": "kept"}},
+            }
+        },
+    }
+    catalog = {
+        "nodes": {},
+        "sources": {
+            "source.pkg.raw.partly": {
+                "metadata": {"name": "partly"},
+                "columns": {"Z_NEW": {"type": "int"}, "ID": {"type": "int"}},
+            }
+        },
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (tmp_path / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+
+    first = LayeredCatalogReader(
+        str(tmp_path / "manifest.json"),
+        sources=["catalog", "manifest"],
+        catalog_path=str(tmp_path / "catalog.json"),
+    )
+    first.load()
+    columns = first.get_models_nodes()["source.pkg.raw.partly"].columns
+    assert list(columns) == ["z_new", "id"]
+    assert columns["id"].description == "kept"
+    assert first.column_origin["source.pkg.raw.partly"] == "catalog"
+
+    yaml_first = LayeredCatalogReader(
+        str(tmp_path / "manifest.json"),
+        sources=["manifest", "catalog"],
+        catalog_path=str(tmp_path / "catalog.json"),
+    )
+    yaml_first.load()
+    assert list(yaml_first.get_models_nodes()["source.pkg.raw.partly"].columns) == ["id"]
+
+
+def test_documented_but_not_produced_column_does_not_outrank_a_select_alias(tmp_path):
+    project = _project(tmp_path)
+    (project / "models" / "stale.yml").write_text(
+        textwrap.dedent(
+            """
+            version: 2
+            models:
+              - name: facts
+                columns:
+                  - name: id
+                  - name: stale_ts
+            """
+        ),
+        encoding="utf-8",
+    )
+    (project / "models" / "alias_user.sql").write_text(
+        "select f.id, (select max(c.created_ts) from {{ ref('load_config') }} c) as stale_ts\n"
+        "from {{ ref('facts') }} as f\nwhere stale_ts is not null\n",
+        encoding="utf-8",
+    )
+    compiled = CliRunner().invoke(
+        cli, ["compile-cll", "-s", "+alias_user", "--project-dir", str(project)]
+    )
+    assert compiled.exit_code == 0, compiled.output
+    clear_lineage_caches()
+    out = project / "result.json"
+    parsed = CliRunner().invoke(
+        cli, ["parse-cll", "-s", "+alias_user", "--project-dir", str(project), "-o", str(out)]
+    )
+    assert parsed.exit_code == 0, parsed.output
+    result = json.loads(out.read_text(encoding="utf-8"))
+    filters = [u for u in result["usages"] if u["model"] == "alias_user" and u["usage"] == "filter"]
+    assert {(u["source_model"], u["source_column"]) for u in filters} == {
+        ("load_config", "created_ts")
+    }
+
+
+def test_macro_over_an_unknown_column_list_still_yields_lineage(tmp_path):
+    project = _project(tmp_path)
+    (project / "macros" / "hash_list.sql").write_text(
+        textwrap.dedent(
+            """
+            {% macro hash_list(cols) %}
+                {%- set parts = [] -%}
+                {%- for c in cols %}{% do parts.append(c.name) %}{% endfor -%}
+                IFF({{ parts | join(" || ") }} = '', NULL, SHA1(CONCAT({{ parts | join(", ") }})))
+            {%- endmacro %}
+            """
+        ),
+        encoding="utf-8",
+    )
+    (project / "models" / "sources.yml").write_text(
+        textwrap.dedent(
+            """
+            version: 2
+            sources:
+              - name: ext
+                schema: main
+                tables:
+                  - name: bare_src
+            """
+        ),
+        encoding="utf-8",
+    )
+    (project / "models" / "over_bare.sql").write_text(
+        "{% set cols = adapter.get_columns_in_relation(source('ext', 'bare_src')) %}\n"
+        "select new.a_ts as loaded_ts, {{ hash_list(cols) }} as hashdiff,\n"
+        "{{ dbt_utils_like_star() }}\nfrom {{ source('ext', 'bare_src') }} as new\n",
+        encoding="utf-8",
+    )
+    (project / "macros" / "star_like.sql").write_text(
+        "{% macro dbt_utils_like_star() %}new.a_ts{% endmacro %}\n", encoding="utf-8"
+    )
+    compiled = CliRunner().invoke(
+        cli, ["compile-cll", "-s", "over_bare", "--project-dir", str(project)]
+    )
+    assert compiled.exit_code == 0, compiled.output
+    clear_lineage_caches()
+    out = project / "result.json"
+    parsed = CliRunner().invoke(
+        cli, ["parse-cll", "-s", "over_bare", "--project-dir", str(project), "-o", str(out)]
+    )
+    assert parsed.exit_code == 0, parsed.output
+    rows = {r["column"]: r for r in json.loads(out.read_text(encoding="utf-8"))["results"]}
+    assert rows["loaded_ts"]["progenitors"] == [["bare_src", "a_ts"]]
+    assert "cll_unknown_columns" not in rows
+    assert rows["hashdiff"]["progenitors"] == []
